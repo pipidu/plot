@@ -278,6 +278,31 @@ impl Table {
         self.ensure_rows(n);
     }
 
+    /// 在 `index` 处插入一行。超出末尾时加在最后。没有列时不做任何事。
+    pub fn insert_row(&mut self, index: usize) {
+        if self.columns.is_empty() {
+            return;
+        }
+        let n = self.nrows();
+        self.ensure_rows(n);
+        let index = index.min(self.nrows());
+        for column in &mut self.columns {
+            column.normalize();
+            column.numbers.insert(index, None);
+            column.texts.insert(index, String::new());
+        }
+    }
+
+    /// 在 `index` 处插入一列，并补齐到当前行数。
+    pub fn insert_column(&mut self, index: usize, name: impl Into<String>, mode: ColumnMode) -> usize {
+        let n = self.nrows();
+        let mut column = Column::new(name, mode);
+        column.resize(n);
+        let index = index.min(self.columns.len());
+        self.columns.insert(index, column);
+        index
+    }
+
     pub fn remove_row(&mut self, row: usize) {
         for column in &mut self.columns {
             column.normalize();
@@ -362,5 +387,21 @@ mod tests {
         table.sort_by(0, true);
         assert_eq!(table.columns[0].numbers, vec![Some(1.0), Some(2.0), Some(3.0)]);
         assert_eq!(table.columns[1].numbers, vec![Some(10.0), Some(20.0), Some(30.0)]);
+    }
+
+    #[test]
+    fn insert_row_and_column_keep_alignment() {
+        let mut table = Table::new(TableId(1), "t");
+        table.columns.clear();
+        table.add_numeric_column("X", ColumnMode::X, &[1.0, 2.0]);
+        table.insert_row(1);
+        assert_eq!(table.columns[0].numbers, vec![Some(1.0), None, Some(2.0)]);
+        table.insert_column(0, "A", ColumnMode::Y);
+        assert_eq!(table.columns[0].name, "A");
+        assert_eq!(table.columns[0].len(), 3);
+        assert_eq!(table.columns[1].name, "X");
+        assert_eq!(table.columns[1].numbers[2], Some(2.0));
+        table.insert_row(99);
+        assert_eq!(table.nrows(), 4);
     }
 }

@@ -11,7 +11,7 @@ mod scene;
 mod surface;
 mod svg;
 
-pub use interact::{data_to_screen, nearest_point, pan_limits, screen_to_data, zoom_limits, NearestPoint};
+pub use interact::{data_to_screen, nearest_curve, nearest_point, pan_limits, screen_to_data, zoom_limits, CurveHit, NearestPoint};
 pub use paint::paint;
 pub use raster::{prepare_font, to_png, to_rgba, GlyphFont};
 pub use render::render;

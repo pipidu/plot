@@ -4,11 +4,7 @@ pub const APP_TITLE: &str = "SciPlot";
 
 pub const FILE: &str = "文件";
 pub const EDIT: &str = "编辑";
-pub const TABLE: &str = "表格";
-pub const MATRIX: &str = "矩阵";
-pub const PLOT: &str = "绘图";
-pub const ANALYSIS: &str = "分析";
-pub const FORMAT: &str = "格式";
+pub const SETTINGS: &str = "设置";
 pub const WINDOW: &str = "窗口";
 pub const HELP: &str = "帮助";
 

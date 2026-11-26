@@ -4,15 +4,15 @@ use std::path::{Path, PathBuf};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
-    demo_project, export_csv, import_csv, AnnotationKind, ColumnMode, CurveKind, Graph, GraphId, History, Layer,
-    MatrixId, NoteId, Project, SurfaceMode, SurfaceSource, TableId,
+    demo_project, export_csv, import_csv, AnnotationKind, CurveKind, Graph, GraphId, History, MatrixId, NoteId,
+    Project, SurfaceMode, SurfaceSource, TableId,
 };
 use sciplot_plot::{
-    data_to_screen, nearest_point, pan_limits, render, screen_to_data, to_png, to_rgba, to_svg, zoom_limits,
-    GlyphFont, LayerFrame, LayerView, Scene,
+    data_to_screen, nearest_curve, nearest_point, pan_limits, render, screen_to_data, to_png, to_rgba, to_svg,
+    zoom_limits, GlyphFont, LayerFrame, LayerView, Scene,
 };
 
-use crate::dialogs::{self, number_text};
+use crate::dialogs;
 use crate::fonts;
 use crate::i18n;
 use crate::ops;
@@ -155,13 +155,22 @@ pub enum Dialog {
         mode: SurfaceMode,
     },
     AddCurve { graph: GraphId, table: TableId, kind: CurveKind },
+    Prefs(crate::prefs::Prefs),
 }
 
-struct XSel {
-    graph: GraphId,
+pub(crate) struct XSel {
+    pub(crate) graph: GraphId,
     layer: usize,
-    x0: f64,
-    x1: f64,
+    pub(crate) x0: f64,
+    pub(crate) x1: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PlotHit {
+    Curve { graph: GraphId, layer: usize, curve: usize },
+    Annotation { graph: GraphId, layer: usize, id: u64 },
+    Layer { graph: GraphId, layer: usize },
+    Surface { graph: GraphId },
 }
 
 struct AnnDrag {
@@ -183,20 +192,23 @@ pub struct SciPlotApp {
     pub dirty: bool,
     recent: Vec<PathBuf>,
     focus: Option<Tab>,
-    views: HashMap<GraphId, Vec<LayerView>>,
+    pub(crate) views: HashMap<GraphId, Vec<LayerView>>,
     show_tree: bool,
     show_log: bool,
-    reader: bool,
-    xsel: Option<XSel>,
+    pub(crate) reader: bool,
+    pub(crate) xsel: Option<XSel>,
     ann_drag: Option<AnnDrag>,
-    selected_ann: Option<(GraphId, usize, u64)>,
-    selected_column: Option<(TableId, usize)>,
+    pub(crate) selected_ann: Option<(GraphId, usize, u64)>,
+    pub(crate) selected_column: Option<(TableId, usize)>,
     active_layer: usize,
-    curve: usize,
+    pub(crate) curve: usize,
     pushed_edit: bool,
     font: Vec<u8>,
     glyphs: Option<sciplot_plot::GlyphFont>,
     frames: u32,
+    pub(crate) prefs: crate::prefs::Prefs,
+    pub(crate) plot_hit: Option<PlotHit>,
+    pending_tabs: Vec<Tab>,
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -226,7 +238,7 @@ impl SciPlotApp {
     fn empty(project: Project) -> Self {
         let mut dock = DockState::new(Vec::<Tab>::new());
         chinese_dock(&mut dock);
-        Self {
+        let mut app = Self {
             project,
             history: History::new(),
             dock,
@@ -247,10 +259,28 @@ impl SciPlotApp {
             active_layer: 0,
             curve: 0,
             pushed_edit: false,
-            font: fonts::load_bytes(),
+            prefs: crate::prefs::load(),
+            plot_hit: None,
+            font: Vec::new(),
             glyphs: None,
             frames: 0,
-        }
+            pending_tabs: Vec::new(),
+        };
+        app.reload_font_silent();
+        app
+    }
+
+    fn reload_font_silent(&mut self) {
+        self.font = fonts::load_chosen(self.prefs.font_request()).0;
+        self.glyphs = None;
+    }
+
+    pub(crate) fn reload_font(&mut self, ctx: &egui::Context) -> bool {
+        let (bytes, ok) = fonts::load_chosen(self.prefs.font_request());
+        self.font = bytes;
+        self.glyphs = None;
+        fonts::install(ctx, &self.font);
+        ok
     }
 
     pub fn edit<T>(&mut self, label: &str, f: impl FnOnce(&mut Project) -> Result<T, String>) -> Option<T> {
@@ -270,18 +300,28 @@ impl SciPlotApp {
     }
 
     pub fn open_tab(&mut self, tab: Tab) {
-        if let Some(found) = self.dock.find_tab(&tab) {
-            self.dock.set_active_tab(found);
-            self.dock.set_focused_node_and_surface((found.0, found.1));
-        } else {
-            self.dock.push_to_focused_leaf(tab.clone());
+        // 停靠区绘制时 `dock` 被临时换走，这里先排队，等换回来再真正打开。
+        self.focus = Some(tab.clone());
+        self.pending_tabs.push(tab);
+    }
+
+    fn flush_tabs(&mut self) {
+        let tabs = std::mem::take(&mut self.pending_tabs);
+        for tab in tabs {
+            if self.dock.find_tab(&tab).is_none() {
+                self.dock.push_to_focused_leaf(tab.clone());
+            }
+            if let Some(found) = self.dock.find_tab(&tab) {
+                self.dock.set_active_tab(found);
+                self.dock.set_focused_node_and_surface((found.0, found.1));
+            }
         }
-        self.focus = Some(tab);
     }
 
     fn rebuild_dock(&mut self, demo: bool) {
         self.dock = DockState::new(Vec::<Tab>::new());
         chinese_dock(&mut self.dock);
+        self.pending_tabs.clear();
         if demo {
             if let Some(table) = self.project.tables.iter().find(|t| t.name == "三角函数").map(|t| t.id) {
                 self.open_tab(Tab::Table(table));
@@ -312,14 +352,7 @@ impl SciPlotApp {
         }
     }
 
-    fn active_matrix(&self) -> Option<MatrixId> {
-        match self.focus {
-            Some(Tab::Matrix(id)) => Some(id),
-            _ => self.project.matrices.first().map(|m| m.id),
-        }
-    }
-
-    fn active_graph(&self) -> Option<GraphId> {
+    pub(crate) fn active_graph(&self) -> Option<GraphId> {
         match self.focus {
             Some(Tab::Graph(id)) => Some(id),
             _ => self.project.graphs.iter().find(|g| g.surface.is_none()).map(|g| g.id),
@@ -442,7 +475,7 @@ impl SciPlotApp {
         Some(render(&self.project, &graph, &views, 960.0 * scale, 640.0 * scale, scale))
     }
 
-    fn copy_png(&mut self) {
+    pub(crate) fn copy_png(&mut self) {
         let Some(scene) = self.scene_of_active("144") else {
             self.status = "没有可复制的图形".into();
             return;
@@ -463,7 +496,7 @@ impl SciPlotApp {
         }
     }
 
-    fn copy_svg(&mut self) {
+    pub(crate) fn copy_svg(&mut self) {
         let Some(scene) = self.scene_of_active("96") else {
             self.status = "没有可复制的图形".into();
             return;
@@ -490,48 +523,41 @@ impl SciPlotApp {
         }
     }
 
-    fn plot_kind(&mut self, kind: CurveKind) {
-        if matches!(kind, CurveKind::Heatmap | CurveKind::Contour) {
-            self.plot_matrix(kind);
-            return;
-        }
-        let Some(table) = self.active_table() else {
-            self.status = "先打开或选中一张表格".into();
-            return;
-        };
-        if let Some(id) = self.edit("绘图", |project| project.plot_table(table, kind)) {
+    pub(crate) fn plot_table_as(&mut self, table: TableId, kind: CurveKind) {
+        let prefs = self.prefs.clone();
+        if let Some(id) = self.edit("绘图", |project| {
+            let id = project.plot_table(table, kind)?;
+            prefs.apply_new_graph(project, id);
+            Ok(id)
+        }) {
             self.open_tab(Tab::Graph(id));
             self.status = format!("已新建{}", kind.label());
         }
     }
 
-    fn plot_matrix(&mut self, kind: CurveKind) {
-        let Some(matrix) = self.active_matrix() else {
-            self.status = "热力图和等高线需要一个矩阵".into();
-            return;
-        };
-        if let Some(id) = self.edit("绘图", |project| project.plot_matrix(matrix, kind)) {
+    pub(crate) fn plot_matrix_as(&mut self, matrix: MatrixId, kind: CurveKind) {
+        let prefs = self.prefs.clone();
+        if let Some(id) = self.edit("绘图", |project| {
+            let id = project.plot_matrix(matrix, kind)?;
+            prefs.apply_new_graph(project, id);
+            Ok(id)
+        }) {
             self.open_tab(Tab::Graph(id));
             self.status = format!("已新建{}", kind.label());
         }
     }
 
-    fn plot_surface(&mut self, mode: SurfaceMode) {
-        let Some(matrix) = self.active_matrix() else {
-            self.status = "先选中一个矩阵，或用函数曲面".into();
-            return;
-        };
+    pub(crate) fn plot_surface_as(&mut self, matrix: MatrixId, mode: SurfaceMode) {
+        let prefs = self.prefs.clone();
         let title = self.project.matrix(matrix).map(|m| m.name.clone()).unwrap_or_else(|| "三维图".into());
-        if let Some(id) = self.edit("三维图", |project| Ok(project.plot_surface(SurfaceSource::Matrix(matrix), mode, &title))) {
+        if let Some(id) = self.edit("三维图", |project| {
+            let id = project.plot_surface(SurfaceSource::Matrix(matrix), mode, &title);
+            prefs.apply_new_graph(project, id);
+            Ok(id)
+        }) {
             self.open_tab(Tab::Graph(id));
             self.status = format!("已新建三维{}", mode.label());
         }
-    }
-
-    fn require_graph(&mut self) -> Option<(GraphId, usize)> {
-        let graph = self.active_graph()?;
-        let layer = self.layer_index(graph);
-        Some((graph, layer))
     }
 
     fn tab_title(&self, tab: &Tab) -> String {
@@ -567,11 +593,13 @@ impl eframe::App for SciPlotApp {
         if self.show_log {
             egui::TopBottomPanel::bottom("log").resizable(true).default_height(120.0).show(ctx, |ui| log_view(self, ui));
         }
+        self.flush_tabs();
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut dock = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
             DockArea::new(&mut dock).show_inside(ui, &mut Viewer { app: self });
             self.dock = dock;
         });
+        self.flush_tabs();
         dialogs::show(self, ctx);
     }
 }
@@ -602,11 +630,11 @@ fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     egui::menu::bar(ui, |ui| {
         ui.menu_button(i18n::FILE, |ui| file_menu(app, ui));
         ui.menu_button(i18n::EDIT, |ui| edit_menu(app, ui));
-        ui.menu_button(i18n::TABLE, |ui| table_menu(app, ui));
-        ui.menu_button(i18n::MATRIX, |ui| matrix_menu(app, ui));
-        ui.menu_button(i18n::PLOT, |ui| plot_menu(app, ui));
-        ui.menu_button(i18n::ANALYSIS, |ui| analysis_menu(app, ui));
-        ui.menu_button(i18n::FORMAT, |ui| format_menu(app, ui));
+        ui.menu_button(i18n::SETTINGS, |ui| {
+            if clicked(ui, "默认样式与字体…", "") {
+                app.dialog = Some(Dialog::Prefs(app.prefs.clone()));
+            }
+        });
         ui.menu_button(i18n::WINDOW, |ui| window_menu(app, ui));
         ui.menu_button(i18n::HELP, |ui| {
             if clicked(ui, "公式说明", "") {
@@ -617,6 +645,10 @@ fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+pub(crate) fn clicked_menu(ui: &mut egui::Ui, label: &str) -> bool {
+    clicked(ui, label, "")
 }
 
 fn clicked(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
@@ -643,25 +675,6 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     }
     if clicked(ui, "另存为…", "") {
         app.dialog = Some(Dialog::Path { action: PathAction::SaveAs, path: format!("{}.splot", app.project.name), extra: String::new() });
-    }
-    ui.separator();
-    if clicked(ui, "导入 CSV…", "") {
-        browse_or_dialog(app, PathAction::ImportCsv, "数据.csv");
-    }
-    if clicked(ui, "导出 CSV…", "") {
-        app.dialog = Some(Dialog::Path { action: PathAction::ExportCsv, path: "数据.csv".into(), extra: String::new() });
-    }
-    if clicked(ui, "导出 PNG…", "") {
-        app.dialog = Some(Dialog::Path { action: PathAction::ExportPng, path: "图形.png".into(), extra: "144".into() });
-    }
-    if clicked(ui, "导出 SVG…", "") {
-        app.dialog = Some(Dialog::Path { action: PathAction::ExportSvg, path: "图形.svg".into(), extra: String::new() });
-    }
-    if clicked(ui, "复制 PNG", "") {
-        app.copy_png();
-    }
-    if clicked(ui, "复制 SVG", "") {
-        app.copy_svg();
     }
     ui.separator();
     ui.menu_button("最近文件", |ui| {
@@ -696,329 +709,12 @@ fn edit_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     }
 }
 
-fn table_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    if clicked(ui, "新建表格", "") {
-        if let Some(id) = app.edit("新建表格", |project| Ok(project.new_table("表格"))) {
-            app.open_tab(Tab::Table(id));
-        }
-    }
-    if clicked(ui, "加列", "") {
-        let id = app.active_table();
-        if let Some(id) = id {
-            app.edit("加列", |project| {
-                let table = project.table_mut(id).ok_or("找不到表格")?;
-                let n = table.columns.len() + 1;
-                table.add_column(format!("C{n}"), ColumnMode::Y);
-                Ok(())
-            });
-        }
-    }
-    if clicked(ui, "加行", "") {
-        if let Some(id) = app.active_table() {
-            app.edit("加行", |project| {
-                project.table_mut(id).ok_or("找不到表格")?.add_row();
-                Ok(())
-            });
-        }
-    }
-    if clicked(ui, "删除列", "") {
-        if let Some((id, column)) = app.selected_column.or_else(|| app.active_table().map(|id| (id, 0))) {
-            app.edit("删除列", |project| {
-                if !project.table_mut(id).ok_or("找不到表格")?.remove_column(column) {
-                    return Err("没有这一列".into());
-                }
-                Ok(())
-            });
-        }
-    }
-    if clicked(ui, "删除末行", "") {
-        if let Some(id) = app.active_table() {
-            app.edit("删除末行", |project| {
-                let table = project.table_mut(id).ok_or("找不到表格")?;
-                let n = table.nrows();
-                if n == 0 {
-                    return Err("表是空的".into());
-                }
-                table.remove_row(n - 1);
-                Ok(())
-            });
-        }
-    }
-    if clicked(ui, "列公式…", "") {
-        if let Some((table, column)) = app.selected_column.or_else(|| app.active_table().map(|id| (id, 0))) {
-            let expr = app.project.table(table).and_then(|t| t.columns.get(column)).map(|c| c.formula.clone()).unwrap_or_default();
-            app.dialog = Some(Dialog::Formula { table, column, expr });
-        }
-    }
-    if clicked(ui, "重算公式", "") {
-        if let Some(id) = app.active_table() {
-            let formulas: Vec<(usize, String)> = app
-                .project
-                .table(id)
-                .map(|t| t.columns.iter().enumerate().filter(|(_, c)| !c.formula.is_empty()).map(|(i, c)| (i, c.formula.clone())).collect())
-                .unwrap_or_default();
-            app.edit("重算公式", |project| {
-                let table = project.table_mut(id).ok_or("找不到表格")?;
-                for (index, formula) in &formulas {
-                    sciplot_core::apply_formula(table, *index, formula)?;
-                }
-                Ok(())
-            });
-            app.status = "已重算列公式".into();
-        }
-    }
-    if clicked(ui, "排序…", "") {
-        if let Some(table) = app.active_table() {
-            let column = app.selected_column.filter(|(id, _)| *id == table).map(|(_, c)| c).unwrap_or(0);
-            app.dialog = Some(Dialog::Sort { table, column, ascending: true });
-        }
-    }
-    if clicked(ui, "统计", "") {
-        if let Some((table, column)) = app.selected_column.or_else(|| app.active_table().map(|id| (id, 0))) {
-            match ops::column_stats(&app.project, table, column) {
-                Ok(text) => app.dialog = Some(Dialog::Message(text)),
-                Err(err) => app.status = err,
-            }
-        }
-    }
-    if clicked(ui, "列类型与角色…", "") {
-        if let Some((table, column)) = app.selected_column.or_else(|| app.active_table().map(|id| (id, 0))) {
-            app.dialog = Some(Dialog::ColumnProps { table, column });
-        }
-    }
-}
 
-fn matrix_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    if clicked(ui, "新建矩阵…", "") {
-        app.dialog = Some(Dialog::NewMatrix { name: "矩阵".into(), rows: "10".into(), cols: "10".into() });
-    }
-    if clicked(ui, "公式填充…", "") {
-        if let Some(matrix) = app.active_matrix() {
-            let expr = app.project.matrix(matrix).map(|m| m.formula.clone()).unwrap_or_default();
-            app.dialog = Some(Dialog::MatrixFormula { matrix, expr });
-        }
-    }
-    if clicked(ui, "转置", "") {
-        if let Some(matrix) = app.active_matrix() {
-            if let Some(id) = app.edit("转置", |project| ops::transpose_into_new(project, matrix)) {
-                app.open_tab(Tab::Matrix(id));
-            }
-        }
-    }
-    if clicked(ui, "求逆", "") {
-        if let Some(matrix) = app.active_matrix() {
-            if let Some(id) = app.edit("求逆", |project| ops::invert_into_new(project, matrix)) {
-                app.open_tab(Tab::Matrix(id));
-            }
-        }
-    }
-    if clicked(ui, "转为表格", "") {
-        if let Some(matrix) = app.active_matrix() {
-            if let Some(id) = app.edit("矩阵转表", |project| project.table_from_matrix(matrix)) {
-                app.open_tab(Tab::Table(id));
-            }
-        }
-    }
-    if clicked(ui, "从表格生成", "") {
-        if let Some(table) = app.active_table() {
-            if let Some(id) = app.edit("表转矩阵", |project| project.matrix_from_table(table)) {
-                app.open_tab(Tab::Matrix(id));
-            }
-        }
-    }
-}
-
-fn plot_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    for kind in [
-        CurveKind::Line,
-        CurveKind::Scatter,
-        CurveKind::LineSymbol,
-        CurveKind::Steps,
-        CurveKind::Bars,
-        CurveKind::HorizontalBars,
-        CurveKind::Histogram,
-        CurveKind::Area,
-        CurveKind::ErrorBars,
-        CurveKind::BoxPlot,
-        CurveKind::Pie,
-        CurveKind::Vector,
-        CurveKind::Heatmap,
-        CurveKind::Contour,
-    ] {
-        if clicked(ui, kind.label(), "") {
-            app.plot_kind(kind);
-        }
-    }
-    ui.separator();
-    if clicked(ui, "添加到当前图…", "") {
-        if let Some(graph) = app.active_graph() {
-            let table = app.active_table().unwrap_or(TableId(0));
-            app.dialog = Some(Dialog::AddCurve { graph, table, kind: CurveKind::Line });
-        }
-    }
-    if clicked(ui, "新建图层", "") {
-        if let Some(graph) = app.active_graph() {
-            app.edit("新建图层", |project| {
-                let graph = project.graph_mut(graph).ok_or("找不到图形")?;
-                graph.layers.push(Layer::default());
-                graph.reflow_layers();
-                Ok(())
-            });
-        }
-    }
-    if clicked(ui, "删除图层", "") {
-        if let Some(graph) = app.active_graph() {
-            let layer = app.layer_index(graph);
-            app.edit("删除图层", |project| {
-                let graph = project.graph_mut(graph).ok_or("找不到图形")?;
-                if graph.layers.len() <= 1 {
-                    return Err("至少保留一个图层".into());
-                }
-                graph.layers.remove(layer.min(graph.layers.len() - 1));
-                graph.reflow_layers();
-                Ok(())
-            });
-        }
-    }
-    ui.separator();
-    if clicked(ui, "三维曲面", "") {
-        app.plot_surface(SurfaceMode::Surface);
-    }
-    if clicked(ui, "三维线框", "") {
-        app.plot_surface(SurfaceMode::Wireframe);
-    }
-    if clicked(ui, "三维散点", "") {
-        app.plot_surface(SurfaceMode::Scatter);
-    }
-    if clicked(ui, "函数曲线…", "") {
-        let graph = app.active_graph();
-        app.dialog = Some(Dialog::Function {
-            graph,
-            layer: graph.map(|id| app.layer_index(id)).unwrap_or(0),
-            expr: "sin(x)".into(),
-            xmin: "0".into(),
-            xmax: "6.2832".into(),
-            ymin: "-3.14".into(),
-            ymax: "3.14".into(),
-            samples: "200".into(),
-            surface: false,
-            mode: SurfaceMode::Surface,
-        });
-    }
-    if clicked(ui, "函数曲面…", "") {
-        app.dialog = Some(Dialog::Function {
-            graph: None,
-            layer: 0,
-            expr: "sin(x)*cos(y)".into(),
-            xmin: "-3.14".into(),
-            xmax: "3.14".into(),
-            ymin: "-3.14".into(),
-            ymax: "3.14".into(),
-            samples: "40".into(),
-            surface: true,
-            mode: SurfaceMode::Surface,
-        });
-    }
-}
-
-fn analysis_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    let Some((graph, layer)) = app.require_graph() else {
-        ui.label("先打开一张图");
-        return;
-    };
-    let curve = app.curve;
-    if clicked(ui, "线性拟合…", "") {
-        app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Linear));
-    }
-    if clicked(ui, "多项式拟合…", "") {
-        app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Poly));
-    }
-    if clicked(ui, "指数拟合…", "") {
-        app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Exp));
-    }
-    if clicked(ui, "高斯拟合…", "") {
-        app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Gauss));
-    }
-    if clicked(ui, "洛伦兹拟合…", "") {
-        app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Lorentz));
-    }
-    if clicked(ui, "自定义拟合…", "") {
-        app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Custom));
-    }
-    ui.separator();
-    if clicked(ui, "微分", "") {
-        if let Some((table, gid)) = app.edit("微分", |project| {
-            let table = ops::derivative_table(project, graph, layer, curve)?;
-            let gid = project.plot_table(table, CurveKind::Line)?;
-            Ok((table, gid))
-        }) {
-            app.open_tab(Tab::Table(table));
-            app.open_tab(Tab::Graph(gid));
-        }
-    }
-    if clicked(ui, "积分…", "") {
-        app.dialog = Some(range_dialog(graph, layer, curve, RangeOp::Integral));
-    }
-    if clicked(ui, "插值…", "") {
-        app.dialog = Some(range_dialog(graph, layer, curve, RangeOp::Interp));
-    }
-    if clicked(ui, "平滑…", "") {
-        app.dialog = Some(range_dialog(graph, layer, curve, RangeOp::Smooth));
-    }
-    if clicked(ui, "FFT", "") {
-        if let Some((table, gid)) = app.edit("FFT", |project| {
-            let table = ops::fft_table(project, graph, layer, curve)?;
-            let gid = project.plot_table(table, CurveKind::Line)?;
-            Ok((table, gid))
-        }) {
-            app.open_tab(Tab::Table(table));
-            app.open_tab(Tab::Graph(gid));
-        }
-    }
-    if clicked(ui, "FFT 滤波…", "") {
-        app.dialog = Some(range_dialog(graph, layer, curve, RangeOp::Filter));
-    }
-    if clicked(ui, "相关性", "") {
-        if let Some(table) = app.active_table() {
-            match ops::correlation_report(&app.project, table) {
-                Ok(text) => {
-                    app.project.log_line(&text);
-                    app.dialog = Some(Dialog::Message(text));
-                }
-                Err(err) => app.status = err,
-            }
-        }
-    }
-    ui.separator();
-    if clicked(ui, "求交点…", "") {
-        let (xmin, xmax) = app
-            .xsel
-            .as_ref()
-            .filter(|sel| sel.graph == graph)
-            .map(|sel| (number_text(Some(sel.x0.min(sel.x1))), number_text(Some(sel.x0.max(sel.x1)))))
-            .unwrap_or_default();
-        app.dialog = Some(Dialog::Intersect {
-            graph,
-            layer,
-            curve_a: 0,
-            curve_b: 1,
-            kind_a: LineChoice::Curve,
-            kind_b: LineChoice::Curve,
-            value_a: "0".into(),
-            value_b: "0".into(),
-            smooth: false,
-            xmin,
-            xmax,
-            tol: "1e-8".into(),
-        });
-    }
-}
-
-fn fit_dialog(graph: GraphId, layer: usize, curve: usize, which: FitWhich) -> Dialog {
+pub(crate) fn fit_dialog(graph: GraphId, layer: usize, curve: usize, which: FitWhich) -> Dialog {
     Dialog::Fit { graph, layer, curve, which, degree: "2".into(), expr: "a*x+b".into(), initial: "a=1, b=0".into() }
 }
 
-fn range_dialog(graph: GraphId, layer: usize, curve: usize, op: RangeOp) -> Dialog {
+pub(crate) fn range_dialog(graph: GraphId, layer: usize, curve: usize, op: RangeOp) -> Dialog {
     Dialog::Range {
         graph,
         layer,
@@ -1032,74 +728,6 @@ fn range_dialog(graph: GraphId, layer: usize, curve: usize, op: RangeOp) -> Dial
         order: "2".into(),
         sg: false,
         highpass: false,
-    }
-}
-
-fn format_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    let Some(graph) = app.active_graph() else {
-        ui.label("先打开一张图");
-        return;
-    };
-    let layer = app.layer_index(graph);
-    if clicked(ui, "坐标轴…", "") {
-        if let Some(axis) = app.project.graph(graph).and_then(|g| g.layers.get(layer)).map(|l| l.x_axis.clone()) {
-            app.dialog = Some(Dialog::Axis { graph, layer, y_axis: false, min: number_text(axis.min), max: number_text(axis.max), axis });
-        }
-    }
-    if clicked(ui, "纵轴…", "") {
-        if let Some(axis) = app.project.graph(graph).and_then(|g| g.layers.get(layer)).map(|l| l.y_axis.clone()) {
-            app.dialog = Some(Dialog::Axis { graph, layer, y_axis: true, min: number_text(axis.min), max: number_text(axis.max), axis });
-        }
-    }
-    if clicked(ui, "图例…", "") {
-        if let Some(legend) = app.project.graph(graph).and_then(|g| g.layers.get(layer)).map(|l| l.legend.clone()) {
-            app.dialog = Some(Dialog::Legend { graph, layer, legend });
-        }
-    }
-    if clicked(ui, "标题…", "") {
-        if let Some(layer_ref) = app.project.graph(graph).and_then(|g| g.layers.get(layer)) {
-            app.dialog = Some(Dialog::Title { graph, layer, title: layer_ref.title.clone(), size: format!("{}", layer_ref.title_size) });
-        }
-    }
-    if clicked(ui, "曲线样式…", "") {
-        let curve = app.curve;
-        if let Some(curve_ref) = app.project.graph(graph).and_then(|g| g.layers.get(layer)).and_then(|l| l.curves.get(curve)) {
-            app.dialog = Some(Dialog::Style { graph, layer, curve, style: curve_ref.style.clone(), name: curve_ref.name.clone() });
-        } else {
-            app.status = "这一层没有曲线".into();
-        }
-    }
-    if clicked(ui, "图层位置…", "") {
-        if let Some(frame) = app.project.graph(graph).and_then(|g| g.layers.get(layer)).map(|l| l.frame) {
-            app.dialog = Some(Dialog::Frame {
-                graph,
-                layer,
-                x: frame.x.to_string(),
-                y: frame.y.to_string(),
-                w: frame.w.to_string(),
-                h: frame.h.to_string(),
-            });
-        }
-    }
-    if clicked(ui, "文本标注…", "") {
-        app.dialog = Some(Dialog::TextAnn { graph, layer, x: "0".into(), y: "0".into(), text: "标注".into() });
-    }
-    if clicked(ui, "箭头…", "") {
-        app.dialog = Some(Dialog::ArrowAnn { graph, layer, x1: "0".into(), y1: "0".into(), x2: "1".into(), y2: "1".into(), line_only: false });
-    }
-    if clicked(ui, "线段…", "") {
-        app.dialog = Some(Dialog::ArrowAnn { graph, layer, x1: "0".into(), y1: "0".into(), x2: "1".into(), y2: "1".into(), line_only: true });
-    }
-    if clicked(ui, "删除选中标注", "") {
-        delete_selected_annotation(app);
-    }
-    if clicked(ui, "数据读取器", "") {
-        app.reader = !app.reader;
-        app.status = if app.reader { "数据读取器已打开".into() } else { "数据读取器已关闭".into() };
-    }
-    if clicked(ui, "清除缩放", "") {
-        app.views.remove(&graph);
-        app.status = "已恢复自动范围".into();
     }
 }
 
@@ -1131,34 +759,46 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         let matrices: Vec<(MatrixId, String)> = app.project.matrices.iter().map(|m| (m.id, m.name.clone())).collect();
         let graphs: Vec<(GraphId, String)> = app.project.graphs.iter().map(|g| (g.id, g.name.clone())).collect();
         let notes: Vec<(NoteId, String)> = app.project.notes.iter().map(|n| (n.id, n.name.clone())).collect();
-        egui::CollapsingHeader::new("表格").default_open(true).show(ui, |ui| {
+        let tables_header = egui::CollapsingHeader::new("表格").default_open(true).show(ui, |ui| {
             for (id, name) in tables {
-                if ui.selectable_label(app.focus == Some(Tab::Table(id)), name).clicked() {
+                let response = ui.selectable_label(app.focus == Some(Tab::Table(id)), name);
+                if response.clicked() {
                     app.open_tab(Tab::Table(id));
                 }
+                response.context_menu(|ui| crate::context::tree_table(app, ui, id));
             }
         });
-        egui::CollapsingHeader::new("矩阵").default_open(true).show(ui, |ui| {
+        tables_header.header_response.context_menu(|ui| crate::context::section_tables(app, ui));
+        let matrices_header = egui::CollapsingHeader::new("矩阵").default_open(true).show(ui, |ui| {
             for (id, name) in matrices {
-                if ui.selectable_label(app.focus == Some(Tab::Matrix(id)), name).clicked() {
+                let response = ui.selectable_label(app.focus == Some(Tab::Matrix(id)), name);
+                if response.clicked() {
                     app.open_tab(Tab::Matrix(id));
                 }
+                response.context_menu(|ui| crate::context::tree_matrix(app, ui, id));
             }
         });
-        egui::CollapsingHeader::new("图形").default_open(true).show(ui, |ui| {
+        matrices_header.header_response.context_menu(|ui| crate::context::section_matrices(app, ui));
+        let graphs_header = egui::CollapsingHeader::new("图形").default_open(true).show(ui, |ui| {
             for (id, name) in graphs {
-                if ui.selectable_label(app.focus == Some(Tab::Graph(id)), name).clicked() {
+                let response = ui.selectable_label(app.focus == Some(Tab::Graph(id)), name);
+                if response.clicked() {
                     app.open_tab(Tab::Graph(id));
                 }
+                response.context_menu(|ui| crate::context::tree_graph(app, ui, id));
             }
         });
-        egui::CollapsingHeader::new("备注").default_open(true).show(ui, |ui| {
+        graphs_header.header_response.context_menu(|ui| crate::context::section_graphs(app, ui));
+        let notes_header = egui::CollapsingHeader::new("备注").default_open(true).show(ui, |ui| {
             for (id, name) in notes {
-                if ui.selectable_label(app.focus == Some(Tab::Note(id)), name).clicked() {
+                let response = ui.selectable_label(app.focus == Some(Tab::Note(id)), name);
+                if response.clicked() {
                     app.open_tab(Tab::Note(id));
                 }
+                response.context_menu(|ui| crate::context::tree_note(app, ui, id));
             }
         });
+        notes_header.header_response.context_menu(|ui| crate::context::section_notes(app, ui));
     });
 }
 
@@ -1236,9 +876,11 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
             for (index, header_text) in headers.iter().enumerate() {
                 header.col(|ui| {
                     let selected = app.selected_column == Some((id, index));
-                    if ui.selectable_label(selected, header_text).clicked() {
+                    let response = ui.selectable_label(selected, header_text);
+                    if response.clicked() || response.secondary_clicked() {
                         app.selected_column = Some((id, index));
                     }
+                    response.context_menu(|ui| crate::context::table_column(app, ui, id, index, None));
                 });
             }
         })
@@ -1246,12 +888,17 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
             body.rows(22.0, nrows, |mut row| {
                 let row_index = row.index();
                 row.col(|ui| {
-                    ui.label(format!("{}", row_index + 1));
+                    let response = ui.add(egui::Label::new(format!("{}", row_index + 1)).sense(egui::Sense::click()));
+                    response.context_menu(|ui| crate::context::table_row(app, ui, id, row_index));
                 });
                 for column in 0..ncols {
                     row.col(|ui| {
                         let mut text = app.project.table(id).and_then(|t| t.columns.get(column)).map(|c| c.display(row_index)).unwrap_or_default();
                         let response = ui.add(egui::TextEdit::singleline(&mut text).id(ui.id().with(("cell", column, row_index))));
+                        if response.secondary_clicked() {
+                            app.selected_column = Some((id, column));
+                        }
+                        response.context_menu(|ui| crate::context::table_column(app, ui, id, column, Some(row_index)));
                         if response.changed() {
                             if !app.pushed_edit {
                                 app.history.push("编辑单元格", &app.project);
@@ -1278,7 +925,11 @@ fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
     };
     let rows = matrix.rows;
     let cols = matrix.cols;
-    ui.label(format!("{}   {rows}×{cols}   x [{} , {}]   y [{} , {}]", matrix.name, matrix.x_min, matrix.x_max, matrix.y_min, matrix.y_max));
+    let banner = ui.add(
+        egui::Label::new(format!("{}   {rows}×{cols}   x [{} , {}]   y [{} , {}]", matrix.name, matrix.x_min, matrix.x_max, matrix.y_min, matrix.y_max))
+            .sense(egui::Sense::click()),
+    );
+    banner.context_menu(|ui| crate::context::matrix_menu(app, ui, id));
     TableBuilder::new(ui)
         .striped(true)
         .column(Column::exact(40.0))
@@ -1303,6 +954,7 @@ fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
                     row.col(|ui| {
                         let mut text = app.project.matrix(id).and_then(|m| m.get(r, c)).map(sciplot_core::format_number).unwrap_or_default();
                         let response = ui.add(egui::TextEdit::singleline(&mut text));
+                        response.context_menu(|ui| crate::context::matrix_menu(app, ui, id));
                         if response.changed() {
                             if !app.pushed_edit {
                                 app.history.push("编辑矩阵", &app.project);
@@ -1368,7 +1020,11 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         if ui.button("清除缩放").clicked() {
             app.views.remove(&id);
         }
-        ui.label("拖拽平移，滚轮缩放，双击恢复，Shift 拖拽选择 X 区间");
+        ui.label(if surface {
+            "左键拖拽旋转，滚轮缩放。右键切换曲面、线框或散点"
+        } else {
+            "左键拖拽平移，滚轮缩放，双击恢复，Shift 拖拽选择 X 区间。右键曲线改属性或删除"
+        });
     });
     let available = ui.available_size();
     if available.x < 30.0 || available.y < 30.0 {
@@ -1376,11 +1032,11 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
     }
     let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
     if graph.surface.is_some() {
-        if response.drag_started() {
+        if response.drag_started_by(egui::PointerButton::Primary) {
             app.history.push("旋转三维图", &app.project);
             app.dirty = true;
         }
-        if response.dragged() {
+        if response.dragged_by(egui::PointerButton::Primary) {
             let delta = response.drag_delta();
             if let Some(spec) = &mut app.project.graph_mut(id).and_then(|g| g.surface.as_mut()) {
                 spec.azimuth += delta.x * 0.45;
@@ -1397,7 +1053,8 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         }
         let graph = app.project.graph(id).cloned().unwrap_or(graph);
         let scene = render(&app.project, &graph, &[], rect.width(), rect.height(), 1.0);
-        sciplot_plot::paint(ui.painter(), rect.min, &scene);
+        paint_scene(app, ui, rect, &scene, true);
+        attach_plot_menu(app, &response, id, rect, &scene);
         return;
     }
 
@@ -1418,11 +1075,12 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                 changed = true;
             }
             let shift = ui.input(|i| i.modifiers.shift);
-            if response.drag_started() && shift {
+            let primary_started = response.drag_started_by(egui::PointerButton::Primary);
+            if primary_started && shift {
                 if let Some((x, _)) = screen_to_data(frame, local.x, local.y) {
                     app.xsel = Some(XSel { graph: id, layer, x0: x, x1: x });
                 }
-            } else if response.drag_started() {
+            } else if primary_started {
                 app.ann_drag = None;
                 if let Some((ann_id, origin, _, _)) = hit_annotation(&graph, layer, frame, local.x, local.y) {
                     if let Some((sx, sy)) = screen_to_data(frame, local.x, local.y) {
@@ -1433,13 +1091,14 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                     }
                 }
             }
-            if response.dragged() && shift {
+            let primary_drag = response.dragged_by(egui::PointerButton::Primary);
+            if primary_drag && shift {
                 if let Some((x, _)) = screen_to_data(frame, local.x, local.y) {
                     if let Some(sel) = &mut app.xsel {
                         sel.x1 = x;
                     }
                 }
-            } else if response.dragged() {
+            } else if primary_drag {
                 let drag = app.ann_drag.as_ref().map(|drag| (drag.graph, drag.layer, drag.id, drag.origin.clone(), drag.start_x, drag.start_y));
                 if let Some((drag_graph, drag_layer, ann_id, origin, start_x, start_y)) = drag {
                     if drag_graph == id && drag_layer == layer {
@@ -1494,6 +1153,45 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
     app.views.insert(id, views);
     paint_scene(app, ui, rect, &scene, surface);
     paint_overlays(app, ui, id, rect, &scene);
+    attach_plot_menu(app, &response, id, rect, &scene);
+}
+
+fn attach_plot_menu(app: &mut SciPlotApp, response: &egui::Response, id: GraphId, rect: egui::Rect, scene: &Scene) {
+    if response.secondary_clicked() {
+        let local = response.interact_pointer_pos().or(response.hover_pos()).map(|pos| pos - rect.min);
+        app.plot_hit = Some(match local {
+            Some(local) => classify_plot(app, id, local, scene),
+            None => PlotHit::Layer { graph: id, layer: app.layer_index(id) },
+        });
+    }
+    response.context_menu(|ui| crate::context::plot_menu(app, ui));
+}
+
+fn classify_plot(app: &mut SciPlotApp, id: GraphId, local: egui::Vec2, scene: &Scene) -> PlotHit {
+    let Some(graph) = app.project.graph(id).cloned() else {
+        return PlotHit::Layer { graph: id, layer: 0 };
+    };
+    if graph.surface.is_some() {
+        return PlotHit::Surface { graph: id };
+    }
+    for (layer_index, frame) in scene.layers.iter().enumerate() {
+        if let Some((ann_id, _, _, _)) = hit_annotation(&graph, layer_index, frame, local.x, local.y) {
+            app.selected_ann = Some((id, layer_index, ann_id));
+            return PlotHit::Annotation { graph: id, layer: layer_index, id: ann_id };
+        }
+    }
+    if let Some(hit) = nearest_curve(&app.project, &graph, &scene.layers, local.x, local.y) {
+        app.curve = hit.curve;
+        app.active_layer = hit.layer;
+        return PlotHit::Curve { graph: id, layer: hit.layer, curve: hit.curve };
+    }
+    let layer = scene
+        .layers
+        .iter()
+        .position(|frame| frame.plot.contains(local.x, local.y))
+        .unwrap_or_else(|| app.layer_index(id));
+    app.active_layer = layer;
+    PlotHit::Layer { graph: id, layer }
 }
 
 fn paint_scene(app: &mut SciPlotApp, ui: &egui::Ui, rect: egui::Rect, scene: &Scene, surface: bool) {
@@ -1657,7 +1355,7 @@ fn browse_open(app: &mut SciPlotApp) {
     app.dialog = Some(Dialog::Path { action: PathAction::Open, path: String::new(), extra: String::new() });
 }
 
-fn browse_or_dialog(app: &mut SciPlotApp, action: PathAction, fallback: &str) {
+pub(crate) fn browse_or_dialog(app: &mut SciPlotApp, action: PathAction, fallback: &str) {
     if std::env::var("SCIPLOT_NO_DIALOG").is_err() {
         if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv", "txt"]).pick_file() {
             app.perform_path(action, &path.display().to_string(), "");

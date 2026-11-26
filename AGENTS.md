@@ -51,7 +51,7 @@ Windows 交叉编译需要 `x86_64-w64-mingw32-gcc` 和 `x86_64-w64-mingw32-wind
 
 撤销是整份项目的 JSON 快照，上限 40 步，接口是 `History::push`、`undo`、`redo`。界面上的修改走 `SciPlotApp::edit`，失败时恢复修改前的项目。
 
-CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件列表在用户主目录的 `.sciplot_recent.json`。
+CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件列表在用户主目录的 `.sciplot_recent.json`。默认样式和字体在 `.sciplot_prefs.json`，不写进项目。`font_path` 为空时按系统字体自动选择。
 
 列公式和拟合表达式用 evalexpr **11.3.1**，锁死这个版本。12 及以上是 AGPL，不要升级。整数除法会截断，需要小数时写成 `1.0/2`。乘方是 `^`。`col("名字")`、`col("A")`、`col(1)`（从 1 开始）、`cell("A", 行号)`、`i` 和 `row` 可用。给上下文注册函数时要引入 `ContextWithMutableVariables` 和 `ContextWithMutableFunctions`。多参数函数收到的是 `Value::Tuple`。
 
@@ -83,11 +83,20 @@ Savitzky-Golay 按窗口内每个偏移单独算系数，这样边缘也能保�
 
 ## 界面
 
-文案集中在 `crates/app/src/i18n.rs`。菜单是：文件、编辑、表格、矩阵、绘图、分析、格式、窗口、帮助。新增用户可见的字符串放这里，或放在对应对话框里，保持简体中文。
+文案集中在 `crates/app/src/i18n.rs`。菜单栏只有：文件、编辑、设置、窗口、帮助。表格、矩阵、绘图、分析和格式不要再堆回菜单栏，放在 `crates/app/src/context.rs` 的右键菜单里。
 
-字体启动时按顺序找 Windows 的微软雅黑（`msyh.ttc` 等），再找系统里的 Noto、文泉驿、Droid，最后用 `include_bytes!` 的 `assets/fonts/DroidSansFallbackFull.ttf`。TTC 要先抽出一个 TTF，`ab_glyph` 读不了字体集合。同一套字体同时注册为 egui 的 Proportional 和 Monospace。
+- 表格表头和单元格：插入或删除这一列、这一行，公式、排序、统计、绘制为、导入导出 CSV。行号上是行操作。
+- 矩阵：公式填充、转置、求逆、转成表格、热力图、等高线、三维图。
+- 项目树：分组标题上新建，每一项上打开、绘制、删除。
+- 图上：先命中标注，再按线段距离命中曲线（`nearest_curve`，12 像素）。曲线菜单改属性、显隐、删除、拟合和求交点。空白处是坐标轴、图例、标题、标注、加曲线和导出。三维图右键切换曲面、线框、散点。
 
-停靠用 `egui_dock` 0.16。`DockState` 和 `TabViewer` 不要同时可变借用：先 `mem::replace` 取出 dock，画完再放回去。菜单项被点击后调用 `ui.close_menu()`，否则对话框打开时菜单会留在画面上。
+平移、框选 X 区间、拖标注和旋转三维图只认鼠标左键。右键打开菜单，不改变视图。菜单项点下去要 `close_menu()`。
+
+「设置 → 默认样式与字体」改字体文件、标题和坐标轴字号、线宽、线型、符号。保存后立刻 `fonts::install`。新建图形时套用整套样式；往已有图追加曲线时只改新曲线。已打开的示例图不要在启动时重套样式。
+
+字体启动时按顺序找 Windows 的微软雅黑（`msyh.ttc` 等），再找系统里的 Noto、文泉驿、Droid，最后用 `include_bytes!` 的 `assets/fonts/DroidSansFallbackFull.ttf`。用户指定的路径优先，读失败就退回这条自动顺序。TTC 要先抽出一个 TTF，`ab_glyph` 读不了字体集合。同一套字体同时注册为 egui 的 Proportional 和 Monospace。
+
+停靠用 `egui_dock` 0.16。`DockState` 和 `TabViewer` 不要同时可变借用：先 `mem::replace` 取出 dock，画完再放回去。因此 `open_tab` 只把标签放进 `pending_tabs`，等 dock 放回来再 `flush_tabs`。在表格或图的右键菜单里直接改 `self.dock` 会被这一帧的换回盖掉。菜单项被点击后调用 `ui.close_menu()`，否则对话框打开时菜单会留在画面上。
 
 `egui` / `eframe` / `egui_extras` 停在 0.31.1。这个版本里 `ViewportInfo::close_requested` 是方法，`Shape::rect_stroke` 需要 `StrokeKind`，`Stroke` 可以实现成 `PathStroke`。浮点字面量传给 `f32` 参数时写成 `1.0_f32`。
 

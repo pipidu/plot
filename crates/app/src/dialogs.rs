@@ -58,6 +58,7 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::Range { .. } => "分析".into(),
         Dialog::Function { .. } => "函数曲线或曲面".into(),
         Dialog::AddCurve { .. } => "添加到当前图".into(),
+        Dialog::Prefs(_) => "默认样式与字体".into(),
     }
 }
 
@@ -100,11 +101,118 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             function_dialog(app, ui, *graph, *layer, expr, xmin, xmax, ymin, ymax, samples, surface, mode)
         }
         Dialog::AddCurve { graph, table, kind } => add_curve(app, ui, *graph, table, kind),
+        Dialog::Prefs(prefs) => prefs_dialog(app, ui, prefs),
     }
 }
 
 fn button_closes(ui: &mut egui::Ui, label: &str) -> bool {
     !ui.button(label).clicked()
+}
+
+fn prefs_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, prefs: &mut crate::prefs::Prefs) -> bool {
+    egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+        ui.label("设置保存在本机，不写入项目。之后新建的曲线、标题和坐标轴文字会使用这里的样式。");
+        ui.separator();
+        ui.strong("字体");
+        ui.label("屏幕和 PNG 使用这个文件。SVG 仍按系统字体名显示。");
+        let shown = if prefs.font_path.is_empty() { "自动".to_string() } else { prefs.font_path.clone() };
+        egui::ComboBox::from_id_salt("prefs-font").selected_text(shown).show_ui(ui, |ui| {
+            ui.selectable_value(&mut prefs.font_path, String::new(), "自动");
+            for (name, path) in crate::fonts::known_fonts() {
+                ui.selectable_value(&mut prefs.font_path, path.to_string(), name);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("字体文件");
+            ui.add(egui::TextEdit::singleline(&mut prefs.font_path).desired_width(280.0));
+            if std::env::var("SCIPLOT_NO_DIALOG").is_err() && ui.button("浏览…").clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("字体", &["ttf", "ttc", "otf"]).pick_file() {
+                    prefs.font_path = path.display().to_string();
+                }
+            }
+        });
+        ui.separator();
+        ui.strong("文字");
+        size_row(ui, "标题", &mut prefs.title_size, 8.0, 72.0);
+        size_row(ui, "坐标轴标题", &mut prefs.axis_label_size, 8.0, 48.0);
+        size_row(ui, "刻度", &mut prefs.tick_size, 8.0, 36.0);
+        ui.separator();
+        ui.strong("曲线");
+        size_row(ui, "线宽", &mut prefs.line_width, 0.4, 12.0);
+        egui::ComboBox::from_id_salt("prefs-dash").selected_text(prefs.dash.label()).show_ui(ui, |ui| {
+            for item in Dash::all() {
+                ui.selectable_value(&mut prefs.dash, *item, item.label());
+            }
+        });
+        egui::ComboBox::from_id_salt("prefs-symbol").selected_text(prefs.symbol.label()).show_ui(ui, |ui| {
+            for item in Symbol::all() {
+                ui.selectable_value(&mut prefs.symbol, *item, item.label());
+            }
+        });
+        size_row(ui, "符号大小", &mut prefs.symbol_size, 1.0, 24.0);
+        let mut bins = prefs.histogram_bins as f32;
+        ui.horizontal(|ui| {
+            ui.label("直方图组数");
+            if ui.add(egui::DragValue::new(&mut bins).range(2.0..=200.0)).changed() {
+                prefs.histogram_bins = bins.round() as usize;
+            }
+        });
+        ui.checkbox(&mut prefs.use_palette, "按曲线序号使用调色板");
+        if !prefs.use_palette {
+            ui.horizontal(|ui| {
+                ui.label("固定颜色");
+                ui.color_edit_button_srgba_unmultiplied(&mut prefs.color);
+            });
+        }
+    });
+    ui.separator();
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if ui.button("保存").clicked() {
+            store_prefs(app, prefs, ui.ctx());
+            stay = false;
+        }
+        if ui.button("用到当前图").clicked() {
+            store_prefs(app, prefs, ui.ctx());
+            if let Some(id) = app.active_graph() {
+                let stored = app.prefs.clone();
+                app.edit("应用默认样式", |project| {
+                    stored.apply_new_graph(project, id);
+                    Ok(())
+                });
+                app.status = "已把默认样式用到当前图".into();
+            } else {
+                app.status = "当前没有打开的图形".into();
+            }
+            stay = false;
+        }
+        if ui.button("关闭").clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn store_prefs(app: &mut SciPlotApp, prefs: &mut crate::prefs::Prefs, ctx: &egui::Context) {
+    prefs.clamp();
+    app.prefs = prefs.clone();
+    let saved = crate::prefs::save(&app.prefs);
+    if app.reload_font(ctx) {
+        app.status = if saved { "已保存默认样式和字体".into() } else { "样式已应用，但没能写入设置文件".into() };
+    } else {
+        app.prefs.font_path.clear();
+        prefs.font_path.clear();
+        crate::prefs::save(&app.prefs);
+        app.reload_font(ctx);
+        app.status = "找不到指定字体，已改用自动字体并保存其余设置".into();
+    }
+}
+
+fn size_row(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f32, max: f32) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value).range(min..=max).speed(0.1));
+    });
 }
 
 fn quit(app: &mut SciPlotApp, ui: &mut egui::Ui) -> bool {
@@ -593,7 +701,13 @@ fn fit_dialog(
         match model {
             Ok(model) => {
                 let curve = *curve;
-                if let Some(report) = app.edit("拟合", |project| ops::fit_on_graph(project, graph, layer, curve, &model)) {
+                let before = app.project.graph(graph).and_then(|item| item.layers.get(layer)).map(|item| item.curves.len()).unwrap_or(0);
+                let prefs = app.prefs.clone();
+                if let Some(report) = app.edit("拟合", |project| {
+                    let report = ops::fit_on_graph(project, graph, layer, curve, &model)?;
+                    prefs.apply_curves(project, graph, layer, before);
+                    Ok(report)
+                }) {
                     app.dialog = Some(Dialog::Message(report));
                     return false;
                 }
@@ -686,7 +800,12 @@ fn range_dialog(
         if done.is_some() {
             if let Some(table) = app.project.tables.last().map(|t| t.id) {
                 app.open_tab(crate::app::Tab::Table(table));
-                if let Some(gid) = app.edit("绘制结果", |project| project.plot_table(table, CurveKind::Line)) {
+                let prefs = app.prefs.clone();
+                if let Some(gid) = app.edit("绘制结果", |project| {
+                    let gid = project.plot_table(table, CurveKind::Line)?;
+                    prefs.apply_new_graph(project, gid);
+                    Ok(gid)
+                }) {
                     app.open_tab(crate::app::Tab::Graph(gid));
                 }
             }
@@ -735,12 +854,15 @@ fn function_dialog(
             let y0 = parse_opt(ymin).unwrap_or(-std::f64::consts::PI);
             let y1 = parse_opt(ymax).unwrap_or(std::f64::consts::PI);
             let mode = *mode;
+            let prefs = app.prefs.clone();
             if let Some(id) = app.edit("函数曲面", |project| {
-                Ok(project.plot_surface(
+                let id = project.plot_surface(
                     SurfaceSource::Function { expr: expr.clone(), x_min: x0, x_max: x1, y_min: y0, y_max: y1, n: 40 },
                     mode,
                     "函数曲面",
-                ))
+                );
+                prefs.apply_new_graph(project, id);
+                Ok(id)
             }) {
                 app.open_tab(crate::app::Tab::Graph(id));
                 app.status = "已新建函数曲面".into();
@@ -749,6 +871,8 @@ fn function_dialog(
         } else {
             let samples = samples.parse::<usize>().unwrap_or(200).clamp(8, 2000);
             let kind = CurveKind::Function;
+            let prefs = app.prefs.clone();
+            let before = graph.and_then(|id| app.project.graph(id).and_then(|item| item.layers.get(layer)).map(|item| item.curves.len()));
             if let Some(id) = app.edit("函数曲线", |project| {
                 let graph_id = match graph {
                     Some(id) => id,
@@ -763,6 +887,11 @@ fn function_dialog(
                     source: DataSource::Function { expr: expr.clone(), x_min: x0, x_max: x1, samples },
                     visible: true,
                 });
+                if let Some(start) = before {
+                    prefs.apply_curves(project, graph_id, layer, start);
+                } else {
+                    prefs.apply_new_graph(project, graph_id);
+                }
                 Ok(graph_id)
             }) {
                 app.open_tab(crate::app::Tab::Graph(id));
@@ -797,7 +926,16 @@ fn add_curve(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::Graph
     if ui.button("添加").clicked() {
         let table = *table;
         let kind = *kind;
-        if app.edit("添加曲线", |project| project.add_curves(graph, 0, table, kind)).is_some() {
+        let before = app.project.graph(graph).and_then(|item| item.layers.first()).map(|layer| layer.curves.len()).unwrap_or(0);
+        let prefs = app.prefs.clone();
+        if app
+            .edit("添加曲线", |project| {
+                project.add_curves(graph, 0, table, kind)?;
+                prefs.apply_curves(project, graph, 0, before);
+                Ok(())
+            })
+            .is_some()
+        {
             app.status = "已把曲线加到当前图".into();
             return false;
         }

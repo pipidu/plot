@@ -2,10 +2,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
+mod context;
 mod dialogs;
 mod fonts;
 mod i18n;
 mod ops;
+mod prefs;
 
 use std::path::Path;
 

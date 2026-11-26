@@ -94,8 +94,90 @@ pub fn nearest_point(project: &Project, graph: &sciplot_core::Graph, layer: usiz
     best.filter(|_| best_d < 18.0)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CurveHit {
+    pub layer: usize,
+    pub curve: usize,
+}
+
+/// 离指针最近的可见曲线。点到采样点、以及点到相邻采样点连成的线段，都会参与比较。
+pub fn nearest_curve(project: &Project, graph: &sciplot_core::Graph, frames: &[LayerFrame], px: f32, py: f32) -> Option<CurveHit> {
+    let mut best: Option<(CurveHit, f32)> = None;
+    for (layer_index, frame) in frames.iter().enumerate() {
+        let Some(layer) = graph.layers.get(layer_index) else {
+            continue;
+        };
+        for (curve_index, curve) in layer.curves.iter().enumerate() {
+            if !curve.visible {
+                continue;
+            }
+            let Ok(series) = sciplot_core::resolve_curve(project, curve) else {
+                continue;
+            };
+            let n = series.x.len().min(series.y.len());
+            let mut prev: Option<(f32, f32)> = None;
+            for index in 0..n {
+                let Some(point) = data_to_screen(frame, series.x[index], series.y[index]) else {
+                    prev = None;
+                    continue;
+                };
+                consider(&mut best, layer_index, curve_index, (point.0 - px).hypot(point.1 - py));
+                if let Some(start) = prev {
+                    consider(&mut best, layer_index, curve_index, segment_distance(px, py, start.0, start.1, point.0, point.1));
+                }
+                prev = Some(point);
+            }
+        }
+    }
+    best.filter(|(_, distance)| *distance <= 12.0).map(|(hit, _)| hit)
+}
+
+fn consider(best: &mut Option<(CurveHit, f32)>, layer: usize, curve: usize, distance: f32) {
+    if best.as_ref().map(|(_, previous)| distance < *previous).unwrap_or(true) {
+        *best = Some((CurveHit { layer, curve }, distance));
+    }
+}
+
 pub fn data_to_screen(frame: &LayerFrame, x: f64, y: f64) -> Option<(f32, f32)> {
     let ux = crate::scale::unit(frame.x_scale, x, frame.x_min, frame.x_max, frame.x_inverted)?;
     let uy = crate::scale::unit(frame.y_scale, y, frame.y_min, frame.y_max, frame.y_inverted)?;
     Some((frame.plot.x + ux * frame.plot.w, frame.plot.y + frame.plot.h - uy * frame.plot.h))
+}
+
+fn segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-6 {
+        return (px - ax).hypot(py - ay);
+    }
+    let t = (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
+    (px - (ax + t * dx)).hypot(py - (ay + t * dy))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sciplot_core::{ColumnMode, CurveKind, Project};
+
+    #[test]
+    fn nearest_curve_hits_the_middle_of_a_segment() {
+        let mut project = Project::new("t");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns.clear();
+            table.add_numeric_column("X", ColumnMode::X, &[0.0, 1.0]);
+            table.add_numeric_column("Y", ColumnMode::Y, &[0.0, 1.0]);
+        }
+        let graph_id = project.plot_table(table, CurveKind::Line).unwrap();
+        let graph = project.graph(graph_id).unwrap();
+        let scene = crate::render(&project, graph, &[], 400.0, 300.0, 1.0);
+        let frame = &scene.layers[0];
+        let (x0, y0) = data_to_screen(frame, 0.0, 0.0).unwrap();
+        let (x1, y1) = data_to_screen(frame, 1.0, 1.0).unwrap();
+        let hit = nearest_curve(&project, graph, &scene.layers, (x0 + x1) / 2.0, (y0 + y1) / 2.0).unwrap();
+        assert_eq!(hit.curve, 0);
+        assert!(nearest_curve(&project, graph, &scene.layers, 1.0, 1.0).is_none());
+    }
 }
