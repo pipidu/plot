@@ -99,6 +99,14 @@ pub struct LayerView {
     pub y_max: Option<f64>,
 }
 
+/// 图例里一行对应的屏幕区域，用来右键隐藏的曲线。
+#[derive(Clone, Copy, Debug)]
+pub struct LegendHit {
+    pub layer: usize,
+    pub curve: usize,
+    pub rect: PxRect,
+}
+
 /// 一个图层在屏幕上的绘图区，以及已经解析好的数据范围。交互用它做命中和缩放。
 #[derive(Clone, Debug)]
 pub struct LayerFrame {
@@ -120,6 +128,7 @@ pub struct Scene {
     pub primitives: Vec<Prim>,
     pub layers: Vec<LayerFrame>,
     pub notes: Vec<String>,
+    pub legend_hits: Vec<LegendHit>,
 }
 
 impl Scene {

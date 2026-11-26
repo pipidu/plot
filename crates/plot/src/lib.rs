@@ -15,7 +15,7 @@ pub use interact::{data_to_screen, nearest_curve, nearest_point, pan_limits, scr
 pub use paint::paint;
 pub use raster::{prepare_font, to_png, to_rgba, GlyphFont};
 pub use render::render;
-pub use scene::{LayerFrame, LayerView, Prim, Scene};
+pub use scene::{LayerFrame, LayerView, LegendHit, Prim, Scene};
 pub use svg::{to_svg, SVG_FONT};
 
 #[cfg(test)]
@@ -111,6 +111,19 @@ mod tests {
         assert!(text.contains("苹果"));
         assert!(text.contains("香蕉"));
         assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Rect { fill: Some(_), .. })));
+    }
+
+    #[test]
+    fn hidden_curve_stays_in_the_legend() {
+        let mut project = demo_project();
+        let graph = project.graphs.iter_mut().find(|graph| graph.name == "正弦与余弦").unwrap();
+        graph.layers[0].curves[1].visible = false;
+        let graph = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap();
+        let scene = render(&project, graph, &[], 900.0, 560.0, 1.0);
+        let text = scene.text_content();
+        assert!(text.contains("cos（已隐藏）"), "{text}");
+        assert!(text.contains("sin"));
+        assert!(scene.legend_hits.iter().any(|hit| hit.curve == 1));
     }
 
     #[test]

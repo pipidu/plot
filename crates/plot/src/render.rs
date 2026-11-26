@@ -20,6 +20,15 @@ struct Item {
     bins: usize,
     kind: CurveKind,
     name: String,
+    curve: usize,
+}
+
+struct LegendEntry {
+    name: String,
+    color: [u8; 4],
+    line: bool,
+    hidden: bool,
+    curve: Option<usize>,
 }
 
 pub fn render(
@@ -36,6 +45,7 @@ pub fn render(
         primitives: Vec::new(),
         layers: Vec::new(),
         notes: Vec::new(),
+        legend_hits: Vec::new(),
     };
     scene.primitives.push(Prim::Rect {
         x: 0.0,
@@ -55,7 +65,7 @@ pub fn render(
     }
     for (index, layer) in graph.layers.iter().enumerate() {
         let view = views.get(index).copied().unwrap_or_default();
-        render_layer(project, layer, view, &mut scene, scale);
+        render_layer(project, layer, index, view, &mut scene, scale);
     }
     scene
 }
@@ -63,13 +73,22 @@ pub fn render(
 fn render_layer(
     project: &Project,
     layer: &sciplot_core::Layer,
+    layer_index: usize,
     view: LayerView,
     scene: &mut Scene,
     scale: f32,
 ) {
     let mut items = Vec::new();
-    for curve in &layer.curves {
+    let mut hidden_legend = Vec::new();
+    for (index, curve) in layer.curves.iter().enumerate() {
         if !curve.visible {
+            hidden_legend.push(LegendEntry {
+                name: format!("{}（已隐藏）", curve.name),
+                color: [150, 150, 150, 255],
+                line: legend_has_line(curve.kind),
+                hidden: true,
+                curve: Some(index),
+            });
             continue;
         }
         match resolve_curve(project, curve) {
@@ -84,6 +103,7 @@ fn render_layer(
                 bins: curve.style.histogram_bins.max(1),
                 kind: curve.kind,
                 name: curve.name.clone(),
+                curve: index,
             }),
             Err(err) => scene.notes.push(format!("{}：{err}", curve.name)),
         }
@@ -243,7 +263,7 @@ fn render_layer(
     }
 
     let mut box_slot = 0.0;
-    let mut legend: Vec<(String, [u8; 4], bool)> = Vec::new();
+    let mut legend: Vec<LegendEntry> = Vec::new();
     for item in &items {
         match item.kind {
             CurveKind::Pie => draw_pie(scene, plot, item, &mut legend, scale),
@@ -272,9 +292,16 @@ fn render_layer(
             _ => draw_polyline(scene, &frame, item),
         }
         if item.kind != CurveKind::Pie {
-            legend.push((item.name.clone(), item.color, item.kind != CurveKind::Scatter));
+            legend.push(LegendEntry {
+                name: item.name.clone(),
+                color: item.color,
+                line: legend_has_line(item.kind),
+                hidden: false,
+                curve: Some(item.curve),
+            });
         }
     }
+    legend.extend(hidden_legend);
 
     push_rect(scene, plot.x, plot.y, plot.w, plot.h, None, Some(([50, 50, 50, 255], 1.1 * scale)));
     if !only_pie {
@@ -306,7 +333,7 @@ fn render_layer(
         }
     }
     if layer.legend.visible {
-        draw_legend(scene, plot, &legend, layer.legend.position, scale);
+        draw_legend(scene, plot, layer_index, &legend, layer.legend.position, scale);
     }
     for annotation in &layer.annotations {
         draw_annotation(scene, &frame, annotation, scale);
@@ -771,7 +798,7 @@ fn draw_box(scene: &mut Scene, frame: &LayerFrame, item: &Item, slot: f64) {
     }
 }
 
-fn draw_pie(scene: &mut Scene, plot: PxRect, item: &Item, legend: &mut Vec<(String, [u8; 4], bool)>, scale: f32) {
+fn draw_pie(scene: &mut Scene, plot: PxRect, item: &Item, legend: &mut Vec<LegendEntry>, scale: f32) {
     let values: Vec<(f64, String)> = item
         .series
         .y
@@ -813,7 +840,13 @@ fn draw_pie(scene: &mut Scene, plot: PxRect, item: &Item, legend: &mut Vec<(Stri
             VAlign::Center,
             false,
         );
-        legend.push((label.clone(), color, false));
+        legend.push(LegendEntry {
+            name: label.clone(),
+            color,
+            line: false,
+            hidden: false,
+            curve: Some(item.curve),
+        });
         angle += sweep;
     }
 }
@@ -943,7 +976,7 @@ fn draw_annotation(scene: &mut Scene, frame: &LayerFrame, annotation: &sciplot_c
     }
 }
 
-fn draw_legend(scene: &mut Scene, plot: PxRect, entries: &[(String, [u8; 4], bool)], pos: LegendPos, scale: f32) {
+fn draw_legend(scene: &mut Scene, plot: PxRect, layer_index: usize, entries: &[LegendEntry], pos: LegendPos, scale: f32) {
     if entries.is_empty() {
         return;
     }
@@ -951,7 +984,7 @@ fn draw_legend(scene: &mut Scene, plot: PxRect, entries: &[(String, [u8; 4], boo
     let row = 18.0 * scale;
     let pad = 6.0 * scale;
     let swatch = 18.0 * scale;
-    let text_w = entries.iter().map(|(name, _, _)| text_width(name, font)).fold(0.0, f32::max);
+    let text_w = entries.iter().map(|entry| text_width(&entry.name, font)).fold(0.0, f32::max);
     let width = swatch + text_w + pad * 3.0;
     let height = entries.len() as f32 * row + pad;
     let (x, y) = match pos {
@@ -961,21 +994,38 @@ fn draw_legend(scene: &mut Scene, plot: PxRect, entries: &[(String, [u8; 4], boo
         LegendPos::BottomLeft => (plot.x + 8.0 * scale, plot.bottom() - height - 8.0 * scale),
     };
     push_rect(scene, x, y, width, height, Some([255, 255, 255, 230]), Some(([160, 160, 160, 255], 1.0)));
-    for (index, (name, color, line)) in entries.iter().enumerate() {
-        let cy = y + pad + row * index as f32 + row * 0.35;
+    for (index, entry) in entries.iter().enumerate() {
+        let top = y + pad * 0.5 + row * index as f32;
+        let cy = top + row * 0.5;
         let x0 = x + pad;
-        if *line {
-            line_prim(scene, x0, cy, x0 + swatch, cy, *color, 1.6 * scale, Dash::Solid);
+        let color = if entry.hidden { [150, 150, 150, 255] } else { entry.color };
+        let ink = if entry.hidden { [120, 120, 120, 255] } else { [20, 20, 20, 255] };
+        if entry.line {
+            line_prim(scene, x0, cy, x0 + swatch, cy, color, 1.6 * scale, Dash::Solid);
         }
         scene.primitives.push(Prim::Circle {
             x: x0 + swatch * 0.5,
             y: cy,
             r: 3.2 * scale,
-            fill: Some(*color),
+            fill: Some(color),
             stroke: None,
         });
-        text(scene, x0 + swatch + pad, cy, name, font, [20, 20, 20, 255], HAlign::Left, VAlign::Center, false);
+        text(scene, x0 + swatch + pad, cy, &entry.name, font, ink, HAlign::Left, VAlign::Center, false);
+        if let Some(curve) = entry.curve {
+            scene.legend_hits.push(crate::scene::LegendHit {
+                layer: layer_index,
+                curve,
+                rect: PxRect { x, y: top, w: width, h: row },
+            });
+        }
     }
+}
+
+fn legend_has_line(kind: CurveKind) -> bool {
+    matches!(
+        kind,
+        CurveKind::Line | CurveKind::LineSymbol | CurveKind::Steps | CurveKind::Function | CurveKind::Area | CurveKind::ErrorBars
+    )
 }
 
 fn draw_colorbar(scene: &mut Scene, plot: PxRect, z0: f64, z1: f64, scale: f32) {
@@ -991,8 +1041,15 @@ fn draw_colorbar(scene: &mut Scene, plot: PxRect, z0: f64, z1: f64, scale: f32) 
         push_rect(scene, x, yy, w, hh, Some(viridis(t)), None);
     }
     push_rect(scene, x, y, w, h, None, Some(([80, 80, 80, 255], 1.0)));
-    text(scene, x + w + 4.0 * scale, y, &format_number(z1), 11.0 * scale, [30, 30, 30, 255], HAlign::Left, VAlign::Top, false);
-    text(scene, x + w + 4.0 * scale, y + h, &format_number(z0), 11.0 * scale, [30, 30, 30, 255], HAlign::Left, VAlign::Bottom, false);
+    let span = (z1 - z0).abs().max(1e-12);
+    for tick in crate::scale::ticks_for(sciplot_core::AxisScale::Linear, z0, z1) {
+        if !tick.major {
+            continue;
+        }
+        let t = ((tick.value - z0) / span) as f32;
+        let yy = y + h * (1.0 - t.clamp(0.0, 1.0));
+        text(scene, x + w + 4.0 * scale, yy, &format_number(tick.value), 11.0 * scale, [30, 30, 30, 255], HAlign::Left, VAlign::Center, false);
+    }
 }
 
 fn mapped_pairs(frame: &LayerFrame, series: &SeriesData) -> Vec<(f32, f32)> {

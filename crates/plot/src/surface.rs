@@ -135,6 +135,96 @@ pub fn render_surface(project: &Project, spec: &SurfaceSpec, scene: &mut Scene, 
             }
         }
     }
+    draw_surface_guides(scene, spec, &grid, zmin, zmax, cx, cy, span, scale);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_surface_guides(
+    scene: &mut Scene,
+    spec: &SurfaceSpec,
+    grid: &GridData,
+    zmin: f64,
+    zmax: f64,
+    cx: f32,
+    cy: f32,
+    span: f32,
+    scale: f32,
+) {
+    let color = [30, 30, 30, 255];
+    let axes = [
+        ((-1.0, -1.0, -1.0), (1.0, -1.0, -1.0)),
+        ((-1.0, -1.0, -1.0), (-1.0, 1.0, -1.0)),
+        ((-1.0, -1.0, -1.0), (-1.0, -1.0, 1.0)),
+    ];
+    for (from, to) in axes {
+        let a = project_pt(spec, from, cx, cy, span);
+        let b = project_pt(spec, to, cx, cy, span);
+        scene.primitives.push(Prim::Line {
+            x1: a.0,
+            y1: a.1,
+            x2: b.0,
+            y2: b.1,
+            color,
+            width: 1.1 * scale,
+            dash: sciplot_core::Dash::Solid,
+        });
+    }
+    let range = format!(
+        "x [{}, {}]    y [{}, {}]    z [{}, {}]",
+        sciplot_core::format_short(grid.x0),
+        sciplot_core::format_short(grid.x1),
+        sciplot_core::format_short(grid.y0),
+        sciplot_core::format_short(grid.y1),
+        sciplot_core::format_short(zmin),
+        sciplot_core::format_short(zmax)
+    );
+    scene.primitives.push(Prim::Text {
+        x: 12.0 * scale,
+        y: 28.0 * scale,
+        text: range,
+        size: 12.0 * scale,
+        color,
+        halign: HAlign::Left,
+        valign: VAlign::Top,
+        vertical: false,
+    });
+    let bar_x = scene.width - 36.0 * scale;
+    let bar_y = 48.0 * scale;
+    let bar_w = 12.0 * scale;
+    let bar_h = (scene.height - 96.0 * scale).max(40.0);
+    let steps = 32;
+    for i in 0..steps {
+        let t = 1.0 - i as f32 / steps as f32;
+        let yy = bar_y + bar_h * i as f32 / steps as f32;
+        scene.primitives.push(Prim::Rect {
+            x: bar_x,
+            y: yy,
+            w: bar_w,
+            h: bar_h / steps as f32 + 0.6,
+            fill: Some(viridis(t)),
+            stroke: None,
+        });
+    }
+    scene.primitives.push(Prim::Text {
+        x: bar_x - 4.0 * scale,
+        y: bar_y,
+        text: sciplot_core::format_short(zmax),
+        size: 11.0 * scale,
+        color,
+        halign: HAlign::Right,
+        valign: VAlign::Top,
+        vertical: false,
+    });
+    scene.primitives.push(Prim::Text {
+        x: bar_x - 4.0 * scale,
+        y: bar_y + bar_h,
+        text: sciplot_core::format_short(zmin),
+        size: 11.0 * scale,
+        color,
+        halign: HAlign::Right,
+        valign: VAlign::Bottom,
+        vertical: false,
+    });
 }
 
 struct Tri {
