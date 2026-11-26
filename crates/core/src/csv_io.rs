@@ -60,7 +60,10 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
         let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut names = Vec::with_capacity(width);
         for index in 0..width {
-            let name = rows[0].get(index).map(|s| s.trim()).filter(|s| !s.is_empty());
+            let name = rows[0]
+                .get(index)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
             names.push(name.unwrap_or("").to_string());
         }
         (names, &rows[1..])
@@ -68,7 +71,9 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
         let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         ((0..width).map(|_| String::new()).collect(), rows.as_slice())
     };
-    let width = names.len().max(data.iter().map(|r| r.len()).max().unwrap_or(0));
+    let width = names
+        .len()
+        .max(data.iter().map(|r| r.len()).max().unwrap_or(0));
     if width == 0 {
         return Err(crate::locale::t("没有读到列").into());
     }
@@ -79,7 +84,11 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
         if name.is_empty() {
             name = crate::table::column_letter(index);
         }
-        let mode = if index == 0 { ColumnMode::X } else { ColumnMode::Y };
+        let mode = if index == 0 {
+            ColumnMode::X
+        } else {
+            ColumnMode::Y
+        };
         table.add_column(name, mode);
         let cells: Vec<String> = data
             .iter()
@@ -105,7 +114,11 @@ pub fn export_csv_with(table: &Table, encoding: CsvEncoding) -> Vec<u8> {
     let names: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
     writer.write_record(&names).ok();
     for row in 0..table.nrows() {
-        let record: Vec<String> = table.columns.iter().map(|column| column.display(row)).collect();
+        let record: Vec<String> = table
+            .columns
+            .iter()
+            .map(|column| column.display(row))
+            .collect();
         writer.write_record(&record).ok();
     }
     let body = writer.into_inner().unwrap_or_default();
@@ -121,6 +134,10 @@ pub fn export_csv_with(table: &Table, encoding: CsvEncoding) -> Vec<u8> {
 }
 
 fn decode_bytes(bytes: &[u8], encoding: CsvEncoding) -> Result<String, String> {
+    if encoding != CsvEncoding::Auto && (null_heavy(bytes) || forced_text_corrupt(bytes, encoding))
+    {
+        return Err(crate::t("指定的编码和文件对不上（文件里有很多空字节或替换字符）。请改回「自动」，或换成正确的编码。").into());
+    }
     let text = match encoding {
         CsvEncoding::Utf8 => {
             let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
@@ -133,6 +150,18 @@ fn decode_bytes(bytes: &[u8], encoding: CsvEncoding) -> Result<String, String> {
         return Err(crate::t("无法识别文件编码。自动模式支持 UTF-8、GBK，以及带 BOM 或含空字节的 UTF-16。请在设置里指定编码，或从 Excel 另存为 CSV UTF-8。").into());
     }
     Ok(text)
+}
+
+fn forced_text_corrupt(bytes: &[u8], encoding: CsvEncoding) -> bool {
+    let text = match encoding {
+        CsvEncoding::Utf8 => {
+            let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        CsvEncoding::Gbk => encoding_rs::GBK.decode(bytes).0.into_owned(),
+        CsvEncoding::Auto => return false,
+    };
+    text_looks_corrupt(&text)
 }
 
 fn decode_auto(bytes: &[u8]) -> String {
@@ -176,7 +205,12 @@ fn null_heavy(bytes: &[u8]) -> bool {
 }
 
 fn utf16_is_le(bytes: &[u8]) -> bool {
-    let odd = bytes.iter().skip(1).step_by(2).filter(|byte| **byte == 0).count();
+    let odd = bytes
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter(|byte| **byte == 0)
+        .count();
     let even = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
     odd >= even
 }
@@ -194,9 +228,19 @@ fn text_looks_corrupt(text: &str) -> bool {
 }
 
 fn sniff_delimiter(text: &str) -> u8 {
-    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
-    let candidates = [(b',', line.matches(',').count()), (b'\t', line.matches('\t').count()), (b';', line.matches(';').count())];
-    let (delimiter, count) = candidates.into_iter().max_by_key(|(_, count)| *count).unwrap();
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let candidates = [
+        (b',', line.matches(',').count()),
+        (b'\t', line.matches('\t').count()),
+        (b';', line.matches(';').count()),
+    ];
+    let (delimiter, count) = candidates
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .unwrap();
     if count == 0 {
         b' '
     } else {
@@ -226,11 +270,18 @@ fn parse_whitespace(text: &str) -> Vec<Vec<String>> {
 }
 
 fn is_header(row: &[String], next: Option<&Vec<String>>) -> bool {
-    let nonempty: Vec<&str> = row.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let nonempty: Vec<&str> = row
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if nonempty.is_empty() {
         return false;
     }
-    let numeric = nonempty.iter().filter(|cell| cell.parse::<f64>().is_ok()).count();
+    let numeric = nonempty
+        .iter()
+        .filter(|cell| cell.parse::<f64>().is_ok())
+        .count();
     if numeric == nonempty.len() {
         return false;
     }
@@ -239,18 +290,28 @@ fn is_header(row: &[String], next: Option<&Vec<String>>) -> bool {
     }
     if let Some(next) = next {
         let next_nonempty = next.iter().filter(|s| !s.trim().is_empty()).count();
-        let next_numeric = next.iter().filter(|s| s.trim().parse::<f64>().is_ok()).count();
+        let next_numeric = next
+            .iter()
+            .filter(|s| s.trim().parse::<f64>().is_ok())
+            .count();
         return next_nonempty == 0 || next_numeric * 2 >= next_nonempty;
     }
     true
 }
 
 fn infer_type(cells: &[String]) -> ColumnType {
-    let nonempty: Vec<&str> = cells.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let nonempty: Vec<&str> = cells
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     if nonempty.is_empty() {
         return ColumnType::Numeric;
     }
-    if nonempty.iter().all(|cell| crate::util::parse_date(cell).is_some()) {
+    if nonempty
+        .iter()
+        .all(|cell| crate::util::parse_date(cell).is_some())
+    {
         return ColumnType::Date;
     }
     if nonempty.iter().all(|cell| cell.parse::<f64>().is_ok()) {
@@ -313,6 +374,22 @@ mod tests {
         assert_eq!(table.columns[0].name, "温度");
         assert_eq!(table.columns[1].name, "电阻");
         assert_eq!(table.columns[1].numbers[0], Some(100.0));
+    }
+
+    #[test]
+    fn forced_encoding_rejects_utf16_without_losing_real_gbk() {
+        let text = "温度,电阻\n25,100\n";
+        let mut raw = Vec::new();
+        for unit in text.encode_utf16() {
+            raw.extend_from_slice(&unit.to_le_bytes());
+        }
+        let gbk = import_csv_with(&raw, CsvEncoding::Gbk).unwrap_err();
+        assert!(gbk.contains("自动") || gbk.contains("Auto"), "{gbk}");
+        let utf8 = import_csv_with(&raw, CsvEncoding::Utf8).unwrap_err();
+        assert!(utf8.contains("自动") || utf8.contains("Auto"), "{utf8}");
+        let (encoded, _, _) = encoding_rs::GBK.encode(text);
+        let table = import_csv_with(encoded.as_ref(), CsvEncoding::Gbk).unwrap();
+        assert_eq!(table.columns[0].name, "温度");
     }
 
     #[test]

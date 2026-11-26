@@ -440,7 +440,11 @@ impl SurfaceMode {
     }
 
     pub fn all() -> &'static [SurfaceMode] {
-        &[SurfaceMode::Surface, SurfaceMode::Wireframe, SurfaceMode::Scatter]
+        &[
+            SurfaceMode::Surface,
+            SurfaceMode::Wireframe,
+            SurfaceMode::Scatter,
+        ]
     }
 }
 
@@ -494,6 +498,20 @@ impl Default for SurfaceSpec {
             perspective: true,
             title: crate::locale::t("三维图").to_string(),
         }
+    }
+}
+
+impl SurfaceSpec {
+    pub fn camera_is_default(&self) -> bool {
+        (self.azimuth + 55.0).abs() < 0.05
+            && (self.elevation - 32.0).abs() < 0.05
+            && (self.zoom - 1.0).abs() < 0.01
+    }
+
+    pub fn restore_camera(&mut self) {
+        self.azimuth = -55.0;
+        self.elevation = 32.0;
+        self.zoom = 1.0;
     }
 }
 

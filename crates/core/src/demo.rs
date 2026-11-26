@@ -1,8 +1,8 @@
 use std::f64::consts::PI;
 
 use crate::graph::{CurveKind, SurfaceMode, SurfaceSource};
-use crate::util::format_number;
 use crate::table::ColumnMode;
+use crate::util::format_number;
 use crate::Project;
 
 /// 启动时的示例：三角函数、中文分类柱状图，以及一张三维曲面。
@@ -42,7 +42,13 @@ pub fn demo_project() -> Project {
         table.columns.clear();
         table.add_column(crate::locale::t("水果"), ColumnMode::X);
         table.add_column(crate::locale::t("销量"), ColumnMode::Y);
-        let names = [crate::locale::t("苹果"), crate::locale::t("香蕉"), crate::locale::t("橙子"), crate::locale::t("葡萄"), crate::locale::t("梨")];
+        let names = [
+            crate::locale::t("苹果"),
+            crate::locale::t("香蕉"),
+            crate::locale::t("橙子"),
+            crate::locale::t("葡萄"),
+            crate::locale::t("梨"),
+        ];
         let values = [12.0, 9.5, 7.0, 11.0, 6.5];
         for (name, value) in names.iter().zip(values) {
             let row = table.nrows();
@@ -77,7 +83,8 @@ pub fn demo_project() -> Project {
 
     let note = project.new_note(crate::locale::t("使用说明"));
     if let Some(note) = project.note_mut(note) {
-        note.text = crate::locale::t("\
+        note.text = crate::locale::t(
+            "\
 先看左边的示例，再画自己的实验数据。\n\
 \n\
 1. 导入数据：在项目树的「表格」标题上右键，选「导入 CSV…」。\n\
@@ -86,9 +93,14 @@ pub fn demo_project() -> Project {
 4. 求交点：在曲线上右键「分析 → 求交点」。有交点才会标在图上并写入新表。\n\
 \n\
 滚轮缩放，左键拖拽平移，双击恢复。右键空白处可以改坐标轴、图例和标题。\n\
-用「文件 → 另存为」存成 .splot。图可以在右键菜单或「文件」里导出 PNG、SVG。\n")
-            .to_string();
+隐藏曲线后，点图例里变灰的名字即可重新显示。也可以在图上方选中曲线，点「显示」。\n\
+有未保存的修改时，新建、打开或退出会先询问。\n\
+用「文件 → 另存为」存成 .splot。图可以在右键菜单或「文件」里导出 PNG、SVG。\n",
+        )
+        .to_string();
     }
-    project.log_line(crate::locale::t("已载入示例项目。在「正弦与余弦」上右键曲线，用「分析 → 求交点」计算 sin 与 cos 的交点。"));
+    project.log_line(crate::locale::t(
+        "已载入示例项目。在「正弦与余弦」上右键曲线，用「分析 → 求交点」计算 sin 与 cos 的交点。",
+    ));
     project
 }

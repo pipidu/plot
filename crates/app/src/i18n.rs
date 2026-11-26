@@ -83,6 +83,8 @@ const ABOUT_ZH: &str = "\
 以及曲线/折线求交点（可限制 X 区间，也可与水平线、竖直线求交）。
 
 项目文件是 .splot。图形可以导出 PNG 和 SVG。
+
+发布页有 Windows 程序，也有需要图形界面的 Linux 程序。Windows 是主要使用的系统。
 ";
 
 const ABOUT_EN: &str = "\
@@ -93,6 +95,8 @@ calculus, interpolation, smoothing, FFT, and intersections of curves or polyline
 (an X range, a horizontal line, or a vertical line).
 
 Projects are .splot files. Graphs export to PNG and SVG.
+
+Releases include a Windows program and a Linux program that needs a graphical session. Windows is the main platform.
 ";
 
 pub fn about() -> &'static str {
