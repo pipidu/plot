@@ -1,0 +1,16 @@
+[package]
+name = "sciplot-plot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SciPlot 2D/3D plot engine, SVG and PNG export"
+
+[dependencies]
+sciplot-core = { path = "../core" }
+tiny-skia = "0.11"
+ab_glyph = "0.2"
+egui = { version = "0.31.1", default-features = false }
+
+[lib]
+name = "sciplot_plot"

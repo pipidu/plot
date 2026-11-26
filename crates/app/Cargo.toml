@@ -1,0 +1,23 @@
+[package]
+name = "sciplot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SciPlot — a SciDAVis-like scientific plotting program"
+build = "build.rs"
+
+[dependencies]
+sciplot-core = { path = "../core" }
+sciplot-analysis = { path = "../analysis" }
+sciplot-plot = { path = "../plot" }
+eframe = { version = "0.31.1", default-features = true }
+egui = "0.31.1"
+egui_extras = "0.31.1"
+egui_dock = "0.16"
+rfd = "=0.15.4"
+arboard = "3.4"
+serde_json.workspace = true
+
+[build-dependencies]
+winres = "0.1"

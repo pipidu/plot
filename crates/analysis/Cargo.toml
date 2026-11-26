@@ -1,0 +1,15 @@
+[package]
+name = "sciplot-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SciPlot fitting, calculus, FFT, and curve intersections"
+
+[dependencies]
+sciplot-core = { path = "../core" }
+nalgebra = "0.33"
+rustfft = "6"
+
+[lib]
+name = "sciplot_analysis"

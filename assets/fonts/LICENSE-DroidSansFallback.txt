@@ -1,0 +1,6 @@
+Droid Sans Fallback is used as the embedded CJK fallback font so SciPlot can
+display Chinese without a system font. It is licensed under the Apache License,
+Version 2.0. The font file name is DroidSansFallbackFull.ttf.
+
+On Windows, SciPlot prefers Microsoft YaHei (msyh.ttc) and Noto Sans SC when
+those fonts are installed, and falls back to this embedded font.

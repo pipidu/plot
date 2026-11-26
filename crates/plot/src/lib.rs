@@ -1,0 +1,125 @@
+//! SciPlot 绘图引擎。先生成与后端无关的图元，再交给 egui、SVG 或 PNG。
+
+mod color;
+mod contour;
+mod interact;
+mod paint;
+mod raster;
+mod render;
+mod scale;
+mod scene;
+mod surface;
+mod svg;
+
+pub use interact::{data_to_screen, nearest_point, pan_limits, screen_to_data, zoom_limits, NearestPoint};
+pub use paint::paint;
+pub use raster::{prepare_font, to_png, to_rgba, GlyphFont};
+pub use render::render;
+pub use scene::{LayerFrame, LayerView, Prim, Scene};
+pub use svg::{to_svg, SVG_FONT};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sciplot_core::{demo_project, AxisScale, CurveKind, Graph, Layer, Project, SurfaceMode, SurfaceSource};
+
+    #[test]
+    fn demo_svg_contains_chinese_axis_title() {
+        let project = demo_project();
+        let graph = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap();
+        let scene = render(&project, graph, &[], 900.0, 560.0, 1.0);
+        let svg = to_svg(&scene);
+        assert!(svg.contains("正弦与余弦"), "{svg}");
+        assert!(svg.contains("x（弧度）"));
+        assert!(svg.contains(SVG_FONT));
+        assert!(svg.contains("<polyline"));
+        assert!(!scene.layers.is_empty());
+    }
+
+    #[test]
+    fn png_starts_with_signature_and_draws_glyphs() {
+        let project = demo_project();
+        let graph = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap();
+        let scene = render(&project, graph, &[], 640.0, 400.0, 1.0);
+        let bytes = include_bytes!("../../../assets/fonts/DroidSansFallbackFull.ttf");
+        let font = GlyphFont::from_bytes(bytes).expect("内嵌字体应能加载");
+        let png = to_png(&scene, Some(&font)).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert!(png.len() > 2000);
+    }
+
+    #[test]
+    fn log_axis_maps_decade_to_the_middle() {
+        let mut project = Project::new("log");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns.clear();
+            table.add_numeric_column("X", sciplot_core::ColumnMode::X, &[1.0, 10.0, 100.0]);
+            table.add_numeric_column("Y", sciplot_core::ColumnMode::Y, &[1.0, 2.0, 3.0]);
+        }
+        let id = project.plot_table(table, CurveKind::Line).unwrap();
+        {
+            let graph = project.graph_mut(id).unwrap();
+            graph.layers[0].x_axis.scale = AxisScale::Log10;
+            graph.layers[0].x_axis.min = Some(1.0);
+            graph.layers[0].x_axis.max = Some(100.0);
+        }
+        let graph = project.graph(id).unwrap();
+        let scene = render(&project, graph, &[], 800.0, 500.0, 1.0);
+        let frame = &scene.layers[0];
+        let (x, _) = screen_to_data(frame, frame.plot.x + frame.plot.w * 0.5, frame.plot.y + frame.plot.h * 0.5).unwrap();
+        assert!((x - 10.0).abs() < 0.2, "x={x}");
+    }
+
+    #[test]
+    fn surface_emits_triangles() {
+        let project = demo_project();
+        let graph = project.graphs.iter().find(|graph| graph.surface.is_some()).unwrap();
+        let scene = render(&project, graph, &[], 700.0, 520.0, 1.0);
+        let triangles = scene.primitives.iter().filter(|prim| matches!(prim, Prim::Triangle { .. })).count();
+        assert!(triangles > 100, "triangles={triangles}");
+        assert!(scene.text_content().contains("波面"));
+    }
+
+    #[test]
+    fn function_surface_also_renders() {
+        let mut project = Project::new("fn");
+        project.plot_surface(
+            SurfaceSource::Function {
+                expr: "sin(x)*cos(y)".into(),
+                x_min: -3.0,
+                x_max: 3.0,
+                y_min: -3.0,
+                y_max: 3.0,
+                n: 12,
+            },
+            SurfaceMode::Wireframe,
+            "函数曲面",
+        );
+        let graph = &project.graphs[0];
+        let scene = render(&project, graph, &[], 600.0, 400.0, 1.0);
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Polyline { .. })));
+    }
+
+    #[test]
+    fn bars_keep_chinese_categories() {
+        let project = demo_project();
+        let graph = project.graphs.iter().find(|graph| graph.name == "水果销量").unwrap();
+        let scene = render(&project, graph, &[], 800.0, 480.0, 1.0);
+        let text = scene.text_content();
+        assert!(text.contains("苹果"));
+        assert!(text.contains("香蕉"));
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Rect { fill: Some(_), .. })));
+    }
+
+    #[test]
+    fn empty_layer_still_has_a_frame() {
+        let project = Project::new("empty");
+        let mut graph = Graph::new(sciplot_core::GraphId(1), "空");
+        graph.layers = vec![Layer::default()];
+        let scene = render(&project, &graph, &[], 400.0, 300.0, 1.0);
+        assert_eq!(scene.layers.len(), 1);
+        assert!(scene.layers[0].plot.w > 10.0);
+    }
+}

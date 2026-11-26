@@ -1,0 +1,515 @@
+use serde::{Deserialize, Serialize};
+
+use crate::graph::{Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSpec, SurfaceSource};
+use crate::matrix::Matrix;
+use crate::table::{ColumnMode, Table, TableId};
+use crate::util::unique_name;
+use crate::{GraphId, MatrixId, NoteId};
+
+pub const FORMAT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Note {
+    pub id: NoteId,
+    pub name: String,
+    pub text: String,
+}
+
+impl Default for Note {
+    fn default() -> Self {
+        Self {
+            id: NoteId(0),
+            name: "备注".to_string(),
+            text: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Project {
+    pub name: String,
+    pub tables: Vec<Table>,
+    pub matrices: Vec<Matrix>,
+    pub graphs: Vec<Graph>,
+    pub notes: Vec<Note>,
+    pub log: Vec<String>,
+    pub next_id: u64,
+}
+
+impl Default for Project {
+    fn default() -> Self {
+        Self::new("未命名项目")
+    }
+}
+
+impl Project {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            tables: Vec::new(),
+            matrices: Vec::new(),
+            graphs: Vec::new(),
+            notes: Vec::new(),
+            log: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    pub fn log_line(&mut self, line: impl Into<String>) {
+        self.log.push(line.into());
+        if self.log.len() > 2000 {
+            let extra = self.log.len() - 2000;
+            self.log.drain(0..extra);
+        }
+    }
+
+    fn alloc(&mut self) -> u64 {
+        let id = self.next_id.max(1);
+        self.next_id = id + 1;
+        id
+    }
+
+    pub fn fix_ids(&mut self) {
+        let mut max_id = 0u64;
+        let mut bump = |id: u64| {
+            if id > max_id {
+                max_id = id;
+            }
+        };
+        for table in &self.tables {
+            bump(table.id.0);
+        }
+        for matrix in &self.matrices {
+            bump(matrix.id.0);
+        }
+        for graph in &self.graphs {
+            bump(graph.id.0);
+            for layer in &graph.layers {
+                for annotation in &layer.annotations {
+                    bump(annotation.id);
+                }
+            }
+        }
+        for note in &self.notes {
+            bump(note.id.0);
+        }
+        if self.next_id <= max_id {
+            self.next_id = max_id + 1;
+        }
+    }
+
+    pub fn new_table(&mut self, name: &str) -> TableId {
+        let id = TableId(self.alloc());
+        let name = unique_name(&self.table_names(), name);
+        self.tables.push(Table::new(id, name));
+        id
+    }
+
+    pub fn new_matrix(&mut self, name: &str, rows: usize, cols: usize) -> MatrixId {
+        let id = MatrixId(self.alloc());
+        let name = unique_name(&self.matrix_names(), name);
+        self.matrices.push(Matrix::new(id, name, rows, cols));
+        id
+    }
+
+    pub fn new_graph(&mut self, name: &str) -> GraphId {
+        let id = GraphId(self.alloc());
+        let name = unique_name(&self.graph_names(), name);
+        self.graphs.push(Graph::new(id, name));
+        id
+    }
+
+    pub fn new_note(&mut self, name: &str) -> NoteId {
+        let id = NoteId(self.alloc());
+        let name = unique_name(&self.notes.iter().map(|n| n.name.clone()).collect::<Vec<_>>(), name);
+        self.notes.push(Note {
+            id,
+            name,
+            text: String::new(),
+        });
+        id
+    }
+
+    pub fn table(&self, id: TableId) -> Option<&Table> {
+        self.tables.iter().find(|t| t.id == id)
+    }
+
+    pub fn table_mut(&mut self, id: TableId) -> Option<&mut Table> {
+        self.tables.iter_mut().find(|t| t.id == id)
+    }
+
+    pub fn matrix(&self, id: MatrixId) -> Option<&Matrix> {
+        self.matrices.iter().find(|m| m.id == id)
+    }
+
+    pub fn matrix_mut(&mut self, id: MatrixId) -> Option<&mut Matrix> {
+        self.matrices.iter_mut().find(|m| m.id == id)
+    }
+
+    pub fn graph(&self, id: GraphId) -> Option<&Graph> {
+        self.graphs.iter().find(|g| g.id == id)
+    }
+
+    pub fn graph_mut(&mut self, id: GraphId) -> Option<&mut Graph> {
+        self.graphs.iter_mut().find(|g| g.id == id)
+    }
+
+    pub fn note_mut(&mut self, id: NoteId) -> Option<&mut Note> {
+        self.notes.iter_mut().find(|n| n.id == id)
+    }
+
+    pub fn delete_table(&mut self, id: TableId) -> bool {
+        let before = self.tables.len();
+        self.tables.retain(|t| t.id != id);
+        self.tables.len() != before
+    }
+
+    pub fn delete_matrix(&mut self, id: MatrixId) -> bool {
+        let before = self.matrices.len();
+        self.matrices.retain(|m| m.id != id);
+        self.matrices.len() != before
+    }
+
+    pub fn delete_graph(&mut self, id: GraphId) -> bool {
+        let before = self.graphs.len();
+        self.graphs.retain(|g| g.id != id);
+        self.graphs.len() != before
+    }
+
+    pub fn delete_note(&mut self, id: NoteId) -> bool {
+        let before = self.notes.len();
+        self.notes.retain(|n| n.id != id);
+        self.notes.len() != before
+    }
+
+    pub fn rename_table(&mut self, id: TableId, name: &str) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("名称不能为空".into());
+        }
+        if self.tables.iter().any(|t| t.id != id && t.name == name) {
+            return Err("已有同名表格".into());
+        }
+        self.table_mut(id).ok_or("找不到表格")?.name = name.to_string();
+        Ok(())
+    }
+
+    pub fn to_json(&self) -> Result<String, String> {
+        let file = ProjectFile {
+            format: FORMAT_VERSION,
+            project: self.clone(),
+        };
+        serde_json::to_string_pretty(&file).map_err(|err| err.to_string())
+    }
+
+    pub fn from_json(text: &str) -> Result<Project, String> {
+        if let Ok(file) = serde_json::from_str::<ProjectFile>(text) {
+            let mut project = file.project;
+            project.fix_ids();
+            return Ok(project);
+        }
+        let mut project: Project = serde_json::from_str(text).map_err(|err| err.to_string())?;
+        project.fix_ids();
+        Ok(project)
+    }
+
+    /// 用表的 X 列和全部 Y 列新建一张图。直方图、箱线图、饼图按 Y 列的数值作图。
+    pub fn plot_table(&mut self, table_id: TableId, kind: CurveKind) -> Result<GraphId, String> {
+        let table_name = self.table(table_id).ok_or("找不到表格")?.name.clone();
+        let graph_id = self.new_graph(&format!("{table_name}-{}", kind.label()));
+        self.add_curves(graph_id, 0, table_id, kind)?;
+        if let Some(graph) = self.graph_mut(graph_id) {
+            if let Some(layer) = graph.layers.first_mut() {
+                if layer.title.is_empty() {
+                    layer.title = format!("{table_name} {}", kind.label());
+                }
+            }
+        }
+        Ok(graph_id)
+    }
+
+    pub fn add_curves(&mut self, graph_id: GraphId, layer: usize, table_id: TableId, kind: CurveKind) -> Result<(), String> {
+        let curves = {
+            let table = self.table(table_id).ok_or("找不到表格")?;
+            curves_from_table(table, kind)?
+        };
+        let graph = self.graph_mut(graph_id).ok_or("找不到图形")?;
+        if graph.layers.is_empty() {
+            graph.layers.push(Layer::default());
+        }
+        let layer = graph.layers.get_mut(layer).ok_or("找不到图层")?;
+        let color_start = layer.curves.len();
+        for (offset, mut curve) in curves.into_iter().enumerate() {
+            curve.style = CurveStyle::from_index(color_start + offset);
+            layer.curves.push(curve);
+        }
+        Ok(())
+    }
+
+    pub fn plot_matrix(&mut self, matrix_id: MatrixId, kind: CurveKind) -> Result<GraphId, String> {
+        if !matches!(kind, CurveKind::Heatmap | CurveKind::Contour) {
+            return Err("矩阵可以直接画成热力图或等高线".into());
+        }
+        let name = self.matrix(matrix_id).ok_or("找不到矩阵")?.name.clone();
+        let graph_id = self.new_graph(&format!("{name}-{}", kind.label()));
+        let style = CurveStyle::from_index(0);
+        if let Some(graph) = self.graph_mut(graph_id) {
+            let layer = &mut graph.layers[0];
+            layer.title = format!("{name} {}", kind.label());
+            layer.curves.push(Curve {
+                name: name.clone(),
+                kind,
+                style,
+                source: DataSource::Matrix { matrix: matrix_id },
+                visible: true,
+            });
+        }
+        Ok(graph_id)
+    }
+
+    pub fn plot_surface(&mut self, source: SurfaceSource, mode: SurfaceMode, title: &str) -> GraphId {
+        let graph_id = self.new_graph(title);
+        if let Some(graph) = self.graph_mut(graph_id) {
+            graph.surface = Some(SurfaceSpec {
+                source,
+                mode,
+                title: title.to_string(),
+                ..SurfaceSpec::default()
+            });
+        }
+        graph_id
+    }
+
+    pub fn matrix_from_table(&mut self, table_id: TableId) -> Result<MatrixId, String> {
+        let table = self.table(table_id).ok_or("找不到表格")?;
+        let cols: Vec<usize> = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.numbers.iter().any(|v| v.is_some()))
+            .map(|(i, _)| i)
+            .collect();
+        if cols.is_empty() {
+            return Err("表中没有数值列".into());
+        }
+        let rows = table.nrows().max(1);
+        let name = format!("{}-矩阵", table.name);
+        let matrix_id = self.new_matrix(&name, rows, cols.len());
+        let table = self.table(table_id).unwrap();
+        let snapshot: Vec<Vec<Option<f64>>> = cols
+            .iter()
+            .map(|&index| table.columns[index].numbers.clone())
+            .collect();
+        let matrix = self.matrix_mut(matrix_id).unwrap();
+        matrix.x_min = 1.0;
+        matrix.x_max = cols.len() as f64;
+        matrix.y_min = 1.0;
+        matrix.y_max = rows as f64;
+        for (c, column) in snapshot.iter().enumerate() {
+            for r in 0..rows {
+                matrix.set(r, c, column.get(r).copied().flatten());
+            }
+        }
+        Ok(matrix_id)
+    }
+
+    pub fn table_from_matrix(&mut self, matrix_id: MatrixId) -> Result<TableId, String> {
+        let matrix = self.matrix(matrix_id).ok_or("找不到矩阵")?.clone();
+        let table_id = self.new_table(&format!("{}-表", matrix.name));
+        let table = self.table_mut(table_id).unwrap();
+        table.columns.clear();
+        for c in 0..matrix.cols {
+            let values: Vec<f64> = (0..matrix.rows)
+                .map(|r| matrix.get(r, c).unwrap_or(f64::NAN))
+                .collect();
+            let mode = if c == 0 { ColumnMode::X } else { ColumnMode::Y };
+            table.add_numeric_column(format!("C{}", c + 1), mode, &values);
+        }
+        Ok(table_id)
+    }
+
+    pub fn alloc_annotation_id(&mut self) -> u64 {
+        self.alloc()
+    }
+
+    pub fn insert_table(&mut self, mut table: Table) -> TableId {
+        table.id = TableId(self.alloc());
+        table.name = unique_name(&self.table_names(), &table.name);
+        let id = table.id;
+        self.tables.push(table);
+        id
+    }
+
+    pub fn insert_matrix(&mut self, mut matrix: Matrix) -> MatrixId {
+        matrix.id = MatrixId(self.alloc());
+        matrix.name = unique_name(&self.matrix_names(), &matrix.name);
+        let id = matrix.id;
+        self.matrices.push(matrix);
+        id
+    }
+
+    fn table_names(&self) -> Vec<String> {
+        self.tables.iter().map(|t| t.name.clone()).collect()
+    }
+
+    fn matrix_names(&self) -> Vec<String> {
+        self.matrices.iter().map(|m| m.name.clone()).collect()
+    }
+
+    fn graph_names(&self) -> Vec<String> {
+        self.graphs.iter().map(|g| g.name.clone()).collect()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub format: u32,
+    pub project: Project,
+}
+
+fn curves_from_table(table: &Table, kind: CurveKind) -> Result<Vec<Curve>, String> {
+    if table.columns.is_empty() {
+        return Err("表格没有列".into());
+    }
+    if kind == CurveKind::Vector {
+        return Ok(vec![vector_curve(table)?]);
+    }
+    let x = table
+        .columns
+        .iter()
+        .position(|column| column.mode == ColumnMode::X)
+        .unwrap_or(0);
+    let mut y_cols: Vec<usize> = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.mode == ColumnMode::Y || column.mode == ColumnMode::Z)
+        .map(|(index, _)| index)
+        .collect();
+    if y_cols.is_empty() {
+        y_cols = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(index, column)| *index != x && column.numbers.iter().any(|v| v.is_some()))
+            .map(|(index, _)| index)
+            .collect();
+    }
+    if y_cols.is_empty() {
+        return Err("没有可绘制的 Y 列。请把一列设为 Y，或填入数值。".into());
+    }
+    let x_err = table.columns.iter().position(|column| column.mode == ColumnMode::XErr);
+    let y_errs: Vec<usize> = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.mode == ColumnMode::YErr)
+        .map(|(index, _)| index)
+        .collect();
+    let mut curves = Vec::new();
+    for y in y_cols {
+        let y_err = if table.columns.get(y + 1).map(|c| c.mode) == Some(ColumnMode::YErr) {
+            Some(y + 1)
+        } else if y_errs.len() == 1 {
+            Some(y_errs[0])
+        } else {
+            None
+        };
+        curves.push(Curve {
+            name: table.columns[y].name.clone(),
+            kind,
+            style: CurveStyle::default(),
+            source: DataSource::Columns {
+                table: table.id,
+                x,
+                y,
+                x_err: if kind == CurveKind::ErrorBars { x_err } else { None },
+                y_err: if kind == CurveKind::ErrorBars { y_err } else { None },
+                dx: None,
+                dy: None,
+            },
+            visible: true,
+        });
+    }
+    Ok(curves)
+}
+
+fn vector_curve(table: &Table) -> Result<Curve, String> {
+    let x = table
+        .columns
+        .iter()
+        .position(|column| column.mode == ColumnMode::X)
+        .unwrap_or(0);
+    let y = table
+        .columns
+        .iter()
+        .position(|column| column.mode == ColumnMode::Y)
+        .unwrap_or(1);
+    let find = |names: &[&str]| {
+        table.columns.iter().position(|column| {
+            names.iter().any(|name| column.name.eq_ignore_ascii_case(name))
+        })
+    };
+    let mut dx = find(&["dx", "dX", "vx"]);
+    let mut dy = find(&["dy", "dY", "vy"]);
+    if dx.is_none() || dy.is_none() {
+        let extra: Vec<usize> = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(index, column)| {
+                *index != x && *index != y && column.numbers.iter().any(|v| v.is_some())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if extra.len() >= 2 {
+            dx = Some(extra[0]);
+            dy = Some(extra[1]);
+        }
+    }
+    let (Some(dx), Some(dy)) = (dx, dy) else {
+        return Err("向量场需要 X、Y、dx、dy 四列（后两列可命名为 dx、dy）".into());
+    };
+    if y >= table.columns.len() {
+        return Err("向量场需要 Y 列".into());
+    }
+    Ok(Curve {
+        name: "向量".to_string(),
+        kind: CurveKind::Vector,
+        style: CurveStyle::default(),
+        source: DataSource::Columns {
+            table: table.id,
+            x,
+            y,
+            x_err: None,
+            y_err: None,
+            dx: Some(dx),
+            dy: Some(dy),
+        },
+        visible: true,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_and_plot() {
+        let mut project = Project::new("P");
+        let table_id = project.new_table("数据");
+        {
+            let table = project.table_mut(table_id).unwrap();
+            table.columns[0].set_numbers(&[0.0, 1.0, 2.0]);
+            table.columns[1].set_numbers(&[0.0, 1.0, 4.0]);
+        }
+        let graph_id = project.plot_table(table_id, CurveKind::Line).unwrap();
+        assert_eq!(project.graph(graph_id).unwrap().layers[0].curves.len(), 1);
+        let json = project.to_json().unwrap();
+        let loaded = Project::from_json(&json).unwrap();
+        assert_eq!(loaded.name, "P");
+        assert_eq!(loaded.tables[0].columns[1].numbers[2], Some(4.0));
+        assert!(loaded.next_id > project.graphs[0].id.0);
+    }
+}
