@@ -105,10 +105,25 @@ pub fn parse_date(text: &str) -> Option<f64> {
     let year: i32 = parts[0].parse().ok()?;
     let month: u32 = parts[1].parse().ok()?;
     let day: u32 = parts[2].parse().ok()?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
         return None;
     }
     Some(days_from_civil(year, month, day))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap(year: i32) -> bool {
+    let divisible = |n: i32| year.rem_euclid(n) == 0;
+    divisible(4) && (!divisible(100) || divisible(400))
 }
 
 /// Howard Hinnant 的公历转天数算法，1970-01-01 为 0。
@@ -139,6 +154,10 @@ mod tests {
         assert_eq!(parse_date("1970-01-01"), Some(0.0));
         assert_eq!(parse_date("1970/01/02"), Some(1.0));
         assert!(parse_date("not-a-date").is_none());
+        assert!(parse_date("2024-02-29").is_some());
+        assert!(parse_date("2023-02-29").is_none());
+        assert!(parse_date("2024-02-31").is_none());
+        assert!(parse_date("2024-04-31").is_none());
     }
 
     #[test]

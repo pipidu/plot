@@ -184,6 +184,93 @@ impl Project {
         self.notes.len() != before
     }
 
+    /// 插入列，并把引用这张表的曲线列号一起后移。
+    pub fn insert_table_column(&mut self, id: TableId, index: usize, name: impl Into<String>, mode: ColumnMode) -> Result<(), String> {
+        let at = self.table_mut(id).ok_or(crate::t("找不到表格"))?.insert_column(index, name, mode);
+        self.retarget_columns(id, at, true);
+        Ok(())
+    }
+
+    /// 删除列。引用被删的 X 或 Y 的曲线会去掉，误差列和向量分量则清空。
+    pub fn remove_table_column(&mut self, id: TableId, index: usize) -> Result<(), String> {
+        let removed = self.table_mut(id).ok_or(crate::t("找不到表格"))?.remove_column(index);
+        if !removed {
+            return Err(crate::t("没有这一列").into());
+        }
+        self.retarget_columns(id, index, false);
+        Ok(())
+    }
+
+    pub fn graphs_using_table(&self, id: TableId) -> Vec<String> {
+        self.graphs
+            .iter()
+            .filter(|graph| {
+                graph.layers.iter().any(|layer| {
+                    layer.curves.iter().any(|curve| matches!(curve.source, DataSource::Columns { table, .. } if table == id))
+                })
+            })
+            .map(|graph| graph.name.clone())
+            .collect()
+    }
+
+    pub fn graphs_using_matrix(&self, id: MatrixId) -> Vec<String> {
+        self.graphs
+            .iter()
+            .filter(|graph| {
+                let surface = matches!(graph.surface.as_ref().map(|spec| &spec.source), Some(SurfaceSource::Matrix(matrix)) if *matrix == id);
+                let curve = graph.layers.iter().any(|layer| {
+                    layer.curves.iter().any(|curve| matches!(curve.source, DataSource::Matrix { matrix } if matrix == id))
+                });
+                surface || curve
+            })
+            .map(|graph| graph.name.clone())
+            .collect()
+    }
+
+    fn retarget_columns(&mut self, id: TableId, at: usize, inserted: bool) {
+        let mut dropped = Vec::new();
+        for graph in &mut self.graphs {
+            for layer in &mut graph.layers {
+                let mut kept = Vec::with_capacity(layer.curves.len());
+                for mut curve in layer.curves.drain(..) {
+                    let drop_curve = match &mut curve.source {
+                        DataSource::Columns {
+                            table,
+                            x,
+                            y,
+                            x_err,
+                            y_err,
+                            dx,
+                            dy,
+                        } if *table == id => {
+                            let lost_x = shift_index(x, at, inserted);
+                            let lost_y = shift_index(y, at, inserted);
+                            shift_optional(x_err, at, inserted);
+                            shift_optional(y_err, at, inserted);
+                            shift_optional(dx, at, inserted);
+                            shift_optional(dy, at, inserted);
+                            !inserted && (lost_x || lost_y)
+                        }
+                        _ => false,
+                    };
+                    if drop_curve {
+                        dropped.push(curve.name);
+                    } else {
+                        kept.push(curve);
+                    }
+                }
+                layer.curves = kept;
+            }
+        }
+        for name in dropped {
+            self.log_line(crate::trf!(
+                "曲线「{name}」因列被删除而移除",
+                "Curve \"{name}\" was removed because its column was deleted",
+                name = name
+            ));
+        }
+    }
+
     pub fn rename_table(&mut self, id: TableId, name: &str) -> Result<(), String> {
         if name.trim().is_empty() {
             return Err(crate::locale::t("名称不能为空").into());
@@ -204,12 +291,31 @@ impl Project {
     }
 
     pub fn from_json(text: &str) -> Result<Project, String> {
-        if let Ok(file) = serde_json::from_str::<ProjectFile>(text) {
-            let mut project = file.project;
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|err| format!("不是合法的 JSON：{err}"))?;
+        let obj = value.as_object().ok_or(crate::t("不是 SciPlot 项目文件"))?;
+        if obj.contains_key("format") || obj.contains_key("project") {
+            let format = obj.get("format").and_then(json_format).ok_or(crate::t("不是 SciPlot 项目文件：缺少 format"))?;
+            if format > FORMAT_VERSION {
+                return Err(crate::trf!(
+                    "项目由更新版本创建（format {format}），请升级 SciPlot",
+                    "This project was written by a newer SciPlot (format {format}). Please upgrade.",
+                    format = format
+                ));
+            }
+            let project = obj.get("project").cloned().ok_or(crate::t("不是 SciPlot 项目文件：缺少 project"))?;
+            let mut project: Project = serde_json::from_value(project).map_err(|err| {
+                crate::trf!("不是 SciPlot 项目文件：{err}", "This is not a SciPlot project: {err}", err = err)
+            })?;
             project.fix_ids();
             return Ok(project);
         }
-        let mut project: Project = serde_json::from_str(text).map_err(|err| err.to_string())?;
+        let legacy = ["tables", "graphs", "matrices", "notes"].iter().any(|key| obj.contains_key(*key));
+        if !legacy {
+            return Err(crate::t("不是 SciPlot 项目文件").into());
+        }
+        let mut project: Project = serde_json::from_value(value).map_err(|err| {
+            crate::trf!("不是 SciPlot 项目文件：{err}", "This is not a SciPlot project: {err}", err = err)
+        })?;
         project.fix_ids();
         Ok(project)
     }
@@ -402,6 +508,45 @@ pub struct ProjectFile {
     pub project: Project,
 }
 
+fn json_format(value: &serde_json::Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .or_else(|| value.as_i64().and_then(|n| u32::try_from(n).ok()))
+}
+
+/// 插入时把 `>= at` 的列号加一。删除时若正好是这一列则返回 true，更大的列号减一。
+fn shift_index(index: &mut usize, at: usize, inserted: bool) -> bool {
+    if inserted {
+        if *index >= at {
+            *index += 1;
+        }
+        false
+    } else if *index == at {
+        true
+    } else {
+        if *index > at {
+            *index -= 1;
+        }
+        false
+    }
+}
+
+fn shift_optional(slot: &mut Option<usize>, at: usize, inserted: bool) {
+    let Some(value) = *slot else {
+        return;
+    };
+    if inserted {
+        if value >= at {
+            *slot = Some(value + 1);
+        }
+    } else if value == at {
+        *slot = None;
+    } else if value > at {
+        *slot = Some(value - 1);
+    }
+}
+
 fn curves_from_table(table: &Table, kind: CurveKind) -> Result<Vec<Curve>, String> {
     if table.columns.is_empty() {
         return Err(crate::locale::t("表格没有列").into());
@@ -550,5 +695,55 @@ mod tests {
         assert_eq!(graph.layers[0].title, "B-A");
         assert_eq!(graph.layers[0].x_axis.label, "A");
         assert_eq!(graph.layers[0].y_axis.label, "B");
+    }
+
+    #[test]
+    fn inserting_or_removing_columns_keeps_curve_bindings() {
+        let mut project = Project::new("实验");
+        let table_id = project.new_table("温度电阻");
+        {
+            let table = project.table_mut(table_id).unwrap();
+            table.columns[0].name = "温度".into();
+            table.columns[1].name = "电阻".into();
+            table.columns[0].set_numbers(&[10.0, 20.0, 30.0]);
+            table.columns[1].set_numbers(&[100.0, 200.0, 300.0]);
+        }
+        let graph_id = project.plot_table(table_id, CurveKind::Line).unwrap();
+        project.insert_table_column(table_id, 0, "备注", ColumnMode::None).unwrap();
+        let source = project.graph(graph_id).unwrap().layers[0].curves[0].source.clone();
+        match source {
+            DataSource::Columns { x, y, .. } => {
+                assert_eq!((x, y), (1, 2));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let series = crate::resolve_curve(&project, &project.graph(graph_id).unwrap().layers[0].curves[0]).unwrap();
+        assert_eq!(series.x, vec![10.0, 20.0, 30.0]);
+        assert_eq!(series.y, vec![100.0, 200.0, 300.0]);
+
+        project.remove_table_column(table_id, 2).unwrap();
+        assert!(project.graph(graph_id).unwrap().layers[0].curves.is_empty());
+        assert!(project.log.iter().any(|line| line.contains("因列被删除而移除")));
+    }
+
+    #[test]
+    fn from_json_rejects_unknown_format_and_plain_objects() {
+        assert!(Project::from_json("{}").is_err());
+        assert!(Project::from_json(r#"{"foo":1,"bar":"baz"}"#).is_err());
+        assert!(Project::from_json(r#"{"format":1}"#).is_err());
+        let err = Project::from_json(r#"{"format":99,"project":{"name":"未来"}}"#).unwrap_err();
+        assert!(err.contains("升级"), "{err}");
+        let loaded = Project::from_json(r#"{"format":1,"project":{"name":"实验"}}"#).unwrap();
+        assert_eq!(loaded.name, "实验");
+        let legacy = Project::from_json(r#"{"name":"旧","tables":[]}"#).unwrap();
+        assert_eq!(legacy.name, "旧");
+    }
+
+    #[test]
+    fn old_axis_json_still_loads() {
+        let axis: crate::Axis = serde_json::from_str(r#"{"label":"x","scale":"Linear"}"#).unwrap();
+        assert!(axis.step.is_none());
+        assert!(axis.minor_count.is_none());
+        assert_eq!(axis.label, "x");
     }
 }

@@ -82,8 +82,13 @@ fn uniformish(x: &[f64], y: &[f64]) -> Result<(f64, Vec<f64>), String> {
     }
     dx.sort_by(|a, b| a.total_cmp(b));
     let dt = dx[dx.len() / 2];
-    if dt <= 0.0 {
+    if dt <= 0.0 || !dt.is_finite() {
         return Err(sciplot_core::t("采样间隔无效").into());
+    }
+    let lo = dx[0];
+    let hi = *dx.last().unwrap_or(&dt);
+    if lo < dt * 0.99 || hi > dt * 1.01 {
+        return Err(sciplot_core::t("X 间隔不均匀，请先插值").into());
     }
     Ok((dt, pairs.into_iter().map(|(_, y)| y).collect()))
 }
@@ -113,5 +118,14 @@ mod tests {
         let filtered = fft_filter(&x, &y, 0.0, false).unwrap();
         let energy: f64 = filtered.iter().map(|v| v * v).sum();
         assert!(energy < 1e-6, "lowpass of everything should be ~0, energy {energy}");
+    }
+
+    #[test]
+    fn uneven_spacing_is_rejected() {
+        let mut x: Vec<f64> = (0..32).map(|i| i as f64).collect();
+        x.extend((0..32).map(|i| 31.0 + (i + 1) as f64 * 5.0));
+        let y: Vec<f64> = x.iter().map(|v| (v * 0.2).sin()).collect();
+        let err = fft_spectrum(&x, &y).unwrap_err();
+        assert!(err.contains("不均匀"), "{err}");
     }
 }

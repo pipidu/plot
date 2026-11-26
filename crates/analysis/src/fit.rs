@@ -114,12 +114,14 @@ fn fit_polynomial(x: &[f64], y: &[f64], degree: usize) -> Result<FitResult, Stri
     if n < p {
         return Err(sciplot_core::trf!("多项式 {degree} 阶至少需要 {p} 个点，当前只有 {n} 个", "A polynomial of degree {degree} needs at least {p} points; only {n} are available", degree = degree, p = p, n = n));
     }
+    let (center, scale) = center_scale(x);
+    let mapped: Vec<f64> = x.iter().map(|xi| (xi - center) / scale).collect();
     let mut design = DMatrix::zeros(n, p);
-    for (row, &xi) in x.iter().enumerate() {
+    for (row, &ti) in mapped.iter().enumerate() {
         let mut power = 1.0;
         for col in 0..p {
             design[(row, col)] = power;
-            power *= xi;
+            power *= ti;
         }
     }
     let target = DVector::from_column_slice(y);
@@ -130,17 +132,36 @@ fn fit_polynomial(x: &[f64], y: &[f64], degree: usize) -> Result<FitResult, Stri
         .lu()
         .solve(&rhs)
         .ok_or(sciplot_core::t("多项式拟合失败，设计矩阵秩不足"))?;
-    let values: Vec<f64> = solution.iter().copied().collect();
+    let scaled: Vec<f64> = solution.iter().copied().collect();
     let predicted: Vec<f64> = (0..n)
-        .map(|row| (0..p).map(|col| design[(row, col)] * values[col]).sum())
+        .map(|row| (0..p).map(|col| design[(row, col)] * scaled[col]).sum())
         .collect();
     let (r2, chi2) = goodness(y, &predicted);
     let sigma2 = if n > p { chi2 / (n - p) as f64 } else { 0.0 };
-    let stderr = match normal.try_inverse() {
-        Some(cov) => (0..p).map(|i| (sigma2 * cov[(i, i)].max(0.0)).sqrt()).collect(),
-        None => vec![f64::NAN; p],
+    let mut warnings = Vec::new();
+    if degree > 9 {
+        warnings.push(sciplot_core::t("阶数较高，系数可能不稳定"));
+    }
+    let stderr = match normal.clone().try_inverse() {
+        Some(cov) => {
+            let cond = inf_norm(&normal) * inf_norm(&cov);
+            if !cond.is_finite() || cond > 1e12 {
+                warnings.push(sciplot_core::t("设计矩阵病态，系数不可靠"));
+            }
+            transformed_stderr(&cov, sigma2, center, scale, p)
+        }
+        None => {
+            warnings.push(sciplot_core::t("设计矩阵病态，系数不可靠"));
+            vec![f64::NAN; p]
+        }
     };
+    let values = expand_coefficients(&scaled, center, scale);
     let names = (0..p).map(|i| format!("a{i}")).collect();
+    let note = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("{}。", warnings.join("。"))
+    };
     Ok(FitResult {
         names,
         expr: polynomial_expr(&values),
@@ -149,8 +170,82 @@ fn fit_polynomial(x: &[f64], y: &[f64], degree: usize) -> Result<FitResult, Stri
         r2,
         chi2,
         n,
-        note: String::new(),
+        note,
     })
+}
+
+fn center_scale(x: &[f64]) -> (f64, f64) {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &value in x {
+        lo = lo.min(value);
+        hi = hi.max(value);
+    }
+    let center = 0.5 * (lo + hi);
+    let half = 0.5 * (hi - lo);
+    let scale = if half > 1e-15 { half } else { 1.0 };
+    (center, scale)
+}
+
+fn expand_coefficients(scaled: &[f64], center: f64, scale: f64) -> Vec<f64> {
+    let mut values = vec![0.0; scaled.len()];
+    for (k, &coeff) in scaled.iter().enumerate() {
+        if coeff == 0.0 || !coeff.is_finite() {
+            continue;
+        }
+        for (j, slot) in values.iter_mut().enumerate().take(k + 1) {
+            *slot += coeff * monomial_factor(k, j, center, scale);
+        }
+    }
+    values
+}
+
+fn transformed_stderr(cov: &DMatrix<f64>, sigma2: f64, center: f64, scale: f64, p: usize) -> Vec<f64> {
+    let mut stderr = Vec::with_capacity(p);
+    for j in 0..p {
+        let mut var = 0.0;
+        for k in j..p {
+            for m in j..p {
+                var += monomial_factor(k, j, center, scale) * cov[(k, m)] * monomial_factor(m, j, center, scale);
+            }
+        }
+        stderr.push((sigma2 * var.max(0.0)).sqrt());
+    }
+    stderr
+}
+
+/// `(x - center)^k / scale^k` 展开后 `x^j` 的系数，`j <= k`。
+fn monomial_factor(k: usize, j: usize, center: f64, scale: f64) -> f64 {
+    if j > k || scale == 0.0 {
+        return 0.0;
+    }
+    let sign = if (k - j) % 2 == 0 { 1.0 } else { -1.0 };
+    binom(k, j) * sign * center.powi((k - j) as i32) / scale.powi(k as i32)
+}
+
+fn binom(k: usize, j: usize) -> f64 {
+    if j > k {
+        return 0.0;
+    }
+    let j = j.min(k - j);
+    let mut value = 1.0;
+    for i in 0..j {
+        value *= (k - i) as f64;
+        value /= (i + 1) as f64;
+    }
+    value
+}
+
+fn inf_norm(matrix: &DMatrix<f64>) -> f64 {
+    let mut max = 0.0_f64;
+    for row in 0..matrix.nrows() {
+        let mut sum = 0.0;
+        for col in 0..matrix.ncols() {
+            sum += matrix[(row, col)].abs();
+        }
+        max = max.max(sum);
+    }
+    max
 }
 
 fn polynomial_expr(coeff: &[f64]) -> String {
@@ -545,6 +640,17 @@ mod tests {
         assert!((fit.values[0] - 1.0).abs() < 1e-6, "{:?}", fit.values);
         assert!((fit.values[1] - 2.0).abs() < 1e-6, "{:?}", fit.values);
         assert!((fit.values[2] - 3.0).abs() < 1e-6, "{:?}", fit.values);
+    }
+
+    #[test]
+    fn high_degree_polynomial_keeps_the_quadratic_and_warns() {
+        let x: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let y: Vec<f64> = x.iter().map(|v| v * v).collect();
+        let fit = fit_series(&x, &y, &FitModel::Polynomial(15)).unwrap();
+        assert!((fit.values[2] - 1.0).abs() < 1e-3, "{:?}", fit.values);
+        assert!(fit.values[0].abs() < 1e-2, "{:?}", fit.values);
+        assert!(fit.values[1].abs() < 1e-2, "{:?}", fit.values);
+        assert!(fit.note.contains("阶数") || fit.note.contains("病态"), "{}", fit.note);
     }
 
     #[test]

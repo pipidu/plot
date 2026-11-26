@@ -211,6 +211,10 @@ pub struct Axis {
     pub inverted: bool,
     pub label_size: f32,
     pub tick_size: f32,
+    /// 主刻度步长。空表示按 1-2-5 自动取。对数轴上表示每隔几个十进制数量级一条主刻度。
+    pub step: Option<f64>,
+    /// 相邻主刻度之间分成几段。空表示 4 等分。
+    pub minor_count: Option<u8>,
 }
 
 impl Default for Axis {
@@ -225,6 +229,8 @@ impl Default for Axis {
             inverted: false,
             label_size: 14.0,
             tick_size: 12.0,
+            step: None,
+            minor_count: None,
         }
     }
 }

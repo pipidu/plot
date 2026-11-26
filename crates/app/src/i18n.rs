@@ -43,7 +43,8 @@ const FORMULA_HELP_ZH: &str = "\
 常数：pi、e。函数曲线里自变量是 x，参数曲线里是 t，曲面公式里是 x 和 y。
 
 列公式还可以用：
-  col(\"列名\")、col(\"A\")、col(1)（从 1 开始的列号）
+  col(\"列名\")、col(\"A\")（按列名；没有同名列时才按字母列标）
+  col(1)（从 1 开始的列位置，不看列名）
   cell(\"A\", 行号)
   i 或 row：从 1 开始的当前行号
 
@@ -63,7 +64,8 @@ Functions: sin cos tan asin acos atan atan2 sinh cosh tanh
 Constants: pi and e. Function curves use x, parametric curves use t, and surfaces use x and y.
 
 Column formulas can also use:
-  col(\"name\"), col(\"A\"), col(1) (a column number starting at 1)
+  col(\"name\"), col(\"A\") (the column of that name; a letter only when no column has it)
+  col(1) (the column in that position, starting at 1, ignoring the name)
   cell(\"A\", row)
   i or row: the current row number, starting at 1
 

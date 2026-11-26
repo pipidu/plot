@@ -60,13 +60,7 @@ pub(crate) fn tree_table(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
     }
     ui.separator();
     if clicked_menu(ui, sciplot_core::t("删除表格")) {
-        app.edit(sciplot_core::t("删除表格"), |project| {
-            if project.delete_table(id) {
-                Ok(())
-            } else {
-                Err(sciplot_core::t("找不到表格").into())
-            }
-        });
+        crate::app::ask_delete_table(app, id);
     }
 }
 
@@ -77,13 +71,7 @@ pub(crate) fn tree_matrix(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId)
     matrix_actions(app, ui, id);
     ui.separator();
     if clicked_menu(ui, sciplot_core::t("删除矩阵")) {
-        app.edit(sciplot_core::t("删除矩阵"), |project| {
-            if project.delete_matrix(id) {
-                Ok(())
-            } else {
-                Err(sciplot_core::t("找不到矩阵").into())
-            }
-        });
+        crate::app::ask_delete_matrix(app, id);
     }
 }
 
@@ -135,13 +123,7 @@ pub(crate) fn table_column(app: &mut SciPlotApp, ui: &mut egui::Ui, table: Table
         insert_column(app, table, column + 1);
     }
     if clicked_menu(ui, sciplot_core::t("删除此列")) {
-        app.edit(sciplot_core::t("删除列"), |project| {
-            if project.table_mut(table).ok_or(sciplot_core::t("找不到表格"))?.remove_column(column) {
-                Ok(())
-            } else {
-                Err(sciplot_core::t("没有这一列").into())
-            }
-        });
+        app.edit(sciplot_core::t("删除列"), |project| project.remove_table_column(table, column));
         if app.selected_column == Some((table, column)) {
             app.selected_column = None;
         }
@@ -233,10 +215,7 @@ fn row_items(app: &mut SciPlotApp, ui: &mut egui::Ui, table: TableId, row: usize
 fn insert_column(app: &mut SciPlotApp, table: TableId, index: usize) {
     let names = app.project.table(table).map(|item| item.columns.iter().map(|col| col.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
     let name = unique_name(&names, "C");
-    app.edit(sciplot_core::t("插入列"), |project| {
-        project.table_mut(table).ok_or(sciplot_core::t("找不到表格"))?.insert_column(index, name, ColumnMode::None);
-        Ok(())
-    });
+    app.edit(sciplot_core::t("插入列"), |project| project.insert_table_column(table, index, name, ColumnMode::None));
 }
 
 fn recompute(app: &mut SciPlotApp, id: TableId) {
@@ -638,6 +617,9 @@ fn open_axis(app: &mut SciPlotApp, graph: GraphId, layer: usize, y_axis: bool) {
             y_axis,
             min: crate::dialogs::number_text(axis.min),
             max: crate::dialogs::number_text(axis.max),
+            step: crate::dialogs::number_text(axis.step),
+            minor: axis.minor_count.map(|count| count.to_string()).unwrap_or_default(),
+            error: String::new(),
             axis,
         });
     }

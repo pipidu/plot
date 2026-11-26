@@ -22,7 +22,7 @@ pub struct Prefs {
     /// 上次成功打开或保存文件的目录。空表示还没有。
     #[serde(default)]
     pub last_dir: String,
-    /// 导入导出 CSV 时用的编码。自动导入会识别 UTF-8 和 GBK。
+    /// 导入导出 CSV 时用的编码。自动导入会识别 UTF-8、UTF-16 和 GBK。
     #[serde(default)]
     pub csv_encoding: sciplot_core::CsvEncoding,
     /// 界面语言。缺省是简体中文。

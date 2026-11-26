@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
-    demo_project, export_csv_with, import_csv_with, tr, AnnotationKind, CurveKind, CsvEncoding, Graph, GraphId, History,
-    MatrixId, NoteId, Project, SurfaceMode, SurfaceSource, TableId,
+    demo_project, export_csv_with, import_csv_with, tr, AnnotationKind, CurveKind, CsvEncoding, DataSource, Graph,
+    GraphId, History, MatrixId, NoteId, Project, SurfaceMode, SurfaceSource, TableId,
 };
 use sciplot_plot::{
     data_to_screen, nearest_curve, nearest_point, pan_limits, render, screen_to_data, to_png, to_rgba, to_svg,
@@ -115,7 +115,18 @@ pub enum Dialog {
     NewMatrix { name: String, rows: String, cols: String },
     ColumnProps { table: TableId, column: usize },
     Sort { table: TableId, column: usize, ascending: bool },
-    Axis { graph: GraphId, layer: usize, y_axis: bool, axis: sciplot_core::Axis, min: String, max: String },
+    Axis {
+        graph: GraphId,
+        layer: usize,
+        y_axis: bool,
+        axis: sciplot_core::Axis,
+        min: String,
+        max: String,
+        step: String,
+        minor: String,
+        error: String,
+    },
+    ConfirmDelete { target: DeleteTarget, detail: String },
     Legend { graph: GraphId, layer: usize, legend: sciplot_core::Legend },
     Title { graph: GraphId, layer: usize, title: String, size: String },
     Style { graph: GraphId, layer: usize, curve: usize, style: sciplot_core::CurveStyle, name: String },
@@ -169,6 +180,12 @@ pub enum Dialog {
     Update(crate::update::UpdateView),
 }
 
+#[derive(Clone)]
+pub(crate) enum DeleteTarget {
+    Table(TableId),
+    Matrix(MatrixId),
+}
+
 pub(crate) struct XSel {
     pub(crate) graph: GraphId,
     layer: usize,
@@ -199,6 +216,7 @@ pub struct SciPlotApp {
     dock: DockState<Tab>,
     pub dialog: Option<Dialog>,
     pub status: String,
+    status_note: Option<String>,
     path: Option<PathBuf>,
     pub dirty: bool,
     recent: Vec<PathBuf>,
@@ -260,6 +278,7 @@ impl SciPlotApp {
             dock,
             dialog: None,
             status: sciplot_core::t("就绪").into(),
+            status_note: None,
             path: None,
             dirty: false,
             recent: load_recent(),
@@ -353,17 +372,33 @@ impl SciPlotApp {
             }
             return;
         }
-        let tabs: Vec<Tab> = self
-            .project
-            .tables
-            .iter()
-            .map(|t| Tab::Table(t.id))
-            .chain(self.project.matrices.iter().map(|m| Tab::Matrix(m.id)))
-            .chain(self.project.graphs.iter().map(|g| Tab::Graph(g.id)))
-            .chain(self.project.notes.iter().map(|n| Tab::Note(n.id)))
-            .collect();
-        for tab in tabs {
-            self.open_tab(tab);
+        if let Some(graph) = self.project.graphs.first() {
+            let graph_id = graph.id;
+            let mut tables = Vec::new();
+            let mut matrix = None;
+            for layer in &graph.layers {
+                for curve in &layer.curves {
+                    if let DataSource::Columns { table, .. } = curve.source {
+                        if !tables.contains(&table) {
+                            tables.push(table);
+                        }
+                    }
+                }
+            }
+            if let Some(SurfaceSource::Matrix(id)) = graph.surface.as_ref().map(|spec| &spec.source) {
+                matrix = Some(*id);
+            }
+            for table in tables {
+                self.open_tab(Tab::Table(table));
+            }
+            if let Some(id) = matrix {
+                self.open_tab(Tab::Matrix(id));
+            }
+            self.open_tab(Tab::Graph(graph_id));
+            return;
+        }
+        if let Some(table) = self.project.tables.first() {
+            self.open_tab(Tab::Table(table.id));
         }
     }
 
@@ -397,12 +432,13 @@ impl SciPlotApp {
     }
 
     fn write_path(&mut self, path: &Path) -> bool {
-        match self.project.to_json().and_then(|text| std::fs::write(path, text).map_err(|err| err.to_string())) {
+        let path = with_splot_extension(path);
+        match self.project.to_json().and_then(|text| std::fs::write(&path, text).map_err(|err| err.to_string())) {
             Ok(()) => {
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;
-                remember(&mut self.recent, path);
-                self.note_dir(path);
+                remember(&mut self.recent, &path);
+                self.note_dir(&path);
                 self.status = sciplot_core::trf!("已保存 {}", "Saved {}", path.display());
                 true
             }
@@ -841,9 +877,21 @@ fn window_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
 fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     ui.heading(&app.project.name);
     let mut name = app.project.name.clone();
-    if ui.text_edit_singleline(&mut name).changed() {
+    let response = ui.text_edit_singleline(&mut name);
+    if response.gained_focus() && !app.pushed_edit {
+        app.history.push(sciplot_core::t("重命名"), &app.project);
+        app.pushed_edit = true;
+    }
+    if response.changed() {
+        if !app.pushed_edit {
+            app.history.push(sciplot_core::t("重命名"), &app.project);
+            app.pushed_edit = true;
+        }
         app.project.name = name;
         app.dirty = true;
+    }
+    if response.lost_focus() {
+        app.pushed_edit = false;
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
         let tables: Vec<(TableId, String)> = app.project.tables.iter().map(|t| (t.id, t.name.clone())).collect();
@@ -989,9 +1037,24 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
     let headers: Vec<String> = table.columns.iter().map(column_header).collect();
     ui.horizontal(|ui| {
         ui.label(sciplot_core::t("名称"));
-        if ui.text_edit_singleline(&mut name).changed() {
-            let renamed = name.clone();
-            app.edit(sciplot_core::t("重命名"), |project| project.rename_table(id, &renamed));
+        let response = ui.text_edit_singleline(&mut name);
+        if response.gained_focus() && !app.pushed_edit {
+            app.history.push(sciplot_core::t("重命名"), &app.project);
+            app.pushed_edit = true;
+        }
+        if response.changed() {
+            if !app.pushed_edit {
+                app.history.push(sciplot_core::t("重命名"), &app.project);
+                app.pushed_edit = true;
+            }
+            if let Err(err) = app.project.rename_table(id, &name) {
+                app.status = err;
+            } else {
+                app.dirty = true;
+            }
+        }
+        if response.lost_focus() {
+            app.pushed_edit = false;
         }
     });
     let min_width = 46.0 + 120.0 * ncols as f32;
@@ -1234,6 +1297,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         }
         let graph = app.project.graph(id).cloned().unwrap_or(graph);
         let scene = render(&app.project, &graph, &[], rect.width(), rect.height(), 1.0);
+        remember_plot_notes(app, &scene);
         paint_scene(app, ui, rect, &scene, true);
         attach_plot_menu(app, &response, id, rect, &scene);
         return;
@@ -1244,6 +1308,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         views.resize(graph.layers.len(), LayerView::default());
     }
     let mut scene = render(&app.project, &graph, &views, rect.width(), rect.height(), 1.0);
+    remember_plot_notes(app, &scene);
     let mut changed = false;
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
     if let Some(pos) = pointer {
@@ -1528,24 +1593,86 @@ fn delete_selected_annotation(app: &mut SciPlotApp) {
 
 fn delete_focused(app: &mut SciPlotApp) {
     let Some(tab) = app.focus.clone() else { return };
-    let removed = app.edit(sciplot_core::t("删除"), |project| {
-        let ok = match &tab {
-            Tab::Table(id) => project.delete_table(*id),
-            Tab::Matrix(id) => project.delete_matrix(*id),
-            Tab::Graph(id) => project.delete_graph(*id),
-            Tab::Note(id) => project.delete_note(*id),
-        };
-        if ok {
+    match tab {
+        Tab::Table(id) => ask_delete_table(app, id),
+        Tab::Matrix(id) => ask_delete_matrix(app, id),
+        Tab::Graph(id) => commit_delete(app, sciplot_core::t("删除图形"), |project| project.delete_graph(id)),
+        Tab::Note(id) => commit_delete(app, sciplot_core::t("删除备注"), |project| project.delete_note(id)),
+    }
+}
+
+pub(crate) fn ask_delete_table(app: &mut SciPlotApp, id: TableId) {
+    let names = app.project.graphs_using_table(id);
+    if names.is_empty() {
+        commit_delete(app, sciplot_core::t("删除表格"), |project| project.delete_table(id));
+        return;
+    }
+    app.dialog = Some(Dialog::ConfirmDelete {
+        target: DeleteTarget::Table(id),
+        detail: sciplot_core::trf!(
+            "这些图还引用这张表，删除后图上会说明找不到数据：{}。",
+            "These graphs still use this table. After deletion they will say the data is missing: {}.",
+            names.join("、")
+        ),
+    });
+}
+
+pub(crate) fn ask_delete_matrix(app: &mut SciPlotApp, id: MatrixId) {
+    let names = app.project.graphs_using_matrix(id);
+    if names.is_empty() {
+        commit_delete(app, sciplot_core::t("删除矩阵"), |project| project.delete_matrix(id));
+        return;
+    }
+    app.dialog = Some(Dialog::ConfirmDelete {
+        target: DeleteTarget::Matrix(id),
+        detail: sciplot_core::trf!(
+            "这些图还引用这个矩阵，删除后图上会说明找不到数据：{}。",
+            "These graphs still use this matrix. After deletion they will say the data is missing: {}.",
+            names.join("、")
+        ),
+    });
+}
+
+pub(crate) fn commit_delete_target(app: &mut SciPlotApp, target: &DeleteTarget) {
+    match *target {
+        DeleteTarget::Table(id) => commit_delete(app, sciplot_core::t("删除表格"), |project| project.delete_table(id)),
+        DeleteTarget::Matrix(id) => commit_delete(app, sciplot_core::t("删除矩阵"), |project| project.delete_matrix(id)),
+    }
+}
+
+fn commit_delete(app: &mut SciPlotApp, label: &str, delete: impl FnOnce(&mut Project) -> bool) {
+    let removed = app.edit(label, |project| {
+        if delete(project) {
             Ok(())
         } else {
             Err(sciplot_core::t("没有找到要删除的对象").into())
         }
     });
     if removed.is_some() {
-        if let Some(found) = app.dock.find_tab(&tab) {
-            app.dock.remove_tab(found);
-        }
         app.focus = None;
+    }
+}
+
+fn remember_plot_notes(app: &mut SciPlotApp, scene: &Scene) {
+    if scene.notes.is_empty() {
+        app.status_note = None;
+        return;
+    }
+    let joined = scene.notes.join("；");
+    if app.status_note.as_deref() != Some(joined.as_str()) {
+        app.status = joined.clone();
+        app.status_note = Some(joined);
+    }
+}
+
+fn with_splot_extension(path: &Path) -> PathBuf {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("splot") => path.to_path_buf(),
+        _ => {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(".splot");
+            PathBuf::from(name)
+        }
     }
 }
 
@@ -1768,5 +1895,18 @@ mod tests {
         app.open_tab(Tab::Table(id));
         app.flush_tabs();
         assert!(app.dock.find_tab(&Tab::Table(id)).is_some());
+    }
+
+    #[test]
+    fn opening_a_project_shows_the_first_graph_and_its_table() {
+        let mut app = SciPlotApp::empty(demo_project());
+        app.rebuild_dock(false);
+        app.flush_tabs();
+        let tabs: Vec<Tab> = app.dock.iter_all_tabs().map(|(_, tab)| tab.clone()).collect();
+        let graphs = tabs.iter().filter(|tab| matches!(tab, Tab::Graph(_))).count();
+        let tables = tabs.iter().filter(|tab| matches!(tab, Tab::Table(_))).count();
+        assert_eq!(graphs, 1);
+        assert!(tables >= 1);
+        assert!(tabs.len() < app.project.tables.len() + app.project.graphs.len() + app.project.matrices.len());
     }
 }

@@ -37,6 +37,44 @@ mod tests {
     }
 
     #[test]
+    fn log_axis_without_positive_data_stays_visible() {
+        let mut project = Project::new("t");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns[0].set_numbers(&[-3.0, -2.0, -1.0]);
+            table.columns[1].set_numbers(&[-30.0, -20.0, -10.0]);
+        }
+        let graph_id = project.plot_table(table, CurveKind::Line).unwrap();
+        project.graph_mut(graph_id).unwrap().layers[0].y_axis.scale = AxisScale::Log10;
+        let graph = project.graph(graph_id).unwrap().clone();
+        let scene = render(&project, &graph, &[], 800.0, 600.0, 1.0);
+        let frame = &scene.layers[0];
+        assert!(frame.y_min > 0.0 && frame.y_max > frame.y_min, "{} {}", frame.y_min, frame.y_max);
+        assert!(frame.y_max < 1.0e6, "{} {}", frame.y_min, frame.y_max);
+        assert!(scene.notes.iter().any(|note| note.contains("正数")));
+        assert!(scene.text_content().contains("正数"));
+    }
+
+    #[test]
+    fn axis_min_alone_keeps_the_data_max() {
+        let mut project = Project::new("t");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns[0].set_numbers(&[0.0, 5.0, 10.0]);
+            table.columns[1].set_numbers(&[1.0, 2.0, 3.0]);
+        }
+        let graph_id = project.plot_table(table, CurveKind::Line).unwrap();
+        project.graph_mut(graph_id).unwrap().layers[0].x_axis.min = Some(-2.0);
+        let graph = project.graph(graph_id).unwrap().clone();
+        let scene = render(&project, &graph, &[], 800.0, 600.0, 1.0);
+        let frame = &scene.layers[0];
+        assert!((frame.x_min - (-2.0)).abs() < 1e-9, "{}", frame.x_min);
+        assert!(frame.x_max > 10.0, "{}", frame.x_max);
+    }
+
+    #[test]
     fn png_starts_with_signature_and_draws_glyphs() {
         let project = demo_project();
         let graph = project.graphs.iter().find(|graph| graph.name == sciplot_core::t("正弦与余弦")).unwrap();

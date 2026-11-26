@@ -2,7 +2,7 @@
 //!
 //! 语法是 evalexpr：`+ - * / % ^`、括号、比较运算。
 //! 另外注册了 SciDAVis / muParser 风格的函数名：`sin(x)`、`ln(x)`、`log(x)`（以 10 为底）。
-//! 列公式里可以用 `col("列名")`、`col("A")`、`col(1)`（从 1 开始）、`cell("A", 行号)`、`i`（从 1 开始的行号）。
+//! 列公式里可以用 `col("列名")`、`col("A")`（列名优先，没有同名列时才按字母列标）、`col(1)`（从 1 开始的位置）、`cell("A", 行号)`、`i`（从 1 开始的行号）。
 //! 整数相除会截断，需要小数时写成 `1.0/2`。
 
 use std::cell::{Cell, RefCell};
@@ -13,11 +13,19 @@ use evalexpr::{
     Function, HashMapContext, Node, Value,
 };
 
-use crate::table::{column_letter, ColumnType, Table};
+use crate::table::{ColumnType, Table};
 use crate::util::format_number;
 
+struct ColumnStore {
+    names: HashMap<String, usize>,
+    values: Vec<Vec<Option<f64>>>,
+}
+
 thread_local! {
-    static COLS: RefCell<HashMap<String, Vec<Option<f64>>>> = RefCell::new(HashMap::new());
+    static COLS: RefCell<ColumnStore> = RefCell::new(ColumnStore {
+        names: HashMap::new(),
+        values: Vec::new(),
+    });
     static ROW: Cell<usize> = const { Cell::new(0) };
     static MATH: RefCell<Option<HashMapContext>> = const { RefCell::new(None) };
 }
@@ -56,13 +64,15 @@ pub struct EvalColumn {
 /// 逐行计算公式。空单元格和计算失败的行记为 `None`，不中断其余行。
 pub fn eval_column(table: &Table, formula: &str) -> Result<EvalColumn, String> {
     let compiled = CompiledExpr::compile(formula)?;
-    let mut map = HashMap::new();
+    let mut names = HashMap::new();
+    let mut values = Vec::with_capacity(table.columns.len());
     for (index, column) in table.columns.iter().enumerate() {
-        map.insert(column.name.clone(), column.numbers.clone());
-        map.entry(column_letter(index))
-            .or_insert_with(|| column.numbers.clone());
+        names.insert(column.name.clone(), index);
+        values.push(column.numbers.clone());
     }
-    COLS.with(|cols| *cols.borrow_mut() = map);
+    COLS.with(|cols| {
+        *cols.borrow_mut() = ColumnStore { names, values };
+    });
     let n = table.nrows();
     let mut values = Vec::with_capacity(n);
     let mut warnings = 0;
@@ -338,30 +348,26 @@ fn two_numbers(arg: &Value) -> Result<(f64, f64), EvalexprError> {
 }
 
 fn col_fn(arg: &Value) -> Result<Value, EvalexprError> {
-    let key = column_key(arg)?;
-    Ok(Value::Float(lookup(&key, ROW.with(|row| row.get()))))
+    let row = ROW.with(|row| row.get());
+    if let Ok(name) = arg.as_string() {
+        return Ok(Value::Float(lookup_name(&name, row)));
+    }
+    let index = index_from_value(arg)?;
+    Ok(Value::Float(lookup_index(index, row)))
 }
 
 fn cell_fn(arg: &Value) -> Result<Value, EvalexprError> {
     let tuple = arg.as_fixed_len_tuple(2)?;
-    let key = if let Ok(name) = tuple[0].as_string() {
-        name
-    } else {
-        column_letter(index_from_value(&tuple[0])?)
-    };
     let row_number = tuple[1].as_number()?;
     if row_number < 1.0 {
         return Ok(Value::Float(f64::NAN));
     }
-    Ok(Value::Float(lookup(&key, (row_number as usize).saturating_sub(1))))
-}
-
-fn column_key(arg: &Value) -> Result<String, EvalexprError> {
-    if let Ok(name) = arg.as_string() {
-        return Ok(name);
+    let row = (row_number as usize).saturating_sub(1);
+    if let Ok(name) = tuple[0].as_string() {
+        return Ok(Value::Float(lookup_name(&name, row)));
     }
-    let index = index_from_value(arg)?;
-    Ok(column_letter(index))
+    let index = index_from_value(&tuple[0])?;
+    Ok(Value::Float(lookup_index(index, row)))
 }
 
 fn index_from_value(arg: &Value) -> Result<usize, EvalexprError> {
@@ -372,13 +378,48 @@ fn index_from_value(arg: &Value) -> Result<usize, EvalexprError> {
     Ok((number as usize) - 1)
 }
 
-fn lookup(key: &str, row: usize) -> f64 {
+fn lookup_index(index: usize, row: usize) -> f64 {
     COLS.with(|cols| {
         cols.borrow()
-            .get(key)
+            .values
+            .get(index)
             .and_then(|values| values.get(row).copied().flatten())
             .unwrap_or(f64::NAN)
     })
+}
+
+/// 先按列名，没有同名列时再把 `A`、`B`、`AA` 当成字母列标。
+fn lookup_name(key: &str, row: usize) -> f64 {
+    COLS.with(|cols| {
+        let store = cols.borrow();
+        let index = if let Some(index) = store.names.get(key).copied() {
+            index
+        } else if let Some(index) = letter_index(key) {
+            index
+        } else {
+            return f64::NAN;
+        };
+        store
+            .values
+            .get(index)
+            .and_then(|values| values.get(row).copied().flatten())
+            .unwrap_or(f64::NAN)
+    })
+}
+
+fn letter_index(text: &str) -> Option<usize> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut n = 0usize;
+    for byte in text.bytes() {
+        let value = byte.to_ascii_uppercase();
+        if !value.is_ascii_uppercase() {
+            return None;
+        }
+        n = n.checked_mul(26)?.checked_add((value - b'A') as usize + 1)?;
+    }
+    n.checked_sub(1)
 }
 
 /// 把 evalexpr 的英文报错换成学生能看懂的中文。已经是中文的原文保留。
@@ -550,6 +591,24 @@ mod tests {
         crate::set_language(crate::Language::Zh);
         assert!(english.starts_with("Row 3:"), "{english}");
         assert!(english.contains("Unknown variable"), "{english}");
+    }
+
+    #[test]
+    fn column_number_follows_position_when_names_collide_with_letters() {
+        let mut table = Table::new(TableId(1), "t");
+        table.columns.clear();
+        table.add_numeric_column("C", ColumnMode::None, &[100.0, 200.0, 300.0]);
+        table.add_numeric_column("A", ColumnMode::X, &[10.0, 20.0, 30.0]);
+        table.add_numeric_column("B", ColumnMode::Y, &[1.0, 2.0, 3.0]);
+        table.add_column("结果", ColumnMode::None);
+        apply_formula(&mut table, 3, "col(1)").unwrap();
+        assert_eq!(table.columns[3].numbers, vec![Some(100.0), Some(200.0), Some(300.0)]);
+        apply_formula(&mut table, 3, "col(3)").unwrap();
+        assert_eq!(table.columns[3].numbers, vec![Some(1.0), Some(2.0), Some(3.0)]);
+        apply_formula(&mut table, 3, "col(\"C\")").unwrap();
+        assert_eq!(table.columns[3].numbers[0], Some(100.0));
+        apply_formula(&mut table, 3, "col(\"A\")").unwrap();
+        assert_eq!(table.columns[3].numbers[0], Some(10.0));
     }
 
     #[test]

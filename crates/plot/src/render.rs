@@ -5,7 +5,7 @@ use sciplot_core::{
 
 use crate::color::{viridis, with_alpha};
 use crate::contour::contour_segments;
-use crate::scale::{minor_ticks, ticks_for, unit, Tick};
+use crate::scale::{minor_ticks_for, ticks_for_axis, unit, Tick};
 use crate::scene::{HAlign, LayerFrame, LayerView, Prim, PxRect, Scene, VAlign};
 use crate::surface::render_surface;
 
@@ -57,16 +57,19 @@ pub fn render(
     });
     if let Some(surface) = &graph.surface {
         render_surface(project, surface, &mut scene, scale);
+        draw_notes(&mut scene, scale);
         return scene;
     }
     if graph.layers.is_empty() {
         scene.notes.push(sciplot_core::t("图形没有图层").to_string());
+        draw_notes(&mut scene, scale);
         return scene;
     }
     for (index, layer) in graph.layers.iter().enumerate() {
         let view = views.get(index).copied().unwrap_or_default();
         render_layer(project, layer, index, view, &mut scene, scale);
     }
+    draw_notes(&mut scene, scale);
     scene
 }
 
@@ -126,8 +129,8 @@ fn render_layer(
     };
 
     let only_pie = !items.is_empty() && items.iter().all(|item| item.kind == CurveKind::Pie);
-    let mut x_auto = Range::empty();
-    let mut y_auto = Range::empty();
+    let mut x_auto = Range::new(layer.x_axis.scale);
+    let mut y_auto = Range::new(layer.y_axis.scale);
     let mut category_x: Option<Vec<(f64, String)>> = None;
     let mut category_y: Option<Vec<(f64, String)>> = None;
     let mut z_span: Option<(f64, f64)> = None;
@@ -243,8 +246,10 @@ fn render_layer(
         }
     }
 
-    let (x_min, x_max) = finish_range(&x_auto, &layer.x_axis, view.x_min, view.x_max);
-    let (y_min, y_max) = finish_range(&y_auto, &layer.y_axis, view.y_min, view.y_max);
+    let (x_min, x_max, x_note) = finish_range(&x_auto, &layer.x_axis, view.x_min, view.x_max);
+    let (y_min, y_max, y_note) = finish_range(&y_auto, &layer.y_axis, view.y_min, view.y_max);
+    push_note(scene, x_note);
+    push_note(scene, y_note);
     let frame = LayerFrame {
         plot,
         x_min,
@@ -342,46 +347,165 @@ fn render_layer(
 }
 
 struct Range {
+    scale: AxisScale,
     min: f64,
     max: f64,
+    pos_min: f64,
+    pos_max: f64,
+    neg_min: f64,
+    neg_max: f64,
+    dropped: bool,
 }
 
 impl Range {
-    fn empty() -> Self {
+    fn new(scale: AxisScale) -> Self {
         Self {
+            scale,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
+            pos_min: f64::INFINITY,
+            pos_max: f64::NEG_INFINITY,
+            neg_min: f64::INFINITY,
+            neg_max: f64::NEG_INFINITY,
+            dropped: false,
         }
     }
 
     fn add(&mut self, value: f64) {
-        if value.is_finite() {
-            self.min = self.min.min(value);
-            self.max = self.max.max(value);
+        if !value.is_finite() {
+            return;
+        }
+        match self.scale {
+            AxisScale::Log10 => {
+                if value > 0.0 {
+                    self.min = self.min.min(value);
+                    self.max = self.max.max(value);
+                } else {
+                    self.dropped = true;
+                }
+            }
+            AxisScale::Reciprocal => {
+                if value == 0.0 {
+                    self.dropped = true;
+                } else if value > 0.0 {
+                    self.pos_min = self.pos_min.min(value);
+                    self.pos_max = self.pos_max.max(value);
+                } else {
+                    self.neg_min = self.neg_min.min(value);
+                    self.neg_max = self.neg_max.max(value);
+                }
+            }
+            AxisScale::Linear => {
+                self.min = self.min.min(value);
+                self.max = self.max.max(value);
+            }
         }
     }
 }
 
-fn finish_range(auto: &Range, axis: &Axis, view_min: Option<f64>, view_max: Option<f64>) -> (f64, f64) {
-    let (padded_min, padded_max) = if auto.min.is_finite() && auto.max.is_finite() {
-        crate::scale::pad_range(axis.scale, auto.min, auto.max)
+fn resolved_auto(auto: &Range) -> (f64, f64, Option<&'static str>) {
+    match auto.scale {
+        AxisScale::Linear => (auto.min, auto.max, None),
+        AxisScale::Log10 => {
+            let note = if !auto.min.is_finite() { Some(sciplot_core::t("对数坐标没有正数数据")) } else { None };
+            (auto.min, auto.max, note)
+        }
+        AxisScale::Reciprocal => {
+            let has_pos = auto.pos_min.is_finite();
+            let has_neg = auto.neg_min.is_finite();
+            if has_pos && has_neg {
+                let pos_abs = auto.pos_max.abs().max(auto.pos_min.abs());
+                let neg_abs = auto.neg_min.abs().max(auto.neg_max.abs());
+                if pos_abs >= neg_abs {
+                    (auto.pos_min, auto.pos_max, Some(sciplot_core::t("倒数坐标不能穿过 0，已只用正值")))
+                } else {
+                    (auto.neg_min, auto.neg_max, Some(sciplot_core::t("倒数坐标不能穿过 0，已只用负值")))
+                }
+            } else if has_pos {
+                (auto.pos_min, auto.pos_max, None)
+            } else if has_neg {
+                (auto.neg_min, auto.neg_max, None)
+            } else {
+                (f64::NAN, f64::NAN, if auto.dropped { Some(sciplot_core::t("倒数坐标没有可用数据")) } else { None })
+            }
+        }
+    }
+}
+
+fn finish_range(auto: &Range, axis: &Axis, view_min: Option<f64>, view_max: Option<f64>) -> (f64, f64, Option<&'static str>) {
+    let (data_min, data_max, mut note) = resolved_auto(auto);
+    let (padded_min, padded_max) = if data_min.is_finite() && data_max.is_finite() {
+        crate::scale::pad_range(axis.scale, data_min, data_max)
     } else {
         crate::scale::pad_range(axis.scale, f64::NAN, f64::NAN)
     };
-    let mut lo = view_min.or(axis.min).unwrap_or(padded_min);
-    let mut hi = view_max.or(axis.max).unwrap_or(padded_max);
+    let user_min = view_min.or(axis.min);
+    let user_max = view_max.or(axis.max);
+    let mut lo = user_min.unwrap_or(padded_min);
+    let mut hi = user_max.unwrap_or(padded_max);
     if axis.scale == AxisScale::Log10 {
         if lo <= 0.0 {
-            lo = padded_min.max(1e-6);
+            note = Some(sciplot_core::t("对数坐标的最小值必须大于 0"));
+            lo = if padded_min > 0.0 { padded_min } else { 0.1 };
         }
-        if hi <= lo {
+        if hi <= 0.0 {
+            note = Some(sciplot_core::t("对数坐标的最大值必须大于 0"));
             hi = lo * 10.0;
         }
     }
-    if hi <= lo {
-        hi = lo + 1.0;
+    if axis.scale == AxisScale::Reciprocal && lo < 0.0 && hi > 0.0 {
+        note = Some(sciplot_core::t("倒数坐标的范围不能穿过 0"));
+        if lo.abs() >= hi.abs() {
+            hi = (lo * 0.2).min(-1e-6);
+            if hi <= lo {
+                hi = lo - lo.abs().max(1.0);
+            }
+        } else {
+            lo = (hi * 0.2).max(1e-6);
+            if lo >= hi {
+                lo = hi * 0.5;
+            }
+        }
     }
-    (lo, hi)
+    if hi <= lo {
+        if axis.scale == AxisScale::Log10 {
+            hi = lo * 10.0;
+        } else {
+            let span = (padded_max - padded_min).abs().max(1.0);
+            if user_max.is_none() {
+                hi = lo + span;
+            } else if user_min.is_none() {
+                lo = hi - span;
+            } else {
+                hi = lo + span;
+            }
+        }
+    }
+    (lo, hi, note)
+}
+
+fn push_note(scene: &mut Scene, note: Option<&str>) {
+    let Some(note) = note else {
+        return;
+    };
+    if scene.notes.iter().any(|existing| existing == note) {
+        return;
+    }
+    scene.notes.push(note.to_string());
+}
+
+fn draw_notes(scene: &mut Scene, scale: f32) {
+    if scene.notes.is_empty() {
+        return;
+    }
+    let notes: Vec<String> = scene.notes.iter().take(4).cloned().collect();
+    let banner = (16.0 * notes.len() as f32 + 8.0) * scale;
+    push_rect(scene, 0.0, 0.0, scene.width, banner, Some([255, 243, 224, 230]), None);
+    let mut y = 4.0 * scale;
+    for note in &notes {
+        text(scene, 8.0 * scale, y, note, 12.0 * scale, [150, 45, 30, 255], HAlign::Left, VAlign::Top, false);
+        y += 16.0 * scale;
+    }
 }
 
 fn labeled(series: &SeriesData) -> Vec<(f64, String)> {
@@ -444,7 +568,7 @@ fn map_xy(frame: &LayerFrame, x: f64, y: f64) -> Option<(f32, f32)> {
 
 fn draw_grid(scene: &mut Scene, frame: &LayerFrame, x_axis: &Axis, y_axis: &Axis, cat_x: bool, cat_y: bool) {
     if x_axis.major_grid && !cat_x {
-        for tick in ticks_for(x_axis.scale, frame.x_min, frame.x_max) {
+        for tick in axis_ticks(scene, x_axis, frame.x_min, frame.x_max) {
             if !tick.major {
                 continue;
             }
@@ -454,7 +578,7 @@ fn draw_grid(scene: &mut Scene, frame: &LayerFrame, x_axis: &Axis, y_axis: &Axis
         }
     }
     if y_axis.major_grid && !cat_y {
-        for tick in ticks_for(y_axis.scale, frame.y_min, frame.y_max) {
+        for tick in axis_ticks(scene, y_axis, frame.y_min, frame.y_max) {
             if !tick.major {
                 continue;
             }
@@ -463,28 +587,38 @@ fn draw_grid(scene: &mut Scene, frame: &LayerFrame, x_axis: &Axis, y_axis: &Axis
             }
         }
     }
-    if x_axis.minor_grid && !cat_x && x_axis.scale == AxisScale::Linear {
-        let majors: Vec<Tick> = ticks_for(x_axis.scale, frame.x_min, frame.x_max)
+    if x_axis.minor_grid && !cat_x {
+        let majors: Vec<Tick> = axis_ticks(scene, x_axis, frame.x_min, frame.x_max)
             .into_iter()
             .filter(|tick| tick.major)
             .collect();
-        for tick in minor_ticks(&majors) {
+        for tick in minor_ticks_for(x_axis.scale, &majors, minor_parts(x_axis)) {
             if let Some((px, _)) = map_xy(frame, tick.value, frame.y_min) {
                 vline(scene, frame, px, [238, 238, 238, 255], 1.0);
             }
         }
     }
-    if y_axis.minor_grid && !cat_y && y_axis.scale == AxisScale::Linear {
-        let majors: Vec<Tick> = ticks_for(y_axis.scale, frame.y_min, frame.y_max)
+    if y_axis.minor_grid && !cat_y {
+        let majors: Vec<Tick> = axis_ticks(scene, y_axis, frame.y_min, frame.y_max)
             .into_iter()
             .filter(|tick| tick.major)
             .collect();
-        for tick in minor_ticks(&majors) {
+        for tick in minor_ticks_for(y_axis.scale, &majors, minor_parts(y_axis)) {
             if let Some((_, py)) = map_xy(frame, frame.x_min, tick.value) {
                 hline(scene, frame, py, [238, 238, 238, 255], 1.0);
             }
         }
     }
+}
+
+fn minor_parts(axis: &Axis) -> usize {
+    axis.minor_count.unwrap_or(4).max(1) as usize
+}
+
+fn axis_ticks(scene: &mut Scene, axis: &Axis, min: f64, max: f64) -> Vec<Tick> {
+    let (ticks, note) = ticks_for_axis(axis, min, max);
+    push_note(scene, note);
+    ticks
 }
 
 fn draw_axis_decor(
@@ -505,7 +639,7 @@ fn draw_axis_decor(
             }
         }
     } else {
-        for tick_mark in ticks_for(layer.x_axis.scale, frame.x_min, frame.x_max) {
+        for tick_mark in axis_ticks(scene, &layer.x_axis, frame.x_min, frame.x_max) {
             if !tick_mark.major {
                 continue;
             }
@@ -537,7 +671,7 @@ fn draw_axis_decor(
             }
         }
     } else {
-        for tick_mark in ticks_for(layer.y_axis.scale, frame.y_min, frame.y_max) {
+        for tick_mark in axis_ticks(scene, &layer.y_axis, frame.y_min, frame.y_max) {
             if !tick_mark.major {
                 continue;
             }

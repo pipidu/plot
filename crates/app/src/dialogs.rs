@@ -68,6 +68,7 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::ColumnProps { .. } => sciplot_core::t("列类型与角色").into(),
         Dialog::Sort { .. } => sciplot_core::t("排序").into(),
         Dialog::Axis { .. } => sciplot_core::t("坐标轴").into(),
+        Dialog::ConfirmDelete { .. } => sciplot_core::t("确认删除").into(),
         Dialog::Legend { .. } => sciplot_core::t("图例").into(),
         Dialog::Title { .. } => sciplot_core::t("标题").into(),
         Dialog::Style { .. } => sciplot_core::t("曲线样式").into(),
@@ -100,7 +101,10 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         Dialog::NewMatrix { name, rows, cols } => new_matrix(app, ui, name, rows, cols),
         Dialog::ColumnProps { table, column } => column_props(app, ui, *table, *column),
         Dialog::Sort { table, column, ascending } => sort_dialog(app, ui, *table, column, ascending),
-        Dialog::Axis { graph, layer, y_axis, axis, min, max } => axis_dialog(app, ui, *graph, *layer, *y_axis, axis, min, max),
+        Dialog::Axis { graph, layer, y_axis, axis, min, max, step, minor, error } => {
+            axis_dialog(app, ui, *graph, *layer, *y_axis, axis, min, max, step, minor, error)
+        }
+        Dialog::ConfirmDelete { target, detail } => confirm_delete(app, ui, target, detail),
         Dialog::Legend { graph, layer, legend } => legend_dialog(app, ui, *graph, *layer, legend),
         Dialog::Title { graph, layer, title, size } => title_dialog(app, ui, *graph, *layer, title, size),
         Dialog::Style { graph, layer, curve, style, name } => style_dialog(app, ui, *graph, *layer, *curve, style, name),
@@ -415,7 +419,7 @@ fn path_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, action: PathAction, path
     }
     if matches!(action, PathAction::ImportCsv | PathAction::ExportCsv) {
         ui.label(if matches!(action, PathAction::ImportCsv) {
-            sciplot_core::t("编码。自动会先按 UTF-8 读，读不了再按 GBK。")
+            sciplot_core::t("编码。自动识别 UTF-8、带 BOM 或含空字节的 UTF-16，以及 GBK。")
         } else {
             sciplot_core::t("编码。自动和 UTF-8 都会写出带 BOM 的 UTF-8，Excel 能直接打开。")
         });
@@ -647,6 +651,9 @@ fn axis_dialog(
     axis: &mut sciplot_core::Axis,
     min: &mut String,
     max: &mut String,
+    step: &mut String,
+    minor: &mut String,
+    error: &mut String,
 ) -> bool {
     ui.label(if y_axis { sciplot_core::t("纵轴") } else { sciplot_core::t("横轴") });
     ui.label(sciplot_core::t("标题"));
@@ -663,22 +670,153 @@ fn axis_dialog(
     ui.text_edit_singleline(min);
     ui.label(sciplot_core::t("最大值（空为自动）"));
     ui.text_edit_singleline(max);
-    if ui.button(sciplot_core::t("应用")).clicked() {
-        axis.min = parse_opt(min);
-        axis.max = parse_opt(max);
-        let stored = axis.clone();
-        app.edit(sciplot_core::t("坐标轴"), |project| {
-            let layer = project.graph_mut(graph).ok_or(sciplot_core::t("找不到图形"))?.layers.get_mut(layer).ok_or(sciplot_core::t("找不到图层"))?;
-            if y_axis {
-                layer.y_axis = stored.clone();
-            } else {
-                layer.x_axis = stored.clone();
-            }
-            Ok(())
-        });
-        app.status = sciplot_core::t("已更新坐标轴").into();
+    ui.label(sciplot_core::t("主刻度步长（空为自动）"));
+    ui.text_edit_singleline(step);
+    if axis.scale == AxisScale::Log10 {
+        ui.label(sciplot_core::t("对数轴的步长是主刻度间隔的十进制数量级，例如 1 表示每十倍一条。"));
+    } else if axis.scale == AxisScale::Reciprocal {
+        ui.label(sciplot_core::t("倒数轴的步长作用在 1/x 上。"));
     }
+    ui.label(sciplot_core::t("次刻度等分（空为 4）"));
+    ui.text_edit_singleline(minor);
+    if !error.is_empty() {
+        ui.colored_label(egui::Color32::from_rgb(176, 32, 32), error.as_str());
+    }
+    ui.horizontal(|ui| {
+        if ui.button(sciplot_core::t("自动范围")).clicked() {
+            min.clear();
+            max.clear();
+            step.clear();
+            minor.clear();
+            error.clear();
+        }
+        if ui.button(sciplot_core::t("应用")).clicked() {
+            match read_axis(axis.scale, min, max, step, minor) {
+                Ok(numbers) => {
+                    error.clear();
+                    axis.min = numbers.min;
+                    axis.max = numbers.max;
+                    axis.step = numbers.step;
+                    axis.minor_count = numbers.minor;
+                    let stored = axis.clone();
+                    app.edit(sciplot_core::t("坐标轴"), |project| {
+                        let layer = project.graph_mut(graph).ok_or(sciplot_core::t("找不到图形"))?.layers.get_mut(layer).ok_or(sciplot_core::t("找不到图层"))?;
+                        if y_axis {
+                            layer.y_axis = stored.clone();
+                        } else {
+                            layer.x_axis = stored.clone();
+                        }
+                        Ok(())
+                    });
+                    clear_axis_view(app, graph, layer, y_axis);
+                    app.status = sciplot_core::t("已更新坐标轴").into();
+                }
+                Err(message) => *error = message,
+            }
+        }
+    });
     !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+struct AxisNumbers {
+    min: Option<f64>,
+    max: Option<f64>,
+    step: Option<f64>,
+    minor: Option<u8>,
+}
+
+fn read_axis(scale: AxisScale, min: &str, max: &str, step: &str, minor: &str) -> Result<AxisNumbers, String> {
+    let lo = parse_required(min, sciplot_core::t("最小值"))?;
+    let hi = parse_required(max, sciplot_core::t("最大值"))?;
+    let tick = parse_required(step, sciplot_core::t("主刻度步长"))?;
+    let parts = parse_minor(minor)?;
+    if let (Some(lo), Some(hi)) = (lo, hi) {
+        if lo >= hi {
+            return Err(sciplot_core::t("最小值必须小于最大值").into());
+        }
+    }
+    if scale == AxisScale::Log10 {
+        if lo.is_some_and(|value| value <= 0.0) || hi.is_some_and(|value| value <= 0.0) {
+            return Err(sciplot_core::t("对数坐标的最小值和最大值都必须大于 0").into());
+        }
+        if tick.is_some_and(|value| value < 1.0) {
+            return Err(sciplot_core::t("对数轴步长至少为 1，表示每隔几个十进制数量级").into());
+        }
+    }
+    if scale == AxisScale::Reciprocal {
+        if let (Some(lo), Some(hi)) = (lo, hi) {
+            if lo < 0.0 && hi > 0.0 {
+                return Err(sciplot_core::t("倒数坐标的最小值和最大值不能在 0 的两侧").into());
+            }
+            if lo == 0.0 || hi == 0.0 {
+                return Err(sciplot_core::t("倒数坐标的范围不能包含 0").into());
+            }
+        }
+    }
+    if tick.is_some_and(|value| value <= 0.0) {
+        return Err(sciplot_core::t("主刻度步长必须大于 0").into());
+    }
+    Ok(AxisNumbers {
+        min: lo,
+        max: hi,
+        step: tick,
+        minor: parts,
+    })
+}
+
+fn parse_required(text: &str, label: &str) -> Result<Option<f64>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse::<f64>().ok().filter(|value| value.is_finite()).map(Some).ok_or_else(|| {
+        sciplot_core::trf!("{label}不是有效数字", "{label} is not a number", label = label)
+    })
+}
+
+fn parse_minor(text: &str) -> Result<Option<u8>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let value: u32 = text.parse().map_err(|_| sciplot_core::t("次刻度等分必须是整数").to_string())?;
+    if !(2..=20).contains(&value) {
+        return Err(sciplot_core::t("次刻度等分请填 2 到 20").into());
+    }
+    Ok(Some(value as u8))
+}
+
+fn clear_axis_view(app: &mut SciPlotApp, graph: sciplot_core::GraphId, layer: usize, y_axis: bool) {
+    let Some(views) = app.views.get_mut(&graph) else {
+        return;
+    };
+    let Some(view) = views.get_mut(layer) else {
+        return;
+    };
+    if y_axis {
+        view.y_min = None;
+        view.y_max = None;
+    } else {
+        view.x_min = None;
+        view.x_max = None;
+    }
+}
+
+fn confirm_delete(app: &mut SciPlotApp, ui: &mut egui::Ui, target: &crate::app::DeleteTarget, detail: &str) -> bool {
+    ui.label(detail);
+    ui.label(sciplot_core::t("确定要删除吗？"));
+    let mut close = false;
+    ui.horizontal(|ui| {
+        if ui.button(sciplot_core::t("删除")).clicked() {
+            let target = target.clone();
+            crate::app::commit_delete_target(app, &target);
+            close = true;
+        }
+        if ui.button(sciplot_core::t("取消")).clicked() {
+            close = true;
+        }
+    });
+    !close
 }
 
 fn legend_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::GraphId, layer: usize, legend: &mut sciplot_core::Legend) -> bool {

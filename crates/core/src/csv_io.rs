@@ -5,7 +5,7 @@ use crate::tr;
 
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
 
-/// 导入导出用的文本编码。`Auto` 导入时先按 UTF-8，失败再按 GBK；导出时按 UTF-8 带 BOM。
+/// 导入导出用的文本编码。`Auto` 导入时识别 UTF-8、UTF-16（BOM 或大量空字节）和 GBK；导出时按 UTF-8 带 BOM。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CsvEncoding {
     #[serde(rename = "auto")]
@@ -31,7 +31,7 @@ impl CsvEncoding {
     }
 }
 
-/// 读入 CSV / TSV。UTF-8（可带 BOM）优先，否则按 GBK 解码，方便中文 Excel。
+/// 读入 CSV / TSV。自动识别 UTF-8（可带 BOM）、UTF-16 和 GBK，方便中文 Excel。
 pub fn import_csv(bytes: &[u8]) -> Result<Table, String> {
     import_csv_with(bytes, CsvEncoding::Auto)
 }
@@ -41,7 +41,7 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return Err(crate::locale::t("文件是空的").into());
     }
-    let text = decode_bytes(bytes, encoding);
+    let text = decode_bytes(bytes, encoding)?;
     let delimiter = sniff_delimiter(&text);
     let rows = if delimiter == b' ' {
         parse_whitespace(&text)
@@ -120,23 +120,77 @@ pub fn export_csv_with(table: &Table, encoding: CsvEncoding) -> Vec<u8> {
     }
 }
 
-fn decode_bytes(bytes: &[u8], encoding: CsvEncoding) -> String {
-    match encoding {
+fn decode_bytes(bytes: &[u8], encoding: CsvEncoding) -> Result<String, String> {
+    let text = match encoding {
         CsvEncoding::Utf8 => {
             let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
             String::from_utf8_lossy(bytes).into_owned()
         }
         CsvEncoding::Gbk => encoding_rs::GBK.decode(bytes).0.into_owned(),
-        CsvEncoding::Auto => {
-            if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                return String::from_utf8_lossy(&bytes[3..]).into_owned();
-            }
-            if let Ok(text) = std::str::from_utf8(bytes) {
-                return text.to_string();
-            }
-            encoding_rs::GBK.decode(bytes).0.into_owned()
+        CsvEncoding::Auto => decode_auto(bytes),
+    };
+    if encoding == CsvEncoding::Auto && text_looks_corrupt(&text) {
+        return Err(crate::t("无法识别文件编码。自动模式支持 UTF-8、GBK，以及带 BOM 或含空字节的 UTF-16。请在设置里指定编码，或从 Excel 另存为 CSV UTF-8。").into());
+    }
+    Ok(text)
+}
+
+fn decode_auto(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+    }
+    if let Some(text) = utf16_from_bom(bytes) {
+        return text;
+    }
+    if null_heavy(bytes) {
+        return decode_utf16(bytes, utf16_is_le(bytes));
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    encoding_rs::GBK.decode(bytes).0.into_owned()
+}
+
+fn utf16_from_bom(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return Some(decode_utf16(&bytes[2..], true));
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return Some(decode_utf16(&bytes[2..], false));
+    }
+    None
+}
+
+fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
+    let encoding = if little_endian {
+        encoding_rs::UTF_16LE
+    } else {
+        encoding_rs::UTF_16BE
+    };
+    let (text, _, _) = encoding.decode(bytes);
+    text.trim_start_matches('\u{FEFF}').to_string()
+}
+
+fn null_heavy(bytes: &[u8]) -> bool {
+    bytes.len() >= 4 && bytes.iter().filter(|byte| **byte == 0).count() * 5 >= bytes.len()
+}
+
+fn utf16_is_le(bytes: &[u8]) -> bool {
+    let odd = bytes.iter().skip(1).step_by(2).filter(|byte| **byte == 0).count();
+    let even = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
+    odd >= even
+}
+
+fn text_looks_corrupt(text: &str) -> bool {
+    let mut count = 0usize;
+    let mut bad = 0usize;
+    for ch in text.chars() {
+        count += 1;
+        if ch == '\0' || ch == '\u{FFFD}' {
+            bad += 1;
         }
     }
+    count > 0 && bad >= 4 && bad * 5 >= count
 }
 
 fn sniff_delimiter(text: &str) -> u8 {
@@ -241,6 +295,24 @@ mod tests {
         let (text, _, _) = encoding_rs::GBK.decode(&out);
         assert!(text.contains("温度"));
         assert!(text.contains("100"));
+    }
+
+    #[test]
+    fn utf16_excel_with_and_without_bom() {
+        let text = "温度,电阻\n25,100\n";
+        let mut raw = Vec::new();
+        for unit in text.encode_utf16() {
+            raw.extend_from_slice(&unit.to_le_bytes());
+        }
+        let bare = import_csv(&raw).unwrap();
+        assert_eq!(bare.columns[0].name, "温度");
+        assert_eq!(bare.columns[1].numbers[0], Some(100.0));
+        let mut with_bom = vec![0xFF, 0xFE];
+        with_bom.extend_from_slice(&raw);
+        let table = import_csv(&with_bom).unwrap();
+        assert_eq!(table.columns[0].name, "温度");
+        assert_eq!(table.columns[1].name, "电阻");
+        assert_eq!(table.columns[1].numbers[0], Some(100.0));
     }
 
     #[test]
