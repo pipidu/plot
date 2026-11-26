@@ -1,4 +1,4 @@
-name: 编译 Windows 并发布
+name: 编译并发布
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: windows-main
+  group: release-main
   cancel-in-progress: true
 
 jobs:
@@ -23,10 +23,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-gnu
+          key: release-windows-linux
 
-      - name: 安装 MinGW
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 pkg-config libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
 
       - name: 读取版本号
         id: version
@@ -35,25 +37,41 @@ jobs:
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}-b${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "asset=sciplot-${version}-b${GITHUB_RUN_NUMBER}-windows-x86_64.exe" >> "$GITHUB_OUTPUT"
+          echo "windows=sciplot-${version}-b${GITHUB_RUN_NUMBER}-windows-x86_64.exe" >> "$GITHUB_OUTPUT"
+          echo "linux=sciplot-${version}-b${GITHUB_RUN_NUMBER}-linux-x86_64" >> "$GITHUB_OUTPUT"
 
-      - name: 编译
+      - name: 编译 Windows
         env:
           SCIPLOT_BUILD: ${{ github.run_number }}
         run: cargo build -p sciplot --release --target x86_64-pc-windows-gnu
 
+      - name: 编译 Linux
+        env:
+          SCIPLOT_BUILD: ${{ github.run_number }}
+        run: cargo build -p sciplot --release
+
       - name: 打包
         run: |
-          cp target/x86_64-pc-windows-gnu/release/sciplot.exe "${{ steps.version.outputs.asset }}"
-          sha256sum "${{ steps.version.outputs.asset }}" | tee SHA256.txt
+          windows="${{ steps.version.outputs.windows }}"
+          linux="${{ steps.version.outputs.linux }}"
+          cp target/x86_64-pc-windows-gnu/release/sciplot.exe "$windows"
+          cp target/release/sciplot "$linux"
+          chmod +x "$linux"
+          sha256sum "$windows" "$linux" | tee SHA256.txt
           {
             echo "自动构建自 ${GITHUB_SHA}。"
             echo
-            echo "下载 \`${{ steps.version.outputs.asset }}\` 后双击运行，不需要安装。面向 64 位 Windows。找不到微软雅黑时，会使用程序内嵌的中文字体。"
+            echo "Windows：下载 \`${windows}\` 后双击运行，不需要安装。面向 64 位 Windows。找不到微软雅黑时，会使用程序内嵌的中文字体。"
+            echo
+            echo "Linux：下载 \`${linux}\`，加上可执行权限后运行：\`chmod +x ${linux} && ./${linux}\`。面向 64 位 Linux，需要图形环境（X11 或 Wayland）。"
             echo
             echo "提交说明：$(git log -1 --pretty=%s)"
             echo
-            echo "SHA256：\`$(cut -d' ' -f1 SHA256.txt)\`"
+            echo "SHA256："
+            echo
+            echo '```'
+            cat SHA256.txt
+            echo '```'
           } > notes.md
 
       - name: 发布
@@ -61,11 +79,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          asset="${{ steps.version.outputs.asset }}"
+          windows="${{ steps.version.outputs.windows }}"
+          linux="${{ steps.version.outputs.linux }}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" SHA256.txt --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$tag" "$windows" "$linux" SHA256.txt --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" "$asset" SHA256.txt \
+            gh release create "$tag" "$windows" "$linux" SHA256.txt \
               --repo "$GITHUB_REPOSITORY" \
               --title "SciPlot ${tag#v}" \
               --notes-file notes.md \
