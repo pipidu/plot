@@ -12,10 +12,10 @@ mod resolve;
 mod table;
 mod util;
 
-pub use csv_io::{export_csv, import_csv};
+pub use csv_io::{export_csv, export_csv_with, import_csv, import_csv_with, CsvEncoding};
 pub use demo::demo_project;
 pub use formula::{
-    apply_formula, parameter_names, parse_initials, substitute_params, CompiledExpr, EvalColumn,
+    apply_formula, explain_error, parameter_names, parse_initials, substitute_params, CompiledExpr, EvalColumn,
 };
 pub use graph::*;
 pub use history::History;
@@ -26,7 +26,7 @@ pub use table::{
     column_letter, Column, ColumnMode, ColumnType, Table, TableId,
 };
 pub use util::{
-    default_true, format_number, palette_color, parse_date, unique_name, PALETTE,
+    default_true, format_number, format_short, palette_color, parse_date, unique_name, PALETTE,
 };
 
 /// 图形、矩阵、备注共用的新式 ID。表格 ID 单独列出以便类型区分。

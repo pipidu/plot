@@ -35,6 +35,30 @@ pub fn unique_name(existing: &[String], base: &str) -> String {
 }
 
 /// 适合表格和刻度的数字格式：去掉无意义的尾零，极大极小用科学计数法。
+/// 6 位有效数字，给图上的标注和拟合结果用。
+pub fn format_short(v: f64) -> String {
+    if !v.is_finite() {
+        return String::new();
+    }
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let negative = v < 0.0;
+    let abs = v.abs();
+    let exp = abs.log10().floor() as i32;
+    let text = if !(-3..6).contains(&exp) {
+        format!("{abs:.5e}")
+    } else {
+        let decimals = (5 - exp).max(0) as usize;
+        format!("{abs:.decimals$}").trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    if negative {
+        format!("-{text}")
+    } else {
+        text
+    }
+}
+
 pub fn format_number(v: f64) -> String {
     if !v.is_finite() {
         return String::new();

@@ -381,6 +381,75 @@ fn lookup(key: &str, row: usize) -> f64 {
     })
 }
 
+/// 把 evalexpr 的英文报错换成学生能看懂的中文。已经是中文的原文保留。
+pub fn explain_error(err: &str) -> String {
+    let err = err.trim();
+    let (prefix, body) = split_row_prefix(err);
+    if body.chars().any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)) {
+        return err.to_string();
+    }
+    let text = explain_evalexpr(body);
+    if prefix.is_empty() {
+        text
+    } else {
+        format!("{prefix}{text}")
+    }
+}
+
+fn split_row_prefix(err: &str) -> (&str, &str) {
+    let Some(rest) = err.strip_prefix("第 ") else {
+        return ("", err);
+    };
+    let Some((head, body)) = rest.split_once('：') else {
+        return ("", err);
+    };
+    let row = head.trim_end_matches('行').trim();
+    if row.chars().all(|ch| ch.is_ascii_digit()) && head.ends_with('行') {
+        let split = err.len() - body.len();
+        return (&err[..split], body.trim());
+    }
+    ("", err)
+}
+
+fn explain_evalexpr(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("unmatched opening parenthesis") || (lower.contains("unmatched brace") && lower.contains("opening")) {
+        return "括号没有配平，多了一个左括号。".into();
+    }
+    if lower.contains("unmatched closing parenthesis") || lower.contains("unexpected closing parenthesis") {
+        return "括号没有配平，多了一个右括号。".into();
+    }
+    if lower.contains("partial token") {
+        return "表达式没写完，请检查运算符和括号。".into();
+    }
+    if let Some(name) = quoted_after(err, "variable identifier is not bound") {
+        return format!("不认识变量「{name}」。列要写成 col(\"列名\")，当前行号用 i 或 row。");
+    }
+    if let Some(name) = quoted_after(err, "function identifier is not bound") {
+        return format!("没有函数「{name}」。可用 sin、cos、exp、ln、log、sqrt 等，列引用用 col(\"列名\")。");
+    }
+    if lower.contains("expected") && lower.contains("argument") {
+        return format!("函数的参数个数不对。{err}");
+    }
+    if lower.contains("expected") && (lower.contains("type") || lower.contains("value")) {
+        return "类型不对：这里需要数值。文本列不能直接做加减乘除。".into();
+    }
+    if lower.contains("division by zero") {
+        return "除数是 0。".into();
+    }
+    if lower.contains("empty") {
+        return "表达式是空的。".into();
+    }
+    format!("公式有误：{err}")
+}
+
+fn quoted_after(err: &str, marker: &str) -> Option<String> {
+    if !err.to_ascii_lowercase().contains(&marker.to_ascii_lowercase()) {
+        return None;
+    }
+    err.rsplit([':', ' ', '\'', '"', '.']).find(|part| !part.is_empty()).map(|part| part.to_string())
+}
+
 fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
@@ -425,6 +494,32 @@ mod tests {
         assert_eq!(initials[2], ("c".to_string(), -2.0));
         let subst = substitute_params("a*x+c", &[("a".into(), 2.5), ("c".into(), -1.0)]);
         assert_eq!(subst, "2.5*x+(-1)");
+    }
+
+    #[test]
+    fn formula_errors_are_chinese() {
+        let err = match CompiledExpr::compile("zzz(") {
+            Err(err) => err,
+            Ok(_) => panic!("zzz( 应该无法编译"),
+        };
+        let text = explain_error(&err);
+        assert!(text.contains("括号"), "{text} / {err}");
+        assert!(!text.contains("unmatched"), "{text}");
+
+        let expr = match CompiledExpr::compile("zzz(1)") {
+            Ok(expr) => expr,
+            Err(err) => panic!("zzz(1) 语法完整，应该能编译：{err}"),
+        };
+        let err = match expr.eval(&[]) {
+            Err(err) => err,
+            Ok(value) => panic!("zzz(1) 求值应该失败，得到 {value}"),
+        };
+        let text = explain_error(&err);
+        assert!(text.contains("没有函数") || text.contains("公式有误"), "{text} / {err}");
+
+        let row = explain_error("第 3 行：Variable identifier is not bound to anything: foo.");
+        assert!(row.starts_with("第 3 行："), "{row}");
+        assert!(row.contains("不认识变量"), "{row}");
     }
 
     #[test]

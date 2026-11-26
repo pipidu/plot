@@ -215,14 +215,45 @@ impl Project {
     }
 
     /// 用表的 X 列和全部 Y 列新建一张图。直方图、箱线图、饼图按 Y 列的数值作图。
+    /// 只有一条 Y 时，图名和标题用「Y-X」，坐标轴标题用列名。
     pub fn plot_table(&mut self, table_id: TableId, kind: CurveKind) -> Result<GraphId, String> {
-        let table_name = self.table(table_id).ok_or("找不到表格")?.name.clone();
-        let graph_id = self.new_graph(&format!("{table_name}-{}", kind.label()));
+        let (table_name, x_label, y_labels) = {
+            let table = self.table(table_id).ok_or("找不到表格")?;
+            let x_label = table
+                .columns
+                .iter()
+                .find(|column| column.mode == ColumnMode::X)
+                .map(|column| column.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "X".into());
+            let y_labels: Vec<String> = table
+                .columns
+                .iter()
+                .filter(|column| column.mode == ColumnMode::Y || column.mode == ColumnMode::Z)
+                .map(|column| column.name.clone())
+                .filter(|name| !name.is_empty())
+                .collect();
+            (table.name.clone(), x_label, y_labels)
+        };
+        let graph_name = if y_labels.len() == 1 {
+            format!("{}-{}", y_labels[0], x_label)
+        } else {
+            format!("{table_name}-{}", kind.label())
+        };
+        let graph_id = self.new_graph(&graph_name);
         self.add_curves(graph_id, 0, table_id, kind)?;
         if let Some(graph) = self.graph_mut(graph_id) {
             if let Some(layer) = graph.layers.first_mut() {
-                if layer.title.is_empty() {
-                    layer.title = format!("{table_name} {}", kind.label());
+                layer.title = if y_labels.len() == 1 {
+                    format!("{}-{}", y_labels[0], x_label)
+                } else {
+                    format!("{table_name} {}", kind.label())
+                };
+                if layer.x_axis.label.is_empty() || layer.x_axis.label == "x" {
+                    layer.x_axis.label = x_label.clone();
+                }
+                if y_labels.len() == 1 && (layer.y_axis.label.is_empty() || layer.y_axis.label == "y") {
+                    layer.y_axis.label = y_labels[0].clone();
                 }
             }
         }
@@ -326,6 +357,9 @@ impl Project {
             let mode = if c == 0 { ColumnMode::X } else { ColumnMode::Y };
             table.add_numeric_column(format!("C{}", c + 1), mode, &values);
         }
+        let shown = self.table(table_id).map(|table| table.name.clone()).unwrap_or_default();
+        let source = matrix.name.clone();
+        self.log_line(format!("已把矩阵「{source}」转为表格「{shown}」。"));
         Ok(table_id)
     }
 
@@ -511,5 +545,10 @@ mod tests {
         assert_eq!(loaded.name, "P");
         assert_eq!(loaded.tables[0].columns[1].numbers[2], Some(4.0));
         assert!(loaded.next_id > project.graphs[0].id.0);
+        let graph = loaded.graph(graph_id).unwrap();
+        assert_eq!(graph.name, "B-A");
+        assert_eq!(graph.layers[0].title, "B-A");
+        assert_eq!(graph.layers[0].x_axis.label, "A");
+        assert_eq!(graph.layers[0].y_axis.label, "B");
     }
 }

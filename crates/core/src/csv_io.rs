@@ -1,13 +1,45 @@
 use csv::{ReaderBuilder, WriterBuilder};
+use serde::{Deserialize, Serialize};
 
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
 
+/// 导入导出用的文本编码。`Auto` 导入时先按 UTF-8，失败再按 GBK；导出时按 UTF-8 带 BOM。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CsvEncoding {
+    #[serde(rename = "auto")]
+    #[default]
+    Auto,
+    #[serde(rename = "utf8")]
+    Utf8,
+    #[serde(rename = "gbk")]
+    Gbk,
+}
+
+impl CsvEncoding {
+    pub fn label(self) -> &'static str {
+        match self {
+            CsvEncoding::Auto => "自动",
+            CsvEncoding::Utf8 => "UTF-8",
+            CsvEncoding::Gbk => "GBK",
+        }
+    }
+
+    pub fn all() -> &'static [CsvEncoding] {
+        &[CsvEncoding::Auto, CsvEncoding::Utf8, CsvEncoding::Gbk]
+    }
+}
+
 /// 读入 CSV / TSV。UTF-8（可带 BOM）优先，否则按 GBK 解码，方便中文 Excel。
 pub fn import_csv(bytes: &[u8]) -> Result<Table, String> {
+    import_csv_with(bytes, CsvEncoding::Auto)
+}
+
+/// 按指定编码读入 CSV / TSV。表名仍是「导入」，调用方可以再改成文件名。
+pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, String> {
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return Err("文件是空的".into());
     }
-    let text = decode_bytes(bytes);
+    let text = decode_bytes(bytes, encoding);
     let delimiter = sniff_delimiter(&text);
     let rows = if delimiter == b' ' {
         parse_whitespace(&text)
@@ -62,32 +94,47 @@ pub fn import_csv(bytes: &[u8]) -> Result<Table, String> {
 }
 
 pub fn export_csv(table: &Table) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    buffer.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-    {
-        let mut writer = WriterBuilder::new().from_writer(Vec::new());
-        let names: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
-        writer.write_record(&names).ok();
-        for row in 0..table.nrows() {
-            let record: Vec<String> = table.columns.iter().map(|column| column.display(row)).collect();
-            writer.write_record(&record).ok();
-        }
-        if let Ok(inner) = writer.into_inner() {
-            buffer.extend_from_slice(&inner);
-        }
-    }
-    buffer
+    export_csv_with(table, CsvEncoding::Utf8)
 }
 
-fn decode_bytes(bytes: &[u8]) -> String {
-    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(&bytes[3..]).into_owned();
+/// 导出 CSV。UTF-8 和自动都带 BOM；GBK 不带 BOM，给只认 ANSI 的旧版 Excel。
+pub fn export_csv_with(table: &Table, encoding: CsvEncoding) -> Vec<u8> {
+    let mut writer = WriterBuilder::new().from_writer(Vec::new());
+    let names: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
+    writer.write_record(&names).ok();
+    for row in 0..table.nrows() {
+        let record: Vec<String> = table.columns.iter().map(|column| column.display(row)).collect();
+        writer.write_record(&record).ok();
     }
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_string();
+    let body = writer.into_inner().unwrap_or_default();
+    let text = String::from_utf8_lossy(&body);
+    match encoding {
+        CsvEncoding::Gbk => encoding_rs::GBK.encode(&text).0.into_owned(),
+        CsvEncoding::Auto | CsvEncoding::Utf8 => {
+            let mut buffer = vec![0xEF, 0xBB, 0xBF];
+            buffer.extend_from_slice(text.as_bytes());
+            buffer
+        }
     }
-    let (decoded, _, _) = encoding_rs::GBK.decode(bytes);
-    decoded.into_owned()
+}
+
+fn decode_bytes(bytes: &[u8], encoding: CsvEncoding) -> String {
+    match encoding {
+        CsvEncoding::Utf8 => {
+            let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        CsvEncoding::Gbk => encoding_rs::GBK.decode(bytes).0.into_owned(),
+        CsvEncoding::Auto => {
+            if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                return String::from_utf8_lossy(&bytes[3..]).into_owned();
+            }
+            if let Ok(text) = std::str::from_utf8(bytes) {
+                return text.to_string();
+            }
+            encoding_rs::GBK.decode(bytes).0.into_owned()
+        }
+    }
 }
 
 fn sniff_delimiter(text: &str) -> u8 {
@@ -179,6 +226,19 @@ mod tests {
         let again = import_csv(&exported).unwrap();
         assert_eq!(again.columns[0].texts[0], "苹果");
         assert_eq!(crate::format_number(1.5), again.columns[1].display(0));
+    }
+
+    #[test]
+    fn gbk_can_be_forced_either_way() {
+        let (encoded, _, _) = encoding_rs::GBK.encode("温度,电阻\n25,100\n");
+        let table = import_csv_with(encoded.as_ref(), CsvEncoding::Gbk).unwrap();
+        assert_eq!(table.columns[0].name, "温度");
+        assert_eq!(table.columns[1].numbers[0], Some(100.0));
+        let out = export_csv_with(&table, CsvEncoding::Gbk);
+        assert!(!out.starts_with(&[0xEF, 0xBB, 0xBF]));
+        let (text, _, _) = encoding_rs::GBK.decode(&out);
+        assert!(text.contains("温度"));
+        assert!(text.contains("100"));
     }
 
     #[test]
