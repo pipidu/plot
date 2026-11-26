@@ -47,6 +47,10 @@ fn title_of(dialog: &Dialog) -> String {
         },
         Dialog::Help => "公式说明".into(),
         Dialog::About => "关于".into(),
+        Dialog::Update(crate::update::UpdateView::Checking) => "检查更新".into(),
+        Dialog::Update(crate::update::UpdateView::Current) => "检查更新".into(),
+        Dialog::Update(crate::update::UpdateView::Newer { .. }) => "发现新版本".into(),
+        Dialog::Update(crate::update::UpdateView::Failed(_)) => "检查更新".into(),
         Dialog::Path { action, .. } => match action {
             PathAction::Open => "打开项目".into(),
             PathAction::SaveAs => "另存为".into(),
@@ -84,10 +88,8 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             ui.label(i18n::FORMULA_HELP);
             button_closes(ui, "关闭")
         }
-        Dialog::About => {
-            ui.label(i18n::ABOUT);
-            button_closes(ui, "关闭")
-        }
+        Dialog::About => about_dialog(app, ui),
+        Dialog::Update(view) => update_dialog(ui, view),
         Dialog::Unsaved { then } => unsaved(app, ui, then),
         Dialog::Path { action, path, extra } => path_dialog(app, ui, *action, path, extra),
         Dialog::Formula { table, column, expr, error, warning } => formula(app, ui, *table, *column, expr, error, warning),
@@ -176,6 +178,65 @@ fn import_instead(app: &mut SciPlotApp, ui: &mut egui::Ui, path: &str) -> bool {
         }
     });
     stay
+}
+
+fn about_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui) -> bool {
+    ui.heading(format!("SciPlot {}", i18n::VERSION));
+    ui.label(i18n::ABOUT);
+    ui.horizontal(|ui| {
+        ui.label("仓库");
+        ui.hyperlink_to(i18n::REPO_URL, i18n::REPO_URL);
+    });
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if ui.button("检查更新").clicked() {
+            crate::update::start(app);
+            stay = false;
+        }
+        if ui.button("关闭").clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn update_dialog(ui: &mut egui::Ui, view: &crate::update::UpdateView) -> bool {
+    match view {
+        crate::update::UpdateView::Checking => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("正在向 GitHub 查询最新版本…");
+            });
+            !ui.button("取消").clicked()
+        }
+        crate::update::UpdateView::Current => {
+            ui.label(format!("当前已是最新版本 {}。", i18n::VERSION));
+            button_closes(ui, "关闭")
+        }
+        crate::update::UpdateView::Newer { version, page, notes } => {
+            ui.label(format!("发现新版本 {version}，当前是 {}。", i18n::VERSION));
+            if !notes.is_empty() {
+                egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    ui.add(egui::Label::new(notes).wrap_mode(egui::TextWrapMode::Wrap));
+                });
+            }
+            let mut stay = true;
+            ui.horizontal(|ui| {
+                if ui.button("打开发布页").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(page));
+                }
+                if ui.button("关闭").clicked() {
+                    stay = false;
+                }
+            });
+            stay
+        }
+        crate::update::UpdateView::Failed(message) => {
+            ui.colored_label(egui::Color32::from_rgb(176, 32, 32), message);
+            ui.hyperlink_to("打开发布页", i18n::RELEASES_URL);
+            button_closes(ui, "关闭")
+        }
+    }
 }
 
 fn button_closes(ui: &mut egui::Ui, label: &str) -> bool {

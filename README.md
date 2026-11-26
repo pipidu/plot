@@ -2,6 +2,10 @@
 
 用 Rust 编写的科学绘图与数据分析程序，界面对齐 [SciDAVis](https://scidavis.sourceforge.net/)，原生支持中文。在表格、矩阵、多种二维图、三维曲面和拟合分析之外，可以求曲线或折线的交点。
 
+## 下载
+
+Windows 64 位程序在 [GitHub Releases](https://github.com/pipidu/plot/releases)。下载 `sciplot-<版本>-windows-x86_64.exe` 后双击运行，不需要安装。仓库地址是 <https://github.com/pipidu/plot>。程序里「帮助 → 关于」可以打开这个地址，也可以检查更新。
+
 ## 构建
 
 需要 Rust 1.81 或更新的稳定版。

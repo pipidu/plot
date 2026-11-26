@@ -8,6 +8,7 @@ mod fonts;
 mod i18n;
 mod ops;
 mod prefs;
+mod update;
 
 use std::path::Path;
 

@@ -19,6 +19,7 @@ rfd = "=0.15.4"
 arboard = "3.4"
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 
 [build-dependencies]
 winres = "0.1"

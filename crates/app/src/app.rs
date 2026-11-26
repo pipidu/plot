@@ -166,6 +166,7 @@ pub enum Dialog {
     AddCurve { graph: GraphId, table: TableId, kind: CurveKind },
     Prefs(crate::prefs::Prefs),
     ImportInstead { path: String },
+    Update(crate::update::UpdateView),
 }
 
 pub(crate) struct XSel {
@@ -219,9 +220,10 @@ pub struct SciPlotApp {
     pub(crate) prefs: crate::prefs::Prefs,
     pub(crate) plot_hit: Option<PlotHit>,
     pending_tabs: Vec<Tab>,
-    pub(crate)     pending_after: Option<AfterSave>,
+    pub(crate) pending_after: Option<AfterSave>,
     pub(crate) confirm_style: bool,
     narrow_collapsed: bool,
+    pub(crate) update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateView>>,
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -281,6 +283,7 @@ impl SciPlotApp {
             pending_after: None,
             confirm_style: false,
             narrow_collapsed: false,
+            update_rx: None,
         };
         app.reload_font_silent();
         app
@@ -657,6 +660,10 @@ impl eframe::App for SciPlotApp {
         });
         self.flush_tabs();
         drop_stale_tabs(self);
+        crate::update::poll(self);
+        if self.update_rx.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         dialogs::show(self, ctx);
         if self.dialog.is_none() {
             if let Some(then) = self.pending_after.take() {
@@ -703,6 +710,9 @@ fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         ui.menu_button(i18n::HELP, |ui| {
             if clicked(ui, "公式说明", "") {
                 app.dialog = Some(Dialog::Help);
+            }
+            if clicked(ui, "检查更新", "") {
+                crate::update::start(app);
             }
             if clicked(ui, "关于", "") {
                 app.dialog = Some(Dialog::About);

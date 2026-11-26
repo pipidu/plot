@@ -1,6 +1,10 @@
 //! 界面文案。当前只有简体中文，字符串集中在这里，方便以后加英文。
 
 pub const APP_TITLE: &str = "SciPlot";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const REPO_URL: &str = "https://github.com/pipidu/plot";
+pub const RELEASES_URL: &str = "https://github.com/pipidu/plot/releases";
+pub const RELEASES_API: &str = "https://api.github.com/repos/pipidu/plot/releases/latest";
 
 pub const FILE: &str = "文件";
 pub const EDIT: &str = "编辑";
@@ -29,7 +33,6 @@ pub const FORMULA_HELP: &str = "\
 ";
 
 pub const ABOUT: &str = "\
-SciPlot 0.1
 科学绘图软件。用 Rust 和 egui 编写，界面对齐 SciDAVis。
 
 表格、矩阵、多种二维图、三维曲面、拟合、微积分、插值、平滑、FFT，

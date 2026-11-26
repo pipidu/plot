@@ -8,9 +8,13 @@ fn main() {
             res.set_ar_path("x86_64-w64-mingw32-ar");
         }
         res.set_icon("assets/icon.ico");
+        let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
+        let file_version = if version.matches('.').count() >= 3 { version.clone() } else { format!("{version}.0") };
         res.set("ProductName", "SciPlot");
         res.set("FileDescription", "SciPlot scientific plotting");
         res.set("LegalCopyright", "MIT OR Apache-2.0");
+        res.set("ProductVersion", &version);
+        res.set("FileVersion", &file_version);
         if let Err(err) = res.compile() {
             println!("cargo:warning=failed to embed Windows icon: {err}");
         } else if let Ok(out) = std::env::var("OUT_DIR") {
