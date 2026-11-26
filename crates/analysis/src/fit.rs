@@ -40,16 +40,34 @@ pub struct FitResult {
 }
 
 impl FitResult {
+    /// 给学生看的表达式。线性和多项式写成 `y = 0.941 − 0.299x`，计算用的 `expr` 不变。
+    pub fn pretty_expr(&self) -> String {
+        if self.names.first().map(String::as_str) == Some("截距") && self.values.len() >= 2 {
+            return pretty_linear(self.values[0], self.values[1]);
+        }
+        let polynomial = self.names.len() == self.values.len()
+            && self.names.iter().enumerate().all(|(index, name)| name == &format!("a{index}"));
+        if polynomial {
+            return pretty_poly(&self.values);
+        }
+        format!("y = {}", self.expr)
+    }
+
     pub fn report(&self) -> String {
         let mut text = format!(
-            "拟合   n = {}   R² = {:.6}   χ² = {:.6}\n表达式：{}\n",
-            self.n, self.r2, self.chi2, self.expr
+            "n = {}    R² = {}    χ² = {}（残差平方和）\n{}\n",
+            self.n,
+            sig_digits(self.r2, 6),
+            sig_digits(self.chi2, 6),
+            self.pretty_expr()
         );
         for index in 0..self.names.len() {
             let error = self.stderr.get(index).copied().unwrap_or(f64::NAN);
             text.push_str(&format!(
-                "  {} = {:.8}  ± {:.8}\n",
-                self.names[index], self.values[index], error
+                "  {} = {}  ± {}\n",
+                self.names[index],
+                sig_digits(self.values[index], 6),
+                sig_digits(error, 6)
             ));
         }
         if !self.note.is_empty() {
@@ -426,6 +444,78 @@ fn sumsq(values: &[f64]) -> f64 {
     values.iter().map(|v| v * v).sum()
 }
 
+fn pretty_linear(intercept: f64, slope: f64) -> String {
+    let head = sig_digits(intercept, 6);
+    if slope.abs() < 1e-14 {
+        return format!("y = {head}");
+    }
+    let sign = if slope < 0.0 { "−" } else { "+" };
+    let magnitude = sig_digits(slope.abs(), 6);
+    if magnitude == "1" {
+        format!("y = {head} {sign} x")
+    } else {
+        format!("y = {head} {sign} {magnitude}x")
+    }
+}
+
+fn pretty_poly(coeff: &[f64]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (power, &value) in coeff.iter().enumerate() {
+        if value.abs() < 1e-14 {
+            continue;
+        }
+        let sign = if value < 0.0 { "−" } else { "+" };
+        let magnitude = sig_digits(value.abs(), 6);
+        let body = match power {
+            0 => magnitude,
+            1 if magnitude == "1" => "x".into(),
+            1 => format!("{magnitude}x"),
+            _ if magnitude == "1" => format!("x^{power}"),
+            _ => format!("{magnitude}x^{power}"),
+        };
+        if parts.is_empty() {
+            if value < 0.0 {
+                parts.push(format!("−{body}"));
+            } else {
+                parts.push(body);
+            }
+        } else {
+            parts.push(format!("{sign} {body}"));
+        }
+    }
+    if parts.is_empty() {
+        "y = 0".into()
+    } else {
+        format!("y = {}", parts.join(" "))
+    }
+}
+
+fn sig_digits(value: f64, digits: usize) -> String {
+    if !value.is_finite() {
+        return "—".into();
+    }
+    if value == 0.0 {
+        return "0".into();
+    }
+    let digits = digits.max(1);
+    let negative = value < 0.0;
+    let abs = value.abs();
+    let exp = abs.log10().floor() as i32;
+    if exp >= digits as i32 || exp < -3 {
+        let text = format!("{:.*e}", digits - 1, abs);
+        return if negative { format!("-{text}") } else { text };
+    }
+    let decimals = (digits as i32 - 1 - exp).max(0) as usize;
+    let text = format!("{abs:.decimals$}");
+    let text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+    let text = if text.is_empty() { "0".into() } else { text };
+    if negative {
+        format!("-{text}")
+    } else {
+        text
+    }
+}
+
 fn coeff_text(value: f64) -> String {
     let text = format!("{value:.8}");
     let text = text.trim_end_matches('0').trim_end_matches('.').to_string();
@@ -448,6 +538,8 @@ mod tests {
         assert!((fit.values[0] - 1.0).abs() < 1e-8);
         assert!((fit.values[1] - 2.0).abs() < 1e-8);
         assert!((fit.r2 - 1.0).abs() < 1e-10);
+        assert_eq!(fit.pretty_expr(), "y = 1 + 2x");
+        assert!(fit.report().contains("残差平方和"));
 
         let yq: Vec<f64> = x.iter().map(|v| 1.0 + 2.0 * v + 3.0 * v * v).collect();
         let fit = fit_series(&x, &yq, &FitModel::Polynomial(2)).unwrap();

@@ -12,8 +12,14 @@ pub struct Summary {
 impl Summary {
     pub fn report(&self, title: &str) -> String {
         format!(
-            "{title}\n  个数 = {}\n  最小值 = {:.6}\n  最大值 = {:.6}\n  求和 = {:.6}\n  均值 = {:.6}\n  中位数 = {:.6}\n  标准差 = {:.6}",
-            self.n, self.min, self.max, self.sum, self.mean, self.median, self.stdev
+            "{title}\n  个数 = {}\n  最小值 = {}\n  最大值 = {}\n  求和 = {}\n  均值 = {}\n  中位数 = {}\n  标准差（样本，n−1） = {}",
+            self.n,
+            sciplot_core::format_number(self.min),
+            sciplot_core::format_number(self.max),
+            sciplot_core::format_number(self.sum),
+            sciplot_core::format_number(self.mean),
+            sciplot_core::format_number(self.median),
+            sciplot_core::format_number(self.stdev)
         )
     }
 }

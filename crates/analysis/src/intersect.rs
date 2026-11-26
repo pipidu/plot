@@ -187,7 +187,7 @@ fn smooth(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance:
     }
     let difference = |x: f64| eval_a.eval.eval(x) - eval_b.eval.eval(x);
     let roots = find_roots(&difference, domain.0, domain.1, 2400, tolerance);
-    let points = roots
+    let points: Vec<Intersection> = roots
         .into_iter()
         .filter_map(|x| {
             let y = eval_a.eval.eval(x);
@@ -204,7 +204,13 @@ fn smooth(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance:
             }
         })
         .collect();
-    finish(points, options, tolerance, "平滑求根".into())
+    let worst = points.iter().map(|point| difference(point.x).abs()).filter(|value| value.is_finite()).fold(0.0_f64, f64::max);
+    let note = if points.is_empty() {
+        "平滑求根".to_string()
+    } else {
+        format!("平滑求根，最大残差 |f−g| = {}", sciplot_core::format_number(worst))
+    };
+    finish(points, options, tolerance, note)
 }
 
 fn piecewise_with_note(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance: f64, note: String) -> IntersectOutput {
