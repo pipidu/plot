@@ -1,6 +1,13 @@
 use egui::{Color32, CornerRadius, Pos2, Shape, Stroke, StrokeKind, Vec2};
 
-use crate::scene::{dash_intervals, HAlign, Prim, Scene, VAlign};
+use crate::scene::{dash_intervals, stack_vertical, HAlign, Prim, Scene, VAlign};
+
+/// 图上文字用的 egui 字体族。前面是 Times New Roman，后面是宋体。
+pub const PLOT_FONT_FAMILY: &str = "sciplot-plot";
+
+fn plot_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(PLOT_FONT_FAMILY.into()))
+}
 
 pub fn paint(painter: &egui::Painter, origin: Pos2, scene: &Scene) {
     let p = |x: f32, y: f32| origin + Vec2::new(x, y);
@@ -45,8 +52,8 @@ pub fn paint(painter: &egui::Painter, origin: Pos2, scene: &Scene) {
                 ));
             }
             Prim::Text { x, y, text, size, color, halign, valign, vertical } => {
-                let font = egui::FontId::proportional(*size);
-                if *vertical {
+                let font = plot_font(*size);
+                if *vertical && stack_vertical(text) {
                     let chars: Vec<char> = text.chars().collect();
                     let start = match valign {
                         VAlign::Top => *y,
@@ -56,6 +63,13 @@ pub fn paint(painter: &egui::Painter, origin: Pos2, scene: &Scene) {
                     for (index, ch) in chars.into_iter().enumerate() {
                         painter.text(p(*x, start + index as f32 * *size), egui::Align2::CENTER_TOP, ch, font.clone(), color32(*color));
                     }
+                } else if *vertical {
+                    let galley = painter.layout_no_wrap(text.clone(), font, color32(*color));
+                    let width = galley.size().x;
+                    let height = galley.size().y;
+                    let mut shape = egui::epaint::TextShape::new(p(*x - height * 0.5, *y + width * 0.5), galley, color32(*color));
+                    shape.angle = -std::f32::consts::FRAC_PI_2;
+                    painter.add(shape);
                 } else {
                     painter.text(p(*x, *y), align2(*halign, *valign), text, font, color32(*color));
                 }

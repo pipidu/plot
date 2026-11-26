@@ -1,11 +1,13 @@
 //! SciPlot 数据模型：表格、矩阵、图形、公式与项目文件。
 //! 本 crate 不依赖 GUI，方便单独测试。
 
+mod catalog;
 mod csv_io;
 mod demo;
 mod formula;
 mod graph;
 mod history;
+mod locale;
 mod matrix;
 mod project;
 mod resolve;
@@ -19,6 +21,7 @@ pub use formula::{
 };
 pub use graph::*;
 pub use history::History;
+pub use locale::{language, set_language, t, translate, Language};
 pub use matrix::Matrix;
 pub use project::{Project, ProjectFile, FORMAT_VERSION};
 pub use resolve::{resolve_curve, sample_expr, GridData, SeriesData};

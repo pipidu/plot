@@ -60,7 +60,7 @@ pub fn render(
         return scene;
     }
     if graph.layers.is_empty() {
-        scene.notes.push("图形没有图层".to_string());
+        scene.notes.push(sciplot_core::t("图形没有图层").to_string());
         return scene;
     }
     for (index, layer) in graph.layers.iter().enumerate() {
@@ -83,7 +83,7 @@ fn render_layer(
     for (index, curve) in layer.curves.iter().enumerate() {
         if !curve.visible {
             hidden_legend.push(LegendEntry {
-                name: format!("{}（已隐藏）", curve.name),
+                name: sciplot_core::trf!("{}（已隐藏）", "{} (hidden)", curve.name),
                 color: [150, 150, 150, 255],
                 line: legend_has_line(curve.kind),
                 hidden: true,

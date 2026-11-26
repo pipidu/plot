@@ -65,7 +65,7 @@ CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件�
 
 坐标可以是线性、以 10 为底的对数、倒数，并支持反向轴。刻度用 1-2-5。视图缩放和平移存在 `LayerView` 里，和坐标轴的 min/max 分开。双击恢复视图。按住 Shift 拖拽只记录 X 区间，给求交点用。
 
-纵轴中文标题按字竖排，不依赖旋转文本。三维曲面按平均深度做画家算法排序，范围会缩进画布，避免裁切。鼠标拖拽改方位角和仰角，滚轮改 `zoom`。
+纵轴中文标题按字竖排，不依赖旋转文本。纵轴的英文标题整行逆时针转 90 度，不把每个字母拆开。三维曲面按平均深度做画家算法排序，范围会缩进画布，避免裁切。鼠标拖拽改方位角和仰角，滚轮改 `zoom`。
 
 ## 分析
 
@@ -94,7 +94,9 @@ Savitzky-Golay 按窗口内每个偏移单独算系数，这样边缘也能保�
 
 「设置 → 默认样式与字体」改字体文件、标题和坐标轴字号、线宽、线型、符号。保存后立刻 `fonts::install`。新建图形时套用整套样式；往已有图追加曲线时只改新曲线。已打开的示例图不要在启动时重套样式。
 
-字体启动时按顺序找 Windows 的微软雅黑（`msyh.ttc` 等），再找系统里的 Noto、文泉驿、Droid，最后用 `include_bytes!` 的 `assets/fonts/DroidSansFallbackFull.ttf`。用户指定的路径优先，读失败就退回这条自动顺序。TTC 要先抽出一个 TTF，`ab_glyph` 读不了字体集合。同一套字体同时注册为 egui 的 Proportional 和 Monospace。
+界面字体启动时按顺序找 Windows 的微软雅黑（`msyh.ttc` 等），再找系统里的 Noto Sans、文泉驿、Droid，最后用 `include_bytes!` 的 `assets/fonts/DroidSansFallbackFull.ttf`。图上的拉丁字母按 Times New Roman、Liberation Serif 这条顺序，中文按宋体、Noto Serif CJK、思源宋体、文鼎明体，找不到就用同一份内嵌 Droid。设置里的字体文件如果填了，界面和图都改用这一个文件；留空才走上面的自动顺序。TTC 要先抽出一个 TTF，`ab_glyph` 读不了字体集合。界面字体同时注册为 egui 的 Proportional 和 Monospace。图使用名为 `sciplot-plot` 的字体族，拉丁文件在前、中文文件在后，缺字时 egui 会落到后一个。SVG 的 `font-family` 写成 Times New Roman、Liberation Serif、SimSun、宋体这一串，不用双引号，避免撑破 XML 属性。
+
+界面语言在 `sciplot_core::Language`，默认简体中文，存在 `.sciplot_prefs.json` 的 `language` 字段，不写进 `.splot`。短句用 `t("中文")` 或 `tr!` / `trf!`，英文对照在 `crates/core/src/catalog.rs`。`format!` 的格式串必须是字面量，带参数的句子用 `trf!`。测试默认语言是中文，改成英语后要改回来，否则同一线程上后面的测试会读到英语。示例项目的名字在创建时翻译；查找示例表和图时同时认中文名和英文名。
 
 停靠用 `egui_dock` 0.16。`DockState` 和 `TabViewer` 不要同时可变借用：先 `mem::replace` 取出 dock，画完再放回去。因此 `open_tab` 只把标签放进 `pending_tabs`，等 dock 放回来再 `flush_tabs`。在表格或图的右键菜单里直接改 `self.dock` 会被这一帧的换回盖掉。菜单项被点击后调用 `ui.close_menu()`，否则对话框打开时菜单会留在画面上。
 

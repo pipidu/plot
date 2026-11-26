@@ -52,7 +52,7 @@ pub fn definite_integral(x: &[f64], y: &[f64], xmin: f64, xmax: f64) -> Result<f
     let (xmin, xmax) = if xmin <= xmax { (xmin, xmax) } else { (xmax, xmin) };
     let n = x.len().min(y.len());
     if n < 2 {
-        return Err("积分至少需要两个点".into());
+        return Err(sciplot_core::t("积分至少需要两个点").into());
     }
     let mut acc = 0.0;
     let mut any = false;
@@ -88,7 +88,7 @@ pub fn definite_integral(x: &[f64], y: &[f64], xmin: f64, xmax: f64) -> Result<f
         any = true;
     }
     if !any {
-        return Err("给定区间内没有可用数据".into());
+        return Err(sciplot_core::t("给定区间内没有可用数据").into());
     }
     Ok(acc)
 }

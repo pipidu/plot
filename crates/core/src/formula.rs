@@ -36,7 +36,7 @@ impl CompiledExpr {
     pub fn compile(expr: &str) -> Result<Self, String> {
         let expr = expr.trim();
         if expr.is_empty() {
-            return Err("表达式为空".to_string());
+            return Err(crate::locale::t("表达式为空").to_string());
         }
         let tree = build_operator_tree(expr).map_err(|err| err.to_string())?;
         Ok(Self { tree })
@@ -79,7 +79,7 @@ pub fn eval_column(table: &Table, formula: &str) -> Result<EvalColumn, String> {
             Err(err) => {
                 warnings += 1;
                 if first_error.is_none() {
-                    first_error = Some(format!("第 {} 行：{err}", row + 1));
+                    first_error = Some(crate::trf!("第 {} 行：{err}", "Row {}: {err}", row + 1, err = err));
                 }
                 values.push(None);
             }
@@ -96,7 +96,7 @@ pub fn eval_column(table: &Table, formula: &str) -> Result<EvalColumn, String> {
 pub fn apply_formula(table: &mut Table, column: usize, formula: &str) -> Result<EvalColumn, String> {
     let evaluated = eval_column(table, formula)?;
     if column >= table.columns.len() {
-        return Err("列不存在".to_string());
+        return Err(crate::locale::t("列不存在").to_string());
     }
     let n = evaluated.values.len();
     table.ensure_rows(n.max(table.nrows()));
@@ -162,17 +162,17 @@ pub fn parse_initials(text: &str) -> Result<Vec<(String, f64)>, String> {
         }
         let (name, value) = part
             .split_once('=')
-            .ok_or_else(|| format!("初值应为 a=1, b=0.5，无法解析「{part}」"))?;
+            .ok_or_else(|| crate::trf!("初值应为 a=1, b=0.5，无法解析「{part}」", "Initial values should look like a=1, b=0.5. Could not parse \"{part}\".", part = part))?;
         let name = name.trim();
         if name.is_empty() || !is_ident_start(name.chars().next().unwrap()) {
-            return Err(format!("无效的参数名「{name}」"));
+            return Err(crate::trf!("无效的参数名「{name}」", "Invalid parameter name \"{name}\"", name = name));
         }
         let value: f64 = value
             .trim()
             .parse()
-            .map_err(|_| format!("无法解析初值「{part}」"))?;
+            .map_err(|_| crate::trf!("无法解析初值「{part}」", "Could not parse the initial value \"{part}\"", part = part))?;
         if !value.is_finite() {
-            return Err(format!("初值不是有限数：{part}"));
+            return Err(crate::trf!("初值不是有限数：{part}", "Initial value is not finite: {part}", part = part));
         }
         out.push((name.to_string(), value));
     }
@@ -367,7 +367,7 @@ fn column_key(arg: &Value) -> Result<String, EvalexprError> {
 fn index_from_value(arg: &Value) -> Result<usize, EvalexprError> {
     let number = arg.as_number()?;
     if number < 1.0 {
-        return Err(EvalexprError::CustomMessage("列号从 1 开始".to_string()));
+        return Err(EvalexprError::CustomMessage(crate::locale::t("列号从 1 开始").to_string()));
     }
     Ok((number as usize) - 1)
 }
@@ -397,50 +397,74 @@ pub fn explain_error(err: &str) -> String {
 }
 
 fn split_row_prefix(err: &str) -> (&str, &str) {
-    let Some(rest) = err.strip_prefix("第 ") else {
-        return ("", err);
-    };
-    let Some((head, body)) = rest.split_once('：') else {
-        return ("", err);
-    };
-    let row = head.trim_end_matches('行').trim();
-    if row.chars().all(|ch| ch.is_ascii_digit()) && head.ends_with('行') {
-        let split = err.len() - body.len();
-        return (&err[..split], body.trim());
+    if let Some(rest) = err.strip_prefix("第 ") {
+        if let Some((head, body)) = rest.split_once('：') {
+            let rowish = head.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '行' | '第' | '列' | ' '));
+            if rowish && (head.ends_with('行') || head.ends_with('列')) {
+                let split = err.len() - body.len();
+                return (&err[..split], body.trim());
+            }
+        }
+    }
+    if let Some(rest) = err.strip_prefix("Row ") {
+        if let Some((head, body)) = rest.split_once(':') {
+            if english_row_head(head) {
+                let mut split = err.len() - body.len();
+                if err.as_bytes().get(split) == Some(&b' ') {
+                    split += 1;
+                }
+                return (&err[..split], body.trim());
+            }
+        }
     }
     ("", err)
+}
+
+fn english_row_head(head: &str) -> bool {
+    let mut parts = head.split(',');
+    let Some(row) = parts.next() else { return false };
+    if row.trim().is_empty() || !row.trim().chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(column) => {
+            column.trim().strip_prefix("column ").is_some_and(|n| !n.is_empty() && n.chars().all(|ch| ch.is_ascii_digit()))
+                && parts.next().is_none()
+        }
+    }
 }
 
 fn explain_evalexpr(err: &str) -> String {
     let lower = err.to_ascii_lowercase();
     if lower.contains("unmatched opening parenthesis") || (lower.contains("unmatched brace") && lower.contains("opening")) {
-        return "括号没有配平，多了一个左括号。".into();
+        return crate::locale::t("括号没有配平，多了一个左括号。").into();
     }
     if lower.contains("unmatched closing parenthesis") || lower.contains("unexpected closing parenthesis") {
-        return "括号没有配平，多了一个右括号。".into();
+        return crate::locale::t("括号没有配平，多了一个右括号。").into();
     }
     if lower.contains("partial token") {
-        return "表达式没写完，请检查运算符和括号。".into();
+        return crate::locale::t("表达式没写完，请检查运算符和括号。").into();
     }
     if let Some(name) = quoted_after(err, "variable identifier is not bound") {
-        return format!("不认识变量「{name}」。列要写成 col(\"列名\")，当前行号用 i 或 row。");
+        return crate::trf!("不认识变量「{name}」。列要写成 col(\"列名\")，当前行号用 i 或 row。", "Unknown variable \"{name}\". Write a column as col(\"name\"). The current row is i or row.", name = name);
     }
     if let Some(name) = quoted_after(err, "function identifier is not bound") {
-        return format!("没有函数「{name}」。可用 sin、cos、exp、ln、log、sqrt 等，列引用用 col(\"列名\")。");
+        return crate::trf!("没有函数「{name}」。可用 sin、cos、exp、ln、log、sqrt 等，列引用用 col(\"列名\")。", "Unknown function \"{name}\". You can use sin, cos, exp, ln, log, sqrt, and col(\"name\") for a column.", name = name);
     }
     if lower.contains("expected") && lower.contains("argument") {
-        return format!("函数的参数个数不对。{err}");
+        return crate::trf!("函数的参数个数不对。{err}", "Wrong number of function arguments. {err}", err = err);
     }
     if lower.contains("expected") && (lower.contains("type") || lower.contains("value")) {
-        return "类型不对：这里需要数值。文本列不能直接做加减乘除。".into();
+        return crate::locale::t("类型不对：这里需要数值。文本列不能直接做加减乘除。").into();
     }
     if lower.contains("division by zero") {
-        return "除数是 0。".into();
+        return crate::locale::t("除数是 0。").into();
     }
     if lower.contains("empty") {
-        return "表达式是空的。".into();
+        return crate::locale::t("表达式是空的。").into();
     }
-    format!("公式有误：{err}")
+    crate::trf!("公式有误：{err}", "Invalid formula: {err}", err = err)
 }
 
 fn quoted_after(err: &str, marker: &str) -> Option<String> {
@@ -483,9 +507,9 @@ mod tests {
     fn chinese_column_and_params() {
         let mut table = Table::new(TableId(1), "t");
         table.columns.clear();
-        table.add_numeric_column("时间", ColumnMode::X, &[1.0, 2.0, 3.0]);
-        table.add_column("结果", ColumnMode::Y);
-        apply_formula(&mut table, 1, "col(\"时间\")*2 + col(\"A\")").unwrap();
+        table.add_numeric_column(crate::locale::t("时间"), ColumnMode::X, &[1.0, 2.0, 3.0]);
+        table.add_column(crate::locale::t("结果"), ColumnMode::Y);
+        apply_formula(&mut table, 1, crate::locale::t("col(\"时间\")*2 + col(\"A\")")).unwrap();
         assert_eq!(table.columns[1].numbers[2], Some(9.0));
 
         let names = parameter_names("a*exp(-b*x)+c + sin(x)");
@@ -515,11 +539,17 @@ mod tests {
             Ok(value) => panic!("zzz(1) 求值应该失败，得到 {value}"),
         };
         let text = explain_error(&err);
-        assert!(text.contains("没有函数") || text.contains("公式有误"), "{text} / {err}");
+        assert!(text.contains("没有函数") || text.contains(crate::locale::t("公式有误")), "{text} / {err}");
 
-        let row = explain_error("第 3 行：Variable identifier is not bound to anything: foo.");
+        let row = explain_error(crate::locale::t("第 3 行：Variable identifier is not bound to anything: foo."));
         assert!(row.starts_with("第 3 行："), "{row}");
         assert!(row.contains("不认识变量"), "{row}");
+
+        crate::set_language(crate::Language::En);
+        let english = explain_error("Row 3: Variable identifier is not bound to anything: foo.");
+        crate::set_language(crate::Language::Zh);
+        assert!(english.starts_with("Row 3:"), "{english}");
+        assert!(english.contains("Unknown variable"), "{english}");
     }
 
     #[test]

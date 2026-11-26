@@ -3,18 +3,18 @@ use sciplot_core::{Matrix, MatrixId};
 
 pub fn invert_matrix(matrix: &Matrix) -> Result<Matrix, String> {
     if matrix.rows != matrix.cols {
-        return Err("只有方阵可以求逆".into());
+        return Err(sciplot_core::t("只有方阵可以求逆").into());
     }
     let n = matrix.rows;
     if n == 0 {
-        return Err("矩阵是空的".into());
+        return Err(sciplot_core::t("矩阵是空的").into());
     }
     let mut data = Vec::with_capacity(n * n);
     for index in 0..n * n {
-        data.push(matrix.data.get(index).copied().flatten().ok_or("矩阵含空单元格，无法求逆")?);
+        data.push(matrix.data.get(index).copied().flatten().ok_or(sciplot_core::t("矩阵含空单元格，无法求逆"))?);
     }
     let mat = DMatrix::from_row_slice(n, n, &data);
-    let inverse = mat.try_inverse().ok_or("矩阵奇异或病态，无法求逆")?;
+    let inverse = mat.try_inverse().ok_or(sciplot_core::t("矩阵奇异或病态，无法求逆"))?;
     let mut out = Matrix::new(MatrixId(0), format!("{}⁻¹", matrix.name), n, n);
     out.x_min = matrix.x_min;
     out.x_max = matrix.x_max;

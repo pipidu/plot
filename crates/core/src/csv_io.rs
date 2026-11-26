@@ -1,6 +1,8 @@
 use csv::{ReaderBuilder, WriterBuilder};
 use serde::{Deserialize, Serialize};
 
+use crate::tr;
+
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
 
 /// 导入导出用的文本编码。`Auto` 导入时先按 UTF-8，失败再按 GBK；导出时按 UTF-8 带 BOM。
@@ -18,7 +20,7 @@ pub enum CsvEncoding {
 impl CsvEncoding {
     pub fn label(self) -> &'static str {
         match self {
-            CsvEncoding::Auto => "自动",
+            CsvEncoding::Auto => tr!("自动", "Auto"),
             CsvEncoding::Utf8 => "UTF-8",
             CsvEncoding::Gbk => "GBK",
         }
@@ -37,7 +39,7 @@ pub fn import_csv(bytes: &[u8]) -> Result<Table, String> {
 /// 按指定编码读入 CSV / TSV。表名仍是「导入」，调用方可以再改成文件名。
 pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, String> {
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
-        return Err("文件是空的".into());
+        return Err(crate::locale::t("文件是空的").into());
     }
     let text = decode_bytes(bytes, encoding);
     let delimiter = sniff_delimiter(&text);
@@ -51,7 +53,7 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
         .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
         .collect();
     if rows.is_empty() {
-        return Err("没有读到数据行".into());
+        return Err(crate::locale::t("没有读到数据行").into());
     }
     let header = is_header(&rows[0], rows.get(1));
     let (names, data) = if header {
@@ -68,9 +70,9 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
     };
     let width = names.len().max(data.iter().map(|r| r.len()).max().unwrap_or(0));
     if width == 0 {
-        return Err("没有读到列".into());
+        return Err(crate::locale::t("没有读到列").into());
     }
-    let mut table = Table::new(TableId(0), "导入");
+    let mut table = Table::new(TableId(0), crate::locale::t("导入"));
     table.columns.clear();
     for index in 0..width {
         let mut name = names.get(index).cloned().unwrap_or_default();
@@ -210,14 +212,14 @@ mod tests {
 
     #[test]
     fn utf8_and_gbk_roundtrip() {
-        let bytes = "名称,数值\n苹果,1.5\n香蕉,2\n".as_bytes();
+        let bytes = crate::locale::t("名称,数值\n苹果,1.5\n香蕉,2\n").as_bytes();
         let table = import_csv(bytes).unwrap();
         assert_eq!(table.columns[0].name, "名称");
         assert_eq!(table.columns[0].texts[0], "苹果");
         assert_eq!(table.columns[1].numbers[1], Some(2.0));
         assert_eq!(table.columns[0].ty, ColumnType::Text);
 
-        let (encoded, _, _) = encoding_rs::GBK.encode("名称,数值\n苹果,1.5\n");
+        let (encoded, _, _) = encoding_rs::GBK.encode(crate::locale::t("名称,数值\n苹果,1.5\n"));
         let table = import_csv(encoded.as_ref()).unwrap();
         assert_eq!(table.columns[0].texts[0], "苹果");
 
@@ -230,7 +232,7 @@ mod tests {
 
     #[test]
     fn gbk_can_be_forced_either_way() {
-        let (encoded, _, _) = encoding_rs::GBK.encode("温度,电阻\n25,100\n");
+        let (encoded, _, _) = encoding_rs::GBK.encode(crate::locale::t("温度,电阻\n25,100\n"));
         let table = import_csv_with(encoded.as_ref(), CsvEncoding::Gbk).unwrap();
         assert_eq!(table.columns[0].name, "温度");
         assert_eq!(table.columns[1].numbers[0], Some(100.0));

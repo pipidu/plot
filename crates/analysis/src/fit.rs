@@ -1,5 +1,5 @@
 use nalgebra::{DMatrix, DVector};
-use sciplot_core::{parameter_names, substitute_params, CompiledExpr};
+use sciplot_core::{parameter_names, substitute_params, tr, CompiledExpr};
 
 #[derive(Clone, Debug)]
 pub enum FitModel {
@@ -17,12 +17,12 @@ pub enum FitModel {
 impl FitModel {
     pub fn label(&self) -> &'static str {
         match self {
-            FitModel::Linear => "线性",
-            FitModel::Polynomial(_) => "多项式",
-            FitModel::Exponential => "指数",
-            FitModel::Gaussian => "高斯",
-            FitModel::Lorentzian => "洛伦兹",
-            FitModel::Custom { .. } => "自定义",
+            FitModel::Linear => tr!("线性", "Linear"),
+            FitModel::Polynomial(_) => tr!("多项式", "Polynomial"),
+            FitModel::Exponential => tr!("指数", "Exponential"),
+            FitModel::Gaussian => tr!("高斯", "Gaussian"),
+            FitModel::Lorentzian => tr!("洛伦兹", "Lorentzian"),
+            FitModel::Custom { .. } => tr!("自定义", "Custom"),
         }
     }
 }
@@ -42,7 +42,7 @@ pub struct FitResult {
 impl FitResult {
     /// 给学生看的表达式。线性和多项式写成 `y = 0.941 − 0.299x`，计算用的 `expr` 不变。
     pub fn pretty_expr(&self) -> String {
-        if self.names.first().map(String::as_str) == Some("截距") && self.values.len() >= 2 {
+        if self.names.first().map(String::as_str) == Some(sciplot_core::t("截距")) && self.values.len() >= 2 {
             return pretty_linear(self.values[0], self.values[1]);
         }
         let polynomial = self.names.len() == self.values.len()
@@ -54,8 +54,7 @@ impl FitResult {
     }
 
     pub fn report(&self) -> String {
-        let mut text = format!(
-            "n = {}    R² = {}    χ² = {}（残差平方和）\n{}\n",
+        let mut text = sciplot_core::trf!("n = {}    R² = {}    χ² = {}（残差平方和）\n{}\n", "n = {}    R² = {}    χ² = {} (residual sum of squares)\n{}\n",
             self.n,
             sig_digits(self.r2, 6),
             sig_digits(self.chi2, 6),
@@ -83,7 +82,7 @@ pub fn fit_series(x: &[f64], y: &[f64], model: &FitModel) -> Result<FitResult, S
     match model {
         FitModel::Linear => {
             let mut result = fit_polynomial(&x, &y, 1)?;
-            result.names = vec!["截距".into(), "斜率".into()];
+            result.names = vec![sciplot_core::t("截距").into(), sciplot_core::t("斜率").into()];
             Ok(result)
         }
         FitModel::Polynomial(degree) => fit_polynomial(&x, &y, *degree),
@@ -104,7 +103,7 @@ fn finite_pairs(x: &[f64], y: &[f64]) -> Result<(Vec<f64>, Vec<f64>), String> {
         }
     }
     if xs.len() < 2 {
-        return Err("拟合至少需要两个有限数据点".into());
+        return Err(sciplot_core::t("拟合至少需要两个有限数据点").into());
     }
     Ok((xs, ys))
 }
@@ -113,7 +112,7 @@ fn fit_polynomial(x: &[f64], y: &[f64], degree: usize) -> Result<FitResult, Stri
     let n = x.len();
     let p = degree + 1;
     if n < p {
-        return Err(format!("多项式 {degree} 阶至少需要 {p} 个点，当前只有 {n} 个"));
+        return Err(sciplot_core::trf!("多项式 {degree} 阶至少需要 {p} 个点，当前只有 {n} 个", "A polynomial of degree {degree} needs at least {p} points; only {n} are available", degree = degree, p = p, n = n));
     }
     let mut design = DMatrix::zeros(n, p);
     for (row, &xi) in x.iter().enumerate() {
@@ -130,7 +129,7 @@ fn fit_polynomial(x: &[f64], y: &[f64], degree: usize) -> Result<FitResult, Stri
         .clone()
         .lu()
         .solve(&rhs)
-        .ok_or("多项式拟合失败，设计矩阵秩不足")?;
+        .ok_or(sciplot_core::t("多项式拟合失败，设计矩阵秩不足"))?;
     let values: Vec<f64> = solution.iter().copied().collect();
     let predicted: Vec<f64> = (0..n)
         .map(|row| (0..p).map(|col| design[(row, col)] * values[col]).sum())
@@ -204,7 +203,7 @@ fn fit_peak(x: &[f64], y: &[f64], kind: Peak) -> Result<FitResult, String> {
                     coeff_text(p[2].abs().max(1e-8))
                 )
             };
-            nonlinear(x, y, vec![a0, b0, c0], &["a", "μ", "σ"], model, expr_of, "高斯 y = a·exp(-(x-μ)²/(2σ²))")
+            nonlinear(x, y, vec![a0, b0, c0], &["a", "μ", "σ"], model, expr_of, sciplot_core::t("高斯 y = a·exp(-(x-μ)²/(2σ²))"))
         }
         Peak::Lorentzian => {
             let model = |p: &[f64], xi: f64| {
@@ -216,7 +215,7 @@ fn fit_peak(x: &[f64], y: &[f64], kind: Peak) -> Result<FitResult, String> {
                 let b = coeff_text(p[1]);
                 format!("{}*({c})^2/((x-({b}))^2+({c})^2)", coeff_text(p[0]))
             };
-            nonlinear(x, y, vec![a0, b0, c0], &["a", "x0", "γ"], model, expr_of, "洛伦兹 y = a·γ²/((x-x0)²+γ²)")
+            nonlinear(x, y, vec![a0, b0, c0], &["a", "x0", "γ"], model, expr_of, sciplot_core::t("洛伦兹 y = a·γ²/((x-x0)²+γ²)"))
         }
     }
 }
@@ -224,7 +223,7 @@ fn fit_peak(x: &[f64], y: &[f64], kind: Peak) -> Result<FitResult, String> {
 fn fit_custom(x: &[f64], y: &[f64], expr: &str, initial: &[(String, f64)]) -> Result<FitResult, String> {
     let names = parameter_names(expr);
     if names.is_empty() {
-        return Err("自定义表达式需要待拟合参数，例如 a*exp(-b*x)+c".into());
+        return Err(sciplot_core::t("自定义表达式需要待拟合参数，例如 a*exp(-b*x)+c").into());
     }
     let compiled = CompiledExpr::compile(expr)?;
     let p0: Vec<f64> = names
@@ -347,7 +346,7 @@ fn levenberg<F: Fn(&[f64]) -> Vec<f64>>(p0: &[f64], residual: &F) -> (Vec<f64>, 
     for _ in 0..80 {
         let r = residual(&p);
         if r.iter().any(|v| !v.is_finite()) {
-            note = "迭代中出现非有限残差，已保留当前参数".into();
+            note = sciplot_core::t("迭代中出现非有限残差，已保留当前参数").into();
             break;
         }
         let cost = sumsq(&r);
@@ -385,7 +384,7 @@ fn levenberg<F: Fn(&[f64]) -> Vec<f64>>(p0: &[f64], residual: &F) -> (Vec<f64>, 
             lambda = (lambda * 10.0).min(1e12);
         }
         if !improved {
-            note = "已达到步长限制，结果可能是局部最优".into();
+            note = sciplot_core::t("已达到步长限制，结果可能是局部最优").into();
             break;
         }
     }

@@ -7,8 +7,8 @@ use crate::Project;
 
 /// 启动时的示例：三角函数、中文分类柱状图，以及一张三维曲面。
 pub fn demo_project() -> Project {
-    let mut project = Project::new("示例项目");
-    let trig = project.new_table("三角函数");
+    let mut project = Project::new(crate::locale::t("示例项目"));
+    let trig = project.new_table(crate::locale::t("三角函数"));
     {
         let table = project.table_mut(trig).unwrap();
         table.columns.clear();
@@ -25,24 +25,24 @@ pub fn demo_project() -> Project {
         table.add_numeric_column("X", ColumnMode::X, &x);
         table.add_numeric_column("sin", ColumnMode::Y, &ys);
         table.add_numeric_column("cos", ColumnMode::Y, &yc);
-        table.comment = "0 到 2π 的正弦和余弦，可用来求交点。".to_string();
+        table.comment = crate::locale::t("0 到 2π 的正弦和余弦，可用来求交点。").to_string();
     }
     let graph = project.plot_table(trig, CurveKind::LineSymbol).unwrap();
     if let Some(graph) = project.graph_mut(graph) {
-        graph.name = "正弦与余弦".to_string();
+        graph.name = crate::locale::t("正弦与余弦").to_string();
         let layer = &mut graph.layers[0];
-        layer.title = "正弦与余弦".to_string();
-        layer.x_axis.label = "x（弧度）".to_string();
+        layer.title = crate::locale::t("正弦与余弦").to_string();
+        layer.x_axis.label = crate::locale::t("x（弧度）").to_string();
         layer.y_axis.label = "y".to_string();
     }
 
-    let sales = project.new_table("水果销量");
+    let sales = project.new_table(crate::locale::t("水果销量"));
     {
         let table = project.table_mut(sales).unwrap();
         table.columns.clear();
-        table.add_column("水果", ColumnMode::X);
-        table.add_column("销量", ColumnMode::Y);
-        let names = ["苹果", "香蕉", "橙子", "葡萄", "梨"];
+        table.add_column(crate::locale::t("水果"), ColumnMode::X);
+        table.add_column(crate::locale::t("销量"), ColumnMode::Y);
+        let names = [crate::locale::t("苹果"), crate::locale::t("香蕉"), crate::locale::t("橙子"), crate::locale::t("葡萄"), crate::locale::t("梨")];
         let values = [12.0, 9.5, 7.0, 11.0, 6.5];
         for (name, value) in names.iter().zip(values) {
             let row = table.nrows();
@@ -53,14 +53,14 @@ pub fn demo_project() -> Project {
     }
     let bars = project.plot_table(sales, CurveKind::Bars).unwrap();
     if let Some(graph) = project.graph_mut(bars) {
-        graph.name = "水果销量".to_string();
+        graph.name = crate::locale::t("水果销量").to_string();
         let layer = &mut graph.layers[0];
-        layer.title = "水果销量".to_string();
-        layer.x_axis.label = "水果".to_string();
-        layer.y_axis.label = "销量（吨）".to_string();
+        layer.title = crate::locale::t("水果销量").to_string();
+        layer.x_axis.label = crate::locale::t("水果").to_string();
+        layer.y_axis.label = crate::locale::t("销量（吨）").to_string();
     }
 
-    let matrix_id = project.new_matrix("波面", 36, 36);
+    let matrix_id = project.new_matrix(crate::locale::t("波面"), 36, 36);
     if let Some(matrix) = project.matrix_mut(matrix_id) {
         matrix.x_min = -PI;
         matrix.x_max = PI;
@@ -71,13 +71,13 @@ pub fn demo_project() -> Project {
     project.plot_surface(
         SurfaceSource::Matrix(matrix_id),
         SurfaceMode::Surface,
-        "波面",
+        crate::locale::t("波面"),
     );
     project.plot_matrix(matrix_id, CurveKind::Heatmap).ok();
 
-    let note = project.new_note("使用说明");
+    let note = project.new_note(crate::locale::t("使用说明"));
     if let Some(note) = project.note_mut(note) {
-        note.text = "\
+        note.text = crate::locale::t("\
 先看左边的示例，再画自己的实验数据。\n\
 \n\
 1. 导入数据：在项目树的「表格」标题上右键，选「导入 CSV…」。\n\
@@ -86,9 +86,9 @@ pub fn demo_project() -> Project {
 4. 求交点：在曲线上右键「分析 → 求交点」。有交点才会标在图上并写入新表。\n\
 \n\
 滚轮缩放，左键拖拽平移，双击恢复。右键空白处可以改坐标轴、图例和标题。\n\
-用「文件 → 另存为」存成 .splot。图可以在右键菜单或「文件」里导出 PNG、SVG。\n"
+用「文件 → 另存为」存成 .splot。图可以在右键菜单或「文件」里导出 PNG、SVG。\n")
             .to_string();
     }
-    project.log_line("已载入示例项目。在「正弦与余弦」上右键曲线，用「分析 → 求交点」计算 sin 与 cos 的交点。");
+    project.log_line(crate::locale::t("已载入示例项目。在「正弦与余弦」上右键曲线，用「分析 → 求交点」计算 sin 与 cos 的交点。"));
     project
 }

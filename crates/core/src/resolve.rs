@@ -87,28 +87,28 @@ pub fn resolve_curve(project: &Project, curve: &Curve) -> Result<SeriesData, Str
             dx,
             dy,
         } => {
-            let table = project.table(*table).ok_or("找不到曲线对应的表格")?;
-            let (xs, labels) = column_x(table.columns.get(*x).ok_or("X 列不存在")?)?;
-            let ys = column_numbers(table.columns.get(*y).ok_or("Y 列不存在")?);
+            let table = project.table(*table).ok_or(crate::locale::t("找不到曲线对应的表格"))?;
+            let (xs, labels) = column_x(table.columns.get(*x).ok_or(crate::locale::t("X 列不存在"))?)?;
+            let ys = column_numbers(table.columns.get(*y).ok_or(crate::locale::t("Y 列不存在"))?);
             let n = xs.len().max(ys.len());
             series.x = pad(xs, n);
             series.y = pad(ys, n);
             series.labels = if labels.len() == n { labels } else { Vec::new() };
             if let Some(index) = x_err {
-                series.x_err = pad(column_numbers(table.columns.get(*index).ok_or("x 误差列不存在")?), n);
+                series.x_err = pad(column_numbers(table.columns.get(*index).ok_or(crate::locale::t("x 误差列不存在"))?), n);
             }
             if let Some(index) = y_err {
-                series.y_err = pad(column_numbers(table.columns.get(*index).ok_or("y 误差列不存在")?), n);
+                series.y_err = pad(column_numbers(table.columns.get(*index).ok_or(crate::locale::t("y 误差列不存在"))?), n);
             }
             if let Some(index) = dx {
-                series.dx = pad(column_numbers(table.columns.get(*index).ok_or("dx 列不存在")?), n);
+                series.dx = pad(column_numbers(table.columns.get(*index).ok_or(crate::locale::t("dx 列不存在"))?), n);
             }
             if let Some(index) = dy {
-                series.dy = pad(column_numbers(table.columns.get(*index).ok_or("dy 列不存在")?), n);
+                series.dy = pad(column_numbers(table.columns.get(*index).ok_or(crate::locale::t("dy 列不存在"))?), n);
             }
         }
         DataSource::Matrix { matrix } => {
-            let matrix = project.matrix(*matrix).ok_or("找不到曲线对应的矩阵")?;
+            let matrix = project.matrix(*matrix).ok_or(crate::locale::t("找不到曲线对应的矩阵"))?;
             series.grid = Some(GridData::from_matrix(matrix));
         }
         DataSource::Function {
@@ -210,7 +210,7 @@ mod tests {
         {
             let table = project.table_mut(table_id).unwrap();
             table.columns[0].set_numbers(&[0.0, 1.0]);
-            table.columns[0].texts = vec!["甲".into(), "乙".into()];
+            table.columns[0].texts = vec![crate::locale::t("甲").into(), crate::locale::t("乙").into()];
             table.columns[1].set_numbers(&[2.0, 4.0]);
         }
         let graph_id = project.plot_table(table_id, CurveKind::Line).unwrap();
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(series.pairs(), vec![(0.0, 2.0), (1.0, 4.0)]);
 
         let curve = Curve {
-            name: "正弦".into(),
+            name: crate::locale::t("正弦").into(),
             kind: CurveKind::Function,
             style: Default::default(),
             source: DataSource::Function {

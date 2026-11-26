@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::tr;
 use crate::util::{default_true, palette_color};
 use crate::{GraphId, MatrixId, TableId};
 
@@ -27,22 +28,22 @@ pub enum CurveKind {
 impl CurveKind {
     pub fn label(self) -> &'static str {
         match self {
-            CurveKind::Line => "折线",
-            CurveKind::Scatter => "散点",
-            CurveKind::LineSymbol => "点线",
-            CurveKind::Steps => "阶梯",
-            CurveKind::Bars => "柱状",
-            CurveKind::HorizontalBars => "条形",
-            CurveKind::Histogram => "直方图",
-            CurveKind::Area => "面积",
-            CurveKind::ErrorBars => "误差棒",
-            CurveKind::BoxPlot => "箱线",
-            CurveKind::Pie => "饼图",
-            CurveKind::Vector => "向量场",
-            CurveKind::Contour => "等高线",
-            CurveKind::Heatmap => "热力图",
-            CurveKind::Function => "函数",
-            CurveKind::Parametric => "参数曲线",
+            CurveKind::Line => tr!("折线", "Line"),
+            CurveKind::Scatter => tr!("散点", "Scatter"),
+            CurveKind::LineSymbol => tr!("点线", "Line + symbol"),
+            CurveKind::Steps => tr!("阶梯", "Steps"),
+            CurveKind::Bars => tr!("柱状", "Bars"),
+            CurveKind::HorizontalBars => tr!("条形", "Horizontal bars"),
+            CurveKind::Histogram => tr!("直方图", "Histogram"),
+            CurveKind::Area => tr!("面积", "Area"),
+            CurveKind::ErrorBars => tr!("误差棒", "Error bars"),
+            CurveKind::BoxPlot => tr!("箱线", "Box plot"),
+            CurveKind::Pie => tr!("饼图", "Pie"),
+            CurveKind::Vector => tr!("向量场", "Vector field"),
+            CurveKind::Contour => tr!("等高线", "Contour"),
+            CurveKind::Heatmap => tr!("热力图", "Heat map"),
+            CurveKind::Function => tr!("函数", "Function"),
+            CurveKind::Parametric => tr!("参数曲线", "Parametric"),
         }
     }
 
@@ -62,9 +63,9 @@ pub enum AxisScale {
 impl AxisScale {
     pub fn label(self) -> &'static str {
         match self {
-            AxisScale::Linear => "线性",
-            AxisScale::Log10 => "对数 (log10)",
-            AxisScale::Reciprocal => "倒数 (1/x)",
+            AxisScale::Linear => tr!("线性", "Linear"),
+            AxisScale::Log10 => tr!("对数 (log10)", "Log10"),
+            AxisScale::Reciprocal => tr!("倒数 (1/x)", "Reciprocal (1/x)"),
         }
     }
 
@@ -85,10 +86,10 @@ pub enum Dash {
 impl Dash {
     pub fn label(self) -> &'static str {
         match self {
-            Dash::Solid => "实线",
-            Dash::Dash => "虚线",
-            Dash::Dot => "点线",
-            Dash::DashDot => "点划线",
+            Dash::Solid => tr!("实线", "Solid"),
+            Dash::Dash => tr!("虚线", "Dashed"),
+            Dash::Dot => tr!("点线", "Dotted"),
+            Dash::DashDot => tr!("点划线", "Dash-dot"),
         }
     }
 
@@ -112,13 +113,13 @@ pub enum Symbol {
 impl Symbol {
     pub fn label(self) -> &'static str {
         match self {
-            Symbol::None => "无",
-            Symbol::Circle => "圆",
-            Symbol::Square => "方",
-            Symbol::Diamond => "菱形",
-            Symbol::Triangle => "三角",
-            Symbol::Cross => "叉",
-            Symbol::Plus => "加号",
+            Symbol::None => tr!("无", "None"),
+            Symbol::Circle => tr!("圆", "Circle"),
+            Symbol::Square => tr!("方", "Square"),
+            Symbol::Diamond => tr!("菱形", "Diamond"),
+            Symbol::Triangle => tr!("三角", "Triangle"),
+            Symbol::Cross => tr!("叉", "Cross"),
+            Symbol::Plus => tr!("加号", "Plus"),
         }
     }
 
@@ -147,10 +148,10 @@ pub enum LegendPos {
 impl LegendPos {
     pub fn label(self) -> &'static str {
         match self {
-            LegendPos::TopRight => "右上",
-            LegendPos::TopLeft => "左上",
-            LegendPos::BottomRight => "右下",
-            LegendPos::BottomLeft => "左下",
+            LegendPos::TopRight => tr!("右上", "Top right"),
+            LegendPos::TopLeft => tr!("左上", "Top left"),
+            LegendPos::BottomRight => tr!("右下", "Bottom right"),
+            LegendPos::BottomLeft => tr!("左下", "Bottom left"),
         }
     }
 
@@ -322,7 +323,7 @@ pub struct Curve {
 impl Default for Curve {
     fn default() -> Self {
         Self {
-            name: "曲线".to_string(),
+            name: crate::locale::t("曲线").to_string(),
             kind: CurveKind::Line,
             style: CurveStyle::default(),
             source: DataSource::default(),
@@ -426,9 +427,9 @@ pub enum SurfaceMode {
 impl SurfaceMode {
     pub fn label(self) -> &'static str {
         match self {
-            SurfaceMode::Surface => "曲面",
-            SurfaceMode::Wireframe => "线框",
-            SurfaceMode::Scatter => "散点",
+            SurfaceMode::Surface => tr!("曲面", "Surface"),
+            SurfaceMode::Wireframe => tr!("线框", "Wireframe"),
+            SurfaceMode::Scatter => tr!("散点", "Scatter"),
         }
     }
 
@@ -485,7 +486,7 @@ impl Default for SurfaceSpec {
             elevation: 32.0,
             zoom: 1.0,
             perspective: true,
-            title: "三维图".to_string(),
+            title: crate::locale::t("三维图").to_string(),
         }
     }
 }
@@ -503,7 +504,7 @@ impl Default for Graph {
     fn default() -> Self {
         Self {
             id: GraphId(0),
-            name: "图".to_string(),
+            name: crate::locale::t("图").to_string(),
             layers: vec![Layer::default()],
             surface: None,
         }

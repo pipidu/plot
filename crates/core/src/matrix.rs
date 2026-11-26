@@ -24,7 +24,7 @@ impl Default for Matrix {
     fn default() -> Self {
         Self {
             id: MatrixId(0),
-            name: "矩阵".to_string(),
+            name: crate::locale::t("矩阵").to_string(),
             rows: 1,
             cols: 1,
             data: vec![None],
@@ -96,7 +96,7 @@ impl Matrix {
                     Ok(v) if v.is_finite() => self.set(r, c, Some(v)),
                     Ok(_) => self.set(r, c, None),
                     Err(err) => {
-                        return Err(format!("第 {} 行第 {} 列：{err}", r + 1, c + 1));
+                        return Err(crate::trf!("第 {} 行第 {} 列：{err}", "Row {}, column {}: {err}", r + 1, c + 1, err = err));
                     }
                 }
             }

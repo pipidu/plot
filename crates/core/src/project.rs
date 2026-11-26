@@ -20,7 +20,7 @@ impl Default for Note {
     fn default() -> Self {
         Self {
             id: NoteId(0),
-            name: "备注".to_string(),
+            name: crate::locale::t("备注").to_string(),
             text: String::new(),
         }
     }
@@ -40,7 +40,7 @@ pub struct Project {
 
 impl Default for Project {
     fn default() -> Self {
-        Self::new("未命名项目")
+        Self::new(crate::locale::t("未命名项目"))
     }
 }
 
@@ -186,12 +186,12 @@ impl Project {
 
     pub fn rename_table(&mut self, id: TableId, name: &str) -> Result<(), String> {
         if name.trim().is_empty() {
-            return Err("名称不能为空".into());
+            return Err(crate::locale::t("名称不能为空").into());
         }
         if self.tables.iter().any(|t| t.id != id && t.name == name) {
-            return Err("已有同名表格".into());
+            return Err(crate::locale::t("已有同名表格").into());
         }
-        self.table_mut(id).ok_or("找不到表格")?.name = name.to_string();
+        self.table_mut(id).ok_or(crate::locale::t("找不到表格"))?.name = name.to_string();
         Ok(())
     }
 
@@ -218,7 +218,7 @@ impl Project {
     /// 只有一条 Y 时，图名和标题用「Y-X」，坐标轴标题用列名。
     pub fn plot_table(&mut self, table_id: TableId, kind: CurveKind) -> Result<GraphId, String> {
         let (table_name, x_label, y_labels) = {
-            let table = self.table(table_id).ok_or("找不到表格")?;
+            let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
             let x_label = table
                 .columns
                 .iter()
@@ -262,14 +262,14 @@ impl Project {
 
     pub fn add_curves(&mut self, graph_id: GraphId, layer: usize, table_id: TableId, kind: CurveKind) -> Result<(), String> {
         let curves = {
-            let table = self.table(table_id).ok_or("找不到表格")?;
+            let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
             curves_from_table(table, kind)?
         };
-        let graph = self.graph_mut(graph_id).ok_or("找不到图形")?;
+        let graph = self.graph_mut(graph_id).ok_or(crate::locale::t("找不到图形"))?;
         if graph.layers.is_empty() {
             graph.layers.push(Layer::default());
         }
-        let layer = graph.layers.get_mut(layer).ok_or("找不到图层")?;
+        let layer = graph.layers.get_mut(layer).ok_or(crate::locale::t("找不到图层"))?;
         let color_start = layer.curves.len();
         for (offset, mut curve) in curves.into_iter().enumerate() {
             curve.style = CurveStyle::from_index(color_start + offset);
@@ -280,9 +280,9 @@ impl Project {
 
     pub fn plot_matrix(&mut self, matrix_id: MatrixId, kind: CurveKind) -> Result<GraphId, String> {
         if !matches!(kind, CurveKind::Heatmap | CurveKind::Contour) {
-            return Err("矩阵可以直接画成热力图或等高线".into());
+            return Err(crate::locale::t("矩阵可以直接画成热力图或等高线").into());
         }
-        let name = self.matrix(matrix_id).ok_or("找不到矩阵")?.name.clone();
+        let name = self.matrix(matrix_id).ok_or(crate::locale::t("找不到矩阵"))?.name.clone();
         let graph_id = self.new_graph(&format!("{name}-{}", kind.label()));
         let style = CurveStyle::from_index(0);
         if let Some(graph) = self.graph_mut(graph_id) {
@@ -313,7 +313,7 @@ impl Project {
     }
 
     pub fn matrix_from_table(&mut self, table_id: TableId) -> Result<MatrixId, String> {
-        let table = self.table(table_id).ok_or("找不到表格")?;
+        let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
         let cols: Vec<usize> = table
             .columns
             .iter()
@@ -322,10 +322,10 @@ impl Project {
             .map(|(i, _)| i)
             .collect();
         if cols.is_empty() {
-            return Err("表中没有数值列".into());
+            return Err(crate::locale::t("表中没有数值列").into());
         }
         let rows = table.nrows().max(1);
-        let name = format!("{}-矩阵", table.name);
+        let name = crate::trf!("{}-矩阵", "{}-matrix", table.name);
         let matrix_id = self.new_matrix(&name, rows, cols.len());
         let table = self.table(table_id).unwrap();
         let snapshot: Vec<Vec<Option<f64>>> = cols
@@ -346,8 +346,8 @@ impl Project {
     }
 
     pub fn table_from_matrix(&mut self, matrix_id: MatrixId) -> Result<TableId, String> {
-        let matrix = self.matrix(matrix_id).ok_or("找不到矩阵")?.clone();
-        let table_id = self.new_table(&format!("{}-表", matrix.name));
+        let matrix = self.matrix(matrix_id).ok_or(crate::locale::t("找不到矩阵"))?.clone();
+        let table_id = self.new_table(&crate::trf!("{}-表", "{}-table", matrix.name));
         let table = self.table_mut(table_id).unwrap();
         table.columns.clear();
         for c in 0..matrix.cols {
@@ -359,7 +359,7 @@ impl Project {
         }
         let shown = self.table(table_id).map(|table| table.name.clone()).unwrap_or_default();
         let source = matrix.name.clone();
-        self.log_line(format!("已把矩阵「{source}」转为表格「{shown}」。"));
+        self.log_line(crate::trf!("已把矩阵「{source}」转为表格「{shown}」。", "Converted matrix \"{source}\" to table \"{shown}\".", source = source, shown = shown));
         Ok(table_id)
     }
 
@@ -404,7 +404,7 @@ pub struct ProjectFile {
 
 fn curves_from_table(table: &Table, kind: CurveKind) -> Result<Vec<Curve>, String> {
     if table.columns.is_empty() {
-        return Err("表格没有列".into());
+        return Err(crate::locale::t("表格没有列").into());
     }
     if kind == CurveKind::Vector {
         return Ok(vec![vector_curve(table)?]);
@@ -431,7 +431,7 @@ fn curves_from_table(table: &Table, kind: CurveKind) -> Result<Vec<Curve>, Strin
             .collect();
     }
     if y_cols.is_empty() {
-        return Err("没有可绘制的 Y 列。请把一列设为 Y，或填入数值。".into());
+        return Err(crate::locale::t("没有可绘制的 Y 列。请把一列设为 Y，或填入数值。").into());
     }
     let x_err = table.columns.iter().position(|column| column.mode == ColumnMode::XErr);
     let y_errs: Vec<usize> = table
@@ -503,13 +503,13 @@ fn vector_curve(table: &Table) -> Result<Curve, String> {
         }
     }
     let (Some(dx), Some(dy)) = (dx, dy) else {
-        return Err("向量场需要 X、Y、dx、dy 四列（后两列可命名为 dx、dy）".into());
+        return Err(crate::locale::t("向量场需要 X、Y、dx、dy 四列（后两列可命名为 dx、dy）").into());
     };
     if y >= table.columns.len() {
-        return Err("向量场需要 Y 列".into());
+        return Err(crate::locale::t("向量场需要 Y 列").into());
     }
     Ok(Curve {
-        name: "向量".to_string(),
+        name: crate::locale::t("向量").to_string(),
         kind: CurveKind::Vector,
         style: CurveStyle::default(),
         source: DataSource::Columns {
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn roundtrip_and_plot() {
         let mut project = Project::new("P");
-        let table_id = project.new_table("数据");
+        let table_id = project.new_table(crate::locale::t("数据"));
         {
             let table = project.table_mut(table_id).unwrap();
             table.columns[0].set_numbers(&[0.0, 1.0, 2.0]);

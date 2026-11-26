@@ -68,6 +68,11 @@ pub enum Prim {
     },
 }
 
+/// 纵轴标题。汉字和单字符逐字竖排；一串英文转 90 度，避免每个字母占一行。
+pub fn stack_vertical(text: &str) -> bool {
+    !text.is_ascii() || text.chars().count() <= 1
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct PxRect {
     pub x: f32,

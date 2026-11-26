@@ -1,4 +1,4 @@
-use sciplot_core::CompiledExpr;
+use sciplot_core::{tr, CompiledExpr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterpMethod {
@@ -10,8 +10,8 @@ pub enum InterpMethod {
 impl InterpMethod {
     pub fn label(self) -> &'static str {
         match self {
-            InterpMethod::Linear => "线性",
-            InterpMethod::CubicSpline => "三次样条",
+            InterpMethod::Linear => tr!("线性", "Linear"),
+            InterpMethod::CubicSpline => tr!("三次样条", "Cubic spline"),
             InterpMethod::Akima => "Akima",
         }
     }
@@ -51,7 +51,7 @@ impl CubicSpline {
                 let i = k + 1;
                 let denom = diag[i] - lower[i] * cp[k - 1];
                 if denom.abs() < 1e-18 {
-                    return Err("样条方程组奇异".into());
+                    return Err(sciplot_core::t("样条方程组奇异").into());
                 }
                 let up = if k + 1 < mids { upper[i] } else { 0.0 };
                 cp[k] = up / denom;
@@ -223,16 +223,16 @@ fn prepare(x: &[f64], y: &[f64]) -> Result<(Vec<f64>, Vec<f64>), String> {
         .map(|(a, b)| (*a, *b))
         .collect();
     if pairs.len() < 2 {
-        return Err("插值至少需要两个有限点".into());
+        return Err(sciplot_core::t("插值至少需要两个有限点").into());
     }
     pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
     pairs.dedup_by(|a, b| (a.0 - b.0).abs() <= 1e-12 * (1.0 + a.0.abs()));
     if pairs.len() < 2 {
-        return Err("x 值全部重复，无法插值".into());
+        return Err(sciplot_core::t("x 值全部重复，无法插值").into());
     }
     for w in pairs.windows(2) {
         if w[1].0 <= w[0].0 {
-            return Err("x 必须严格递增".into());
+            return Err(sciplot_core::t("x 必须严格递增").into());
         }
     }
     Ok((pairs.iter().map(|p| p.0).collect(), pairs.iter().map(|p| p.1).collect()))

@@ -98,12 +98,12 @@ fn piecewise(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, toleran
             if (y1 - y2).abs() <= tolerance {
                 IntersectOutput {
                     points: Vec::new(),
-                    note: "两条水平线重合，交点有无穷多个".into(),
+                    note: sciplot_core::t("两条水平线重合，交点有无穷多个").into(),
                 }
             } else {
                 IntersectOutput {
                     points: Vec::new(),
-                    note: "两条水平线平行，没有交点".into(),
+                    note: sciplot_core::t("两条水平线平行，没有交点").into(),
                 }
             }
         }
@@ -111,12 +111,12 @@ fn piecewise(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, toleran
             if (x1 - x2).abs() <= tolerance {
                 IntersectOutput {
                     points: Vec::new(),
-                    note: "两条竖直线重合，交点有无穷多个".into(),
+                    note: sciplot_core::t("两条竖直线重合，交点有无穷多个").into(),
                 }
             } else {
                 IntersectOutput {
                     points: Vec::new(),
-                    note: "两条竖直线平行，没有交点".into(),
+                    note: sciplot_core::t("两条竖直线平行，没有交点").into(),
                 }
             }
         }
@@ -151,7 +151,7 @@ fn smooth(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance:
     if matches!(a, CurveInput::Vertical { .. }) || matches!(b, CurveInput::Vertical { .. }) {
         let mut out = piecewise(a, b, options, tolerance);
         if out.note.is_empty() {
-            out.note = "竖直线没有 y=f(x) 形式，已按分段模式求交".into();
+            out.note = sciplot_core::t("竖直线没有 y=f(x) 形式，已按分段模式求交").into();
         }
         return out;
     }
@@ -168,7 +168,7 @@ fn smooth(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance:
         _ => {
             return IntersectOutput {
                 points: Vec::new(),
-                note: "两条曲线在所给 X 区间内没有重叠的定义域".into(),
+                note: sciplot_core::t("两条曲线在所给 X 区间内没有重叠的定义域").into(),
             };
         }
     };
@@ -176,12 +176,12 @@ fn smooth(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance:
         return if (y1 - y2).abs() <= tolerance {
             IntersectOutput {
                 points: Vec::new(),
-                note: "两条水平线重合，交点有无穷多个".into(),
+                note: sciplot_core::t("两条水平线重合，交点有无穷多个").into(),
             }
         } else {
             IntersectOutput {
                 points: Vec::new(),
-                note: "两条水平线平行，没有交点".into(),
+                note: sciplot_core::t("两条水平线平行，没有交点").into(),
             }
         };
     }
@@ -206,16 +206,16 @@ fn smooth(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance:
         .collect();
     let worst = points.iter().map(|point| difference(point.x).abs()).filter(|value| value.is_finite()).fold(0.0_f64, f64::max);
     let note = if points.is_empty() {
-        "平滑求根".to_string()
+        sciplot_core::t("平滑求根").to_string()
     } else {
-        format!("平滑求根，最大残差 |f−g| = {}", sciplot_core::format_number(worst))
+        sciplot_core::trf!("平滑求根，最大残差 |f−g| = {}", "Smooth roots, maximum residual |f−g| = {}", sciplot_core::format_number(worst))
     };
     finish(points, options, tolerance, note)
 }
 
 fn piecewise_with_note(a: &CurveInput, b: &CurveInput, options: &IntersectOptions, tolerance: f64, note: String) -> IntersectOutput {
     let mut out = piecewise(a, b, options, tolerance);
-    out.note = format!("{note}，已改用分段线性求交");
+    out.note = sciplot_core::trf!("{note}，已改用分段线性求交", "{note}; fell back to piecewise-linear intersection", note = note);
     out
 }
 
@@ -260,14 +260,14 @@ fn as_function(input: &CurveInput) -> Result<Prepared, String> {
                 .filter(|(x, y)| x.is_finite() && y.is_finite())
                 .collect();
             if pts.len() < 2 {
-                return Err("数据点不足，无法做平滑求交".into());
+                return Err(sciplot_core::t("数据点不足，无法做平滑求交").into());
             }
             let increasing = pts.windows(2).all(|w| w[1].0 > w[0].0);
             if !increasing {
                 pts.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let strict = pts.windows(2).all(|w| w[1].0 > w[0].0 + 1e-12);
                 if !strict {
-                    return Err("数据在 x 上有回折或重复，不能做样条求交".into());
+                    return Err(sciplot_core::t("数据在 x 上有回折或重复，不能做样条求交").into());
                 }
             }
             let xs: Vec<f64> = pts.iter().map(|p| p.0).collect();
@@ -278,7 +278,7 @@ fn as_function(input: &CurveInput) -> Result<Prepared, String> {
                 eval: SmoothEval::Spline(spline),
             })
         }
-        CurveInput::Vertical { .. } => Err("竖直线".into()),
+        CurveInput::Vertical { .. } => Err(sciplot_core::t("竖直线").into()),
     }
 }
 

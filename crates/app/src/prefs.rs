@@ -1,7 +1,7 @@
 //! 本机界面设置，不写进 `.splot`。存在用户主目录的 `.sciplot_prefs.json`。
 
 use serde::{Deserialize, Serialize};
-use sciplot_core::{palette_color, CurveStyle, Dash, GraphId, Project, Symbol};
+use sciplot_core::{palette_color, CurveStyle, Dash, GraphId, Language, Project, Symbol};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -25,6 +25,9 @@ pub struct Prefs {
     /// 导入导出 CSV 时用的编码。自动导入会识别 UTF-8 和 GBK。
     #[serde(default)]
     pub csv_encoding: sciplot_core::CsvEncoding,
+    /// 界面语言。缺省是简体中文。
+    #[serde(default)]
+    pub language: Language,
 }
 
 impl Default for Prefs {
@@ -43,6 +46,7 @@ impl Default for Prefs {
             color: palette_color(0),
             last_dir: String::new(),
             csv_encoding: sciplot_core::CsvEncoding::Auto,
+            language: Language::Zh,
         }
     }
 }

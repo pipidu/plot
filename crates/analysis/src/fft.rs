@@ -37,7 +37,7 @@ pub fn fft_spectrum(x: &[f64], y: &[f64]) -> Result<Spectrum, String> {
 
 pub fn fft_filter(x: &[f64], y: &[f64], cutoff: f64, highpass: bool) -> Result<Vec<f64>, String> {
     if cutoff < 0.0 {
-        return Err("截止频率不能为负".into());
+        return Err(sciplot_core::t("截止频率不能为负").into());
     }
     let (dt, samples) = uniformish(x, y)?;
     let n = samples.len();
@@ -68,7 +68,7 @@ fn uniformish(x: &[f64], y: &[f64]) -> Result<(f64, Vec<f64>), String> {
         .map(|(a, b)| (*a, *b))
         .collect();
     if pairs.len() < 4 {
-        return Err("FFT 至少需要 4 个有限点".into());
+        return Err(sciplot_core::t("FFT 至少需要 4 个有限点").into());
     }
     let mut dx = Vec::new();
     for w in pairs.windows(2) {
@@ -78,12 +78,12 @@ fn uniformish(x: &[f64], y: &[f64]) -> Result<(f64, Vec<f64>), String> {
         }
     }
     if dx.is_empty() {
-        return Err("x 没有递增区间，无法确定采样间隔".into());
+        return Err(sciplot_core::t("x 没有递增区间，无法确定采样间隔").into());
     }
     dx.sort_by(|a, b| a.total_cmp(b));
     let dt = dx[dx.len() / 2];
     if dt <= 0.0 {
-        return Err("采样间隔无效".into());
+        return Err(sciplot_core::t("采样间隔无效").into());
     }
     Ok((dt, pairs.into_iter().map(|(_, y)| y).collect()))
 }

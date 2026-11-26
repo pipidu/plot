@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
-    demo_project, export_csv_with, import_csv_with, AnnotationKind, CurveKind, CsvEncoding, Graph, GraphId, History,
+    demo_project, export_csv_with, import_csv_with, tr, AnnotationKind, CurveKind, CsvEncoding, Graph, GraphId, History,
     MatrixId, NoteId, Project, SurfaceMode, SurfaceSource, TableId,
 };
 use sciplot_plot::{
     data_to_screen, nearest_curve, nearest_point, pan_limits, render, screen_to_data, to_png, to_rgba, to_svg,
-    zoom_limits, GlyphFont, LayerFrame, LayerView, Scene,
+    zoom_limits, LayerFrame, LayerView, Scene,
 };
 
 use crate::dialogs;
@@ -46,9 +46,9 @@ pub enum LineChoice {
 impl LineChoice {
     pub fn label(self) -> &'static str {
         match self {
-            LineChoice::Curve => "曲线",
-            LineChoice::Horizontal => "水平线 y=c",
-            LineChoice::Vertical => "竖直线 x=c",
+            LineChoice::Curve => tr!("曲线", "Curve"),
+            LineChoice::Horizontal => tr!("水平线 y=c", "Horizontal y=c"),
+            LineChoice::Vertical => tr!("竖直线 x=c", "Vertical x=c"),
         }
     }
 }
@@ -66,12 +66,12 @@ pub enum FitWhich {
 impl FitWhich {
     pub fn label(self) -> &'static str {
         match self {
-            FitWhich::Linear => "线性",
-            FitWhich::Poly => "多项式",
-            FitWhich::Exp => "指数",
-            FitWhich::Gauss => "高斯",
-            FitWhich::Lorentz => "洛伦兹",
-            FitWhich::Custom => "自定义",
+            FitWhich::Linear => tr!("线性", "Linear"),
+            FitWhich::Poly => tr!("多项式", "Polynomial"),
+            FitWhich::Exp => tr!("指数", "Exponential"),
+            FitWhich::Gauss => tr!("高斯", "Gaussian"),
+            FitWhich::Lorentz => tr!("洛伦兹", "Lorentzian"),
+            FitWhich::Custom => tr!("自定义", "Custom"),
         }
     }
 }
@@ -214,7 +214,7 @@ pub struct SciPlotApp {
     active_layer: usize,
     pub(crate) curve: usize,
     pushed_edit: bool,
-    font: Vec<u8>,
+    fonts: crate::fonts::LoadedFonts,
     glyphs: Option<sciplot_plot::GlyphFont>,
     frames: u32,
     pub(crate) prefs: crate::prefs::Prefs,
@@ -234,7 +234,7 @@ pub fn run() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             let app = SciPlotApp::demo();
-            fonts::install(&cc.egui_ctx, &app.font);
+            fonts::install(&cc.egui_ctx, &app.fonts);
             Ok(Box::new(app))
         }),
     )
@@ -242,11 +242,12 @@ pub fn run() -> eframe::Result<()> {
 
 impl SciPlotApp {
     fn demo() -> Self {
+        sciplot_core::set_language(crate::prefs::load().language);
         let mut project = demo_project();
         ops::enrich_demo(&mut project);
         let mut app = Self::empty(project);
         app.rebuild_dock(true);
-        app.status = "已载入示例。正弦与余弦的交点已标在图上。".into();
+        app.status = sciplot_core::t("已载入示例。正弦与余弦的交点已标在图上。").into();
         app
     }
 
@@ -258,7 +259,7 @@ impl SciPlotApp {
             history: History::new(),
             dock,
             dialog: None,
-            status: "就绪".into(),
+            status: sciplot_core::t("就绪").into(),
             path: None,
             dirty: false,
             recent: load_recent(),
@@ -276,7 +277,7 @@ impl SciPlotApp {
             pushed_edit: false,
             prefs: crate::prefs::load(),
             plot_hit: None,
-            font: Vec::new(),
+            fonts: crate::fonts::load(None),
             glyphs: None,
             frames: 0,
             pending_tabs: Vec::new(),
@@ -290,16 +291,17 @@ impl SciPlotApp {
     }
 
     fn reload_font_silent(&mut self) {
-        self.font = fonts::load_chosen(self.prefs.font_request()).0;
+        sciplot_core::set_language(self.prefs.language);
+        self.fonts = fonts::load(self.prefs.font_request());
         self.glyphs = None;
     }
 
     pub(crate) fn reload_font(&mut self, ctx: &egui::Context) -> bool {
-        let (bytes, ok) = fonts::load_chosen(self.prefs.font_request());
-        self.font = bytes;
+        sciplot_core::set_language(self.prefs.language);
+        self.fonts = fonts::load(self.prefs.font_request());
         self.glyphs = None;
-        fonts::install(ctx, &self.font);
-        ok
+        fonts::install(ctx, &self.fonts);
+        self.fonts.ok
     }
 
     pub fn edit<T>(&mut self, label: &str, f: impl FnOnce(&mut Project) -> Result<T, String>) -> Option<T> {
@@ -343,10 +345,10 @@ impl SciPlotApp {
         chinese_dock(&mut self.dock);
         self.pending_tabs.clear();
         if demo {
-            if let Some(table) = self.project.tables.iter().find(|t| t.name == "三角函数").map(|t| t.id) {
+            if let Some(table) = self.project.tables.iter().find(|t| demo_name(&t.name, "三角函数", "Trigonometry")).map(|t| t.id) {
                 self.open_tab(Tab::Table(table));
             }
-            if let Some(graph) = self.project.graphs.iter().find(|g| g.name == "正弦与余弦").map(|g| g.id) {
+            if let Some(graph) = self.project.graphs.iter().find(|g| demo_name(&g.name, "正弦与余弦", "Sine and cosine")).map(|g| g.id) {
                 self.open_tab(Tab::Graph(graph));
             }
             return;
@@ -388,7 +390,7 @@ impl SciPlotApp {
         if let Some(path) = self.path.clone() {
             self.write_path(&path)
         } else {
-            self.status = "还没有文件名，请用「另存为」".into();
+            self.status = sciplot_core::t("还没有文件名，请用「另存为」").into();
             start_file(self, PathAction::SaveAs, "");
             false
         }
@@ -401,7 +403,7 @@ impl SciPlotApp {
                 self.dirty = false;
                 remember(&mut self.recent, path);
                 self.note_dir(path);
-                self.status = format!("已保存 {}", path.display());
+                self.status = sciplot_core::trf!("已保存 {}", "Saved {}", path.display());
                 true
             }
             Err(err) => {
@@ -414,7 +416,7 @@ impl SciPlotApp {
     pub fn perform_path(&mut self, action: PathAction, path: &str, extra: &str) {
         let path = resolve_user_path(self, path);
         if path.as_os_str().is_empty() || path.is_dir() {
-            self.status = "请填写文件路径，不能只写文件夹".into();
+            self.status = sciplot_core::t("请填写文件路径，不能只写文件夹").into();
             return;
         }
         match action {
@@ -430,10 +432,10 @@ impl SciPlotApp {
                             table.name = stem.to_string();
                         }
                         let shown = path.display().to_string();
-                        if let Some(id) = self.edit("导入 CSV", move |project| Ok(project.insert_table(table))) {
+                        if let Some(id) = self.edit(sciplot_core::t("导入 CSV"), move |project| Ok(project.insert_table(table))) {
                             self.open_tab(Tab::Table(id));
                             self.note_dir(&path);
-                            self.status = format!("已导入 {shown}（{}）", encoding.label());
+                            self.status = sciplot_core::trf!("已导入 {shown}（{}）", "Imported {shown} ({})", encoding.label(), shown = shown);
                         }
                     }
                     Err(err) => self.status = err,
@@ -441,7 +443,7 @@ impl SciPlotApp {
             }
             PathAction::ExportCsv => {
                 let Some(id) = self.active_table() else {
-                    self.status = "没有可导出的表格".into();
+                    self.status = sciplot_core::t("没有可导出的表格").into();
                     return;
                 };
                 let Some(table) = self.project.table(id).cloned() else { return };
@@ -453,7 +455,7 @@ impl SciPlotApp {
                 match std::fs::write(&path, bytes) {
                     Ok(()) => {
                         self.note_dir(&path);
-                        self.status = format!("已导出 {}（{}）", path.display(), encoding.label());
+                        self.status = sciplot_core::trf!("已导出 {}（{}）", "Exported {} ({})", path.display(), encoding.label());
                     }
                     Err(err) => self.status = err.to_string(),
                 }
@@ -473,7 +475,7 @@ impl SciPlotApp {
     fn load_path(&mut self, path: &Path) {
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase();
         if matches!(ext.as_str(), "csv" | "txt" | "tsv") {
-            self.status = "这不是 SciPlot 项目。项目文件的扩展名是 .splot，表格请用导入。".into();
+            self.status = sciplot_core::t("这不是 SciPlot 项目。项目文件的扩展名是 .splot，表格请用导入。").into();
             self.dialog = Some(Dialog::ImportInstead { path: path.display().to_string() });
             return;
         }
@@ -487,28 +489,28 @@ impl SciPlotApp {
                 remember(&mut self.recent, path);
                 self.note_dir(path);
                 self.rebuild_dock(false);
-                self.status = format!("已打开 {}", path.display());
+                self.status = sciplot_core::trf!("已打开 {}", "Opened {}", path.display());
             }
-            Err(err) => self.status = format!("打不开这个项目。请选择 .splot 文件。{err}"),
+            Err(err) => self.status = sciplot_core::trf!("打不开这个项目。请选择 .splot 文件。{err}", "Could not open this project. Choose a .splot file. {err}", err = err),
         }
     }
 
     fn export_graph(&mut self, action: PathAction, path: &Path, extra: &str) {
         let Some(scene) = self.scene_of_active(extra) else {
-            self.status = "没有可导出的图形".into();
+            self.status = sciplot_core::t("没有可导出的图形").into();
             return;
         };
         let result = match action {
             PathAction::ExportSvg => std::fs::write(path, to_svg(&scene)).map_err(|err| err.to_string()),
             _ => {
-                let font = GlyphFont::from_bytes(&self.font);
+                let font = crate::fonts::plot_glyphs(&self.fonts);
                 to_png(&scene, font.as_ref()).and_then(|bytes| std::fs::write(path, bytes).map_err(|err| err.to_string()))
             }
         };
         self.status = match result {
             Ok(()) => {
                 self.note_dir(path);
-                format!("已导出 {}", path.display())
+                sciplot_core::trf!("已导出 {}", "Exported {}", path.display())
             }
             Err(err) => err,
         };
@@ -525,10 +527,10 @@ impl SciPlotApp {
 
     pub(crate) fn copy_png(&mut self) {
         let Some(scene) = self.scene_of_active("144") else {
-            self.status = "没有可复制的图形".into();
+            self.status = sciplot_core::t("没有可复制的图形").into();
             return;
         };
-        let font = GlyphFont::from_bytes(&self.font);
+        let font = crate::fonts::plot_glyphs(&self.fonts);
         match to_rgba(&scene, font.as_ref()) {
             Ok((w, h, bytes)) => match arboard::Clipboard::new().and_then(|mut clip| {
                 clip.set_image(arboard::ImageData {
@@ -537,8 +539,8 @@ impl SciPlotApp {
                     bytes: std::borrow::Cow::Owned(bytes),
                 })
             }) {
-                Ok(()) => self.status = "已复制 PNG 到剪贴板".into(),
-                Err(err) => self.status = format!("剪贴板不可用：{err}"),
+                Ok(()) => self.status = sciplot_core::t("已复制 PNG 到剪贴板").into(),
+                Err(err) => self.status = sciplot_core::trf!("剪贴板不可用：{err}", "Clipboard is unavailable: {err}", err = err),
             },
             Err(err) => self.status = err,
         }
@@ -546,12 +548,12 @@ impl SciPlotApp {
 
     pub(crate) fn copy_svg(&mut self) {
         let Some(scene) = self.scene_of_active("96") else {
-            self.status = "没有可复制的图形".into();
+            self.status = sciplot_core::t("没有可复制的图形").into();
             return;
         };
         match arboard::Clipboard::new().and_then(|mut clip| clip.set_text(to_svg(&scene))) {
-            Ok(()) => self.status = "已复制 SVG 到剪贴板".into(),
-            Err(err) => self.status = format!("剪贴板不可用：{err}"),
+            Ok(()) => self.status = sciplot_core::t("已复制 SVG 到剪贴板").into(),
+            Err(err) => self.status = sciplot_core::trf!("剪贴板不可用：{err}", "Clipboard is unavailable: {err}", err = err),
         }
     }
 
@@ -559,7 +561,7 @@ impl SciPlotApp {
         if let Some((label, project)) = self.history.undo(&self.project) {
             self.project = project;
             self.dirty = true;
-            self.status = format!("已撤销：{label}");
+            self.status = sciplot_core::trf!("已撤销：{label}", "Undone: {label}", label = label);
         }
     }
 
@@ -567,60 +569,61 @@ impl SciPlotApp {
         if let Some((label, project)) = self.history.redo(&self.project) {
             self.project = project;
             self.dirty = true;
-            self.status = format!("已重做：{label}");
+            self.status = sciplot_core::trf!("已重做：{label}", "Redone: {label}", label = label);
         }
     }
 
     pub(crate) fn plot_table_as(&mut self, table: TableId, kind: CurveKind) {
         let prefs = self.prefs.clone();
-        if let Some(id) = self.edit("绘图", |project| {
+        if let Some(id) = self.edit(sciplot_core::t("绘图"), |project| {
             let id = project.plot_table(table, kind)?;
             prefs.apply_new_graph(project, id);
             Ok(id)
         }) {
             self.open_tab(Tab::Graph(id));
-            self.status = format!("已新建{}", kind.label());
+            self.status = sciplot_core::trf!("已新建{}", "Created {}", kind.label());
         }
     }
 
     pub(crate) fn plot_matrix_as(&mut self, matrix: MatrixId, kind: CurveKind) {
         let prefs = self.prefs.clone();
-        if let Some(id) = self.edit("绘图", |project| {
+        if let Some(id) = self.edit(sciplot_core::t("绘图"), |project| {
             let id = project.plot_matrix(matrix, kind)?;
             prefs.apply_new_graph(project, id);
             Ok(id)
         }) {
             self.open_tab(Tab::Graph(id));
-            self.status = format!("已新建{}", kind.label());
+            self.status = sciplot_core::trf!("已新建{}", "Created {}", kind.label());
         }
     }
 
     pub(crate) fn plot_surface_as(&mut self, matrix: MatrixId, mode: SurfaceMode) {
         let prefs = self.prefs.clone();
-        let base = self.project.matrix(matrix).map(|m| m.name.clone()).unwrap_or_else(|| "三维图".into());
+        let base = self.project.matrix(matrix).map(|m| m.name.clone()).unwrap_or_else(|| sciplot_core::t("三维图").into());
         let title = format!("{base}-{}", mode.label());
-        if let Some(id) = self.edit("三维图", |project| {
+        if let Some(id) = self.edit(sciplot_core::t("三维图"), |project| {
             let id = project.plot_surface(SurfaceSource::Matrix(matrix), mode, &title);
             prefs.apply_new_graph(project, id);
             Ok(id)
         }) {
             self.open_tab(Tab::Graph(id));
-            self.status = format!("已新建三维{}", mode.label());
+            self.status = sciplot_core::trf!("已新建三维{}", "Created 3D {}", mode.label());
         }
     }
 
     fn tab_title(&self, tab: &Tab) -> String {
         match tab {
-            Tab::Table(id) => format!("表·{}", self.project.table(*id).map(|t| t.name.clone()).unwrap_or_else(|| "表格".into())),
-            Tab::Matrix(id) => format!("矩阵·{}", self.project.matrix(*id).map(|m| m.name.clone()).unwrap_or_else(|| "矩阵".into())),
-            Tab::Graph(id) => format!("图·{}", self.project.graph(*id).map(|g| g.name.clone()).unwrap_or_else(|| "图".into())),
-            Tab::Note(id) => format!("备注·{}", self.project.notes.iter().find(|n| n.id == *id).map(|n| n.name.clone()).unwrap_or_else(|| "备注".into())),
+            Tab::Table(id) => sciplot_core::trf!("表·{}", "Table · {}", self.project.table(*id).map(|t| t.name.clone()).unwrap_or_else(|| sciplot_core::t("表格").into())),
+            Tab::Matrix(id) => sciplot_core::trf!("矩阵·{}", "Matrix · {}", self.project.matrix(*id).map(|m| m.name.clone()).unwrap_or_else(|| sciplot_core::t("矩阵").into())),
+            Tab::Graph(id) => sciplot_core::trf!("图·{}", "Graph · {}", self.project.graph(*id).map(|g| g.name.clone()).unwrap_or_else(|| sciplot_core::t("图").into())),
+            Tab::Note(id) => sciplot_core::trf!("备注·{}", "Note · {}", self.project.notes.iter().find(|n| n.id == *id).map(|n| n.name.clone()).unwrap_or_else(|| sciplot_core::t("备注").into())),
         }
     }
 }
 
 impl eframe::App for SciPlotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        chinese_dock(&mut self.dock);
         self.frames += 1;
         if let Ok(limit) = std::env::var("SCIPLOT_EXIT_FRAMES") {
             if self.frames > limit.parse::<u32>().unwrap_or(40) {
@@ -638,7 +641,7 @@ impl eframe::App for SciPlotApp {
             if self.show_tree && !self.narrow_collapsed {
                 self.show_tree = false;
                 self.narrow_collapsed = true;
-                self.status = "窗口较窄，已收起项目树。可在「窗口」菜单里重新打开。".into();
+                self.status = sciplot_core::t("窗口较窄，已收起项目树。可在「窗口」菜单里重新打开。").into();
             }
         } else if screen_w > 900.0 {
             self.narrow_collapsed = false;
@@ -700,22 +703,22 @@ fn shortcuts(app: &mut SciPlotApp, ctx: &egui::Context) {
 
 fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     egui::menu::bar(ui, |ui| {
-        ui.menu_button(i18n::FILE, |ui| file_menu(app, ui));
-        ui.menu_button(i18n::EDIT, |ui| edit_menu(app, ui));
-        ui.menu_button(i18n::SETTINGS, |ui| {
-            if clicked(ui, "默认样式与字体…", "") {
+        ui.menu_button(i18n::file(), |ui| file_menu(app, ui));
+        ui.menu_button(i18n::edit(), |ui| edit_menu(app, ui));
+        ui.menu_button(i18n::settings(), |ui| {
+            if clicked(ui, sciplot_core::t("默认样式与字体…"), "") {
                 app.dialog = Some(Dialog::Prefs(app.prefs.clone()));
             }
         });
-        ui.menu_button(i18n::WINDOW, |ui| window_menu(app, ui));
-        ui.menu_button(i18n::HELP, |ui| {
-            if clicked(ui, "公式说明", "") {
+        ui.menu_button(i18n::window(), |ui| window_menu(app, ui));
+        ui.menu_button(i18n::help(), |ui| {
+            if clicked(ui, sciplot_core::t("公式说明"), "") {
                 app.dialog = Some(Dialog::Help);
             }
-            if clicked(ui, "检查更新", "") {
+            if clicked(ui, sciplot_core::t("检查更新"), "") {
                 crate::update::start(app);
             }
-            if clicked(ui, "关于", "") {
+            if clicked(ui, sciplot_core::t("关于"), "") {
                 app.dialog = Some(Dialog::About);
             }
         });
@@ -739,31 +742,31 @@ fn clicked(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
 }
 
 fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    if clicked(ui, "新建项目", "Ctrl+N") {
+    if clicked(ui, sciplot_core::t("新建项目"), "Ctrl+N") {
         request_after(app, AfterSave::NewProject);
     }
-    if clicked(ui, "打开…", "Ctrl+O") {
+    if clicked(ui, sciplot_core::t("打开…"), "Ctrl+O") {
         request_after(app, AfterSave::OpenPicker);
     }
-    if clicked(ui, "保存", "Ctrl+S") {
+    if clicked(ui, sciplot_core::t("保存"), "Ctrl+S") {
         app.save_current();
     }
-    if clicked(ui, "另存为…", "") {
+    if clicked(ui, sciplot_core::t("另存为…"), "") {
         start_file(app, PathAction::SaveAs, "");
     }
-    if clicked(ui, "导入 CSV…", "") {
+    if clicked(ui, sciplot_core::t("导入 CSV…"), "") {
         start_file(app, PathAction::ImportCsv, "");
     }
-    if clicked(ui, "导出当前图形 PNG…", "") {
+    if clicked(ui, sciplot_core::t("导出当前图形 PNG…"), "") {
         start_file(app, PathAction::ExportPng, "144");
     }
-    if clicked(ui, "导出当前图形 SVG…", "") {
+    if clicked(ui, sciplot_core::t("导出当前图形 SVG…"), "") {
         start_file(app, PathAction::ExportSvg, "");
     }
     ui.separator();
-    ui.menu_button("最近文件", |ui| {
+    ui.menu_button(sciplot_core::t("最近文件"), |ui| {
         if app.recent.is_empty() {
-            ui.label("（空）");
+            ui.label(sciplot_core::t("（空）"));
         }
         ui.set_min_width(320.0);
         let recent = app.recent.clone();
@@ -777,7 +780,7 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
             }
         }
     });
-    if clicked(ui, "退出", "") {
+    if clicked(ui, sciplot_core::t("退出"), "") {
         if app.dirty {
             app.dialog = Some(Dialog::Unsaved { then: AfterSave::Quit });
         } else {
@@ -787,18 +790,18 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
 }
 
 fn edit_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    if clicked(ui, "撤销", "Ctrl+Z") {
+    if clicked(ui, sciplot_core::t("撤销"), "Ctrl+Z") {
         app.undo();
     }
-    if clicked(ui, "重做", "Ctrl+Y") {
+    if clicked(ui, sciplot_core::t("重做"), "Ctrl+Y") {
         app.redo();
     }
     let delete_label = match app.focus {
-        Some(Tab::Table(_)) => "删除当前表格",
-        Some(Tab::Matrix(_)) => "删除当前矩阵",
-        Some(Tab::Graph(_)) => "删除当前图形",
-        Some(Tab::Note(_)) => "删除当前备注",
-        None => "删除当前对象",
+        Some(Tab::Table(_)) => sciplot_core::t("删除当前表格"),
+        Some(Tab::Matrix(_)) => sciplot_core::t("删除当前矩阵"),
+        Some(Tab::Graph(_)) => sciplot_core::t("删除当前图形"),
+        Some(Tab::Note(_)) => sciplot_core::t("删除当前备注"),
+        None => sciplot_core::t("删除当前对象"),
     };
     if clicked(ui, delete_label, "") {
         delete_focused(app);
@@ -828,9 +831,9 @@ pub(crate) fn range_dialog(graph: GraphId, layer: usize, curve: usize, op: Range
 }
 
 fn window_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
-    ui.checkbox(&mut app.show_tree, "项目树");
-    ui.checkbox(&mut app.show_log, "日志");
-    if clicked(ui, "示例项目", "") {
+    ui.checkbox(&mut app.show_tree, sciplot_core::t("项目树"));
+    ui.checkbox(&mut app.show_log, sciplot_core::t("日志"));
+    if clicked(ui, sciplot_core::t("示例项目"), "") {
         request_after(app, AfterSave::Demo);
     }
 }
@@ -847,7 +850,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         let matrices: Vec<(MatrixId, String)> = app.project.matrices.iter().map(|m| (m.id, m.name.clone())).collect();
         let graphs: Vec<(GraphId, String)> = app.project.graphs.iter().map(|g| (g.id, g.name.clone())).collect();
         let notes: Vec<(NoteId, String)> = app.project.notes.iter().map(|n| (n.id, n.name.clone())).collect();
-        let tables_header = egui::CollapsingHeader::new("表格").default_open(true).show(ui, |ui| {
+        let tables_header = egui::CollapsingHeader::new(sciplot_core::t("表格")).default_open(true).show(ui, |ui| {
             for (id, name) in tables {
                 let response = tree_row(ui, app.focus == Some(Tab::Table(id)), &name);
                 if response.clicked() {
@@ -857,7 +860,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
             }
         });
         tables_header.header_response.context_menu(|ui| crate::context::section_tables(app, ui));
-        let matrices_header = egui::CollapsingHeader::new("矩阵").default_open(true).show(ui, |ui| {
+        let matrices_header = egui::CollapsingHeader::new(sciplot_core::t("矩阵")).default_open(true).show(ui, |ui| {
             for (id, name) in matrices {
                 let response = tree_row(ui, app.focus == Some(Tab::Matrix(id)), &name);
                 if response.clicked() {
@@ -867,7 +870,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
             }
         });
         matrices_header.header_response.context_menu(|ui| crate::context::section_matrices(app, ui));
-        let graphs_header = egui::CollapsingHeader::new("图形").default_open(true).show(ui, |ui| {
+        let graphs_header = egui::CollapsingHeader::new(sciplot_core::t("图形")).default_open(true).show(ui, |ui| {
             for (id, name) in graphs {
                 let response = tree_row(ui, app.focus == Some(Tab::Graph(id)), &name);
                 if response.clicked() {
@@ -877,7 +880,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
             }
         });
         graphs_header.header_response.context_menu(|ui| crate::context::section_graphs(app, ui));
-        let notes_header = egui::CollapsingHeader::new("备注").default_open(true).show(ui, |ui| {
+        let notes_header = egui::CollapsingHeader::new(sciplot_core::t("备注")).default_open(true).show(ui, |ui| {
             for (id, name) in notes {
                 let response = tree_row(ui, app.focus == Some(Tab::Note(id)), &name);
                 if response.clicked() {
@@ -929,13 +932,13 @@ fn tree_row(ui: &mut egui::Ui, selected: bool, name: &str) -> egui::Response {
 }
 
 fn log_view(app: &SciPlotApp, ui: &mut egui::Ui) {
-    ui.label("日志");
+    ui.label(sciplot_core::t("日志"));
     egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
         for line in &app.project.log {
             ui.add(egui::Label::new(line).wrap_mode(egui::TextWrapMode::Wrap));
         }
         if app.project.log.is_empty() {
-            ui.label("（空）");
+            ui.label(sciplot_core::t("（空）"));
         }
     });
 }
@@ -977,7 +980,7 @@ fn column_header(column: &sciplot_core::Column) -> String {
 
 fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
     let Some(table) = app.project.table(id) else {
-        ui.label("表格已删除");
+        ui.label(sciplot_core::t("表格已删除"));
         return;
     };
     let mut name = table.name.clone();
@@ -985,10 +988,10 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
     let nrows = table.nrows().max(1);
     let headers: Vec<String> = table.columns.iter().map(column_header).collect();
     ui.horizontal(|ui| {
-        ui.label("名称");
+        ui.label(sciplot_core::t("名称"));
         if ui.text_edit_singleline(&mut name).changed() {
             let renamed = name.clone();
-            app.edit("重命名", |project| project.rename_table(id, &renamed));
+            app.edit(sciplot_core::t("重命名"), |project| project.rename_table(id, &renamed));
         }
     });
     let min_width = 46.0 + 120.0 * ncols as f32;
@@ -1032,7 +1035,7 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                             output.state.store(ui.ctx(), response.id);
                         }
                         if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                            app.status = "已写入单元格".into();
+                            app.status = sciplot_core::t("已写入单元格").into();
                         }
                         if response.secondary_clicked() {
                             app.selected_column = Some((id, column));
@@ -1040,7 +1043,7 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                         response.context_menu(|ui| crate::context::table_column(app, ui, id, column, Some(row_index)));
                         if response.changed() {
                             if !app.pushed_edit {
-                                app.history.push("编辑单元格", &app.project);
+                                app.history.push(sciplot_core::t("编辑单元格"), &app.project);
                                 app.pushed_edit = true;
                                 app.dirty = true;
                             }
@@ -1060,7 +1063,7 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
 
 fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
     let Some(matrix) = app.project.matrix(id) else {
-        ui.label("矩阵已删除");
+        ui.label(sciplot_core::t("矩阵已删除"));
         return;
     };
     let rows = matrix.rows;
@@ -1111,7 +1114,7 @@ fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
                         response.context_menu(|ui| crate::context::matrix_menu(app, ui, id));
                         if response.changed() {
                             if !app.pushed_edit {
-                                app.history.push("编辑矩阵", &app.project);
+                                app.history.push(sciplot_core::t("编辑矩阵"), &app.project);
                                 app.pushed_edit = true;
                                 app.dirty = true;
                             }
@@ -1131,7 +1134,7 @@ fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
 
 fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
     let Some(text) = app.project.notes.iter().find(|n| n.id == id).map(|n| n.text.clone()) else {
-        ui.label("备注已删除");
+        ui.label(sciplot_core::t("备注已删除"));
         return;
     };
     let mut text = text;
@@ -1139,7 +1142,7 @@ fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
     let response = ui.add(egui::TextEdit::multiline(&mut text).desired_width(f32::INFINITY).desired_rows(rows));
     if response.changed() {
         if !app.pushed_edit {
-            app.history.push("编辑备注", &app.project);
+            app.history.push(sciplot_core::t("编辑备注"), &app.project);
             app.pushed_edit = true;
             app.dirty = true;
         }
@@ -1154,7 +1157,7 @@ fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
 
 fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
     let Some(graph) = app.project.graph(id).cloned() else {
-        ui.label("图形已删除");
+        ui.label(sciplot_core::t("图形已删除"));
         return;
     };
     let surface = graph.surface.is_some();
@@ -1169,7 +1172,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
             if !curves.is_empty() {
                 app.curve = app.curve.min(curves.len() - 1);
                 let (name, visible) = &curves[app.curve];
-                let selected = if *visible { name.clone() } else { format!("{name}（隐藏）") };
+                let selected = if *visible { name.clone() } else { sciplot_core::trf!("{name}（隐藏）", "{name} (hidden)", name = name) };
                 let mut toggle = None;
                 egui::ComboBox::from_id_salt(("curve-pick", id.0)).selected_text(selected).show_ui(ui, |ui| {
                     for (index, (name, visible)) in curves.iter().enumerate() {
@@ -1178,7 +1181,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                             if ui.checkbox(&mut on, "").changed() {
                                 toggle = Some(index);
                             }
-                            let label = if *visible { name.clone() } else { format!("{name}（隐藏）") };
+                            let label = if *visible { name.clone() } else { sciplot_core::trf!("{name}（隐藏）", "{name} (hidden)", name = name) };
                             ui.selectable_value(&mut app.curve, index, label);
                         });
                     }
@@ -1189,19 +1192,19 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                 }
             }
         }
-        ui.checkbox(&mut app.reader, "读取");
-        if ui.button("清除缩放").clicked() {
+        ui.checkbox(&mut app.reader, sciplot_core::t("读取"));
+        if ui.button(sciplot_core::t("清除缩放")).clicked() {
             app.views.remove(&id);
         }
         let hint = if surface {
-            "左键拖拽旋转，滚轮缩放。右键选择显示方式"
+            sciplot_core::t("左键拖拽旋转，滚轮缩放。右键选择显示方式")
         } else {
-            "左键平移，滚轮缩放，双击恢复，Shift 选择 X 区间。右键改曲线"
+            sciplot_core::t("左键平移，滚轮缩放，双击恢复，Shift 选择 X 区间。右键改曲线")
         };
         ui.label(hint).on_hover_text(if surface {
-            "在图上按住左键拖拽可以旋转，滚轮改变远近。右键打开菜单，选择曲面、线框或散点。"
+            sciplot_core::t("在图上按住左键拖拽可以旋转，滚轮改变远近。右键打开菜单，选择曲面、线框或散点。")
         } else {
-            "左键拖拽平移，滚轮缩放，双击恢复视图。按住 Shift 拖拽只选择 X 区间，拟合和求交点会用到它。右键曲线可以改属性、隐藏或分析。"
+            sciplot_core::t("左键拖拽平移，滚轮缩放，双击恢复视图。按住 Shift 拖拽只选择 X 区间，拟合和求交点会用到它。右键曲线可以改属性、隐藏或分析。")
         });
     });
     let available = ui.available_size();
@@ -1211,7 +1214,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
     let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
     if graph.surface.is_some() {
         if response.drag_started_by(egui::PointerButton::Primary) {
-            app.history.push("旋转三维图", &app.project);
+            app.history.push(sciplot_core::t("旋转三维图"), &app.project);
             app.dirty = true;
         }
         if response.dragged_by(egui::PointerButton::Primary) {
@@ -1262,7 +1265,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                 app.ann_drag = None;
                 if let Some((ann_id, origin, _, _)) = hit_annotation(&graph, layer, frame, local.x, local.y) {
                     if let Some((sx, sy)) = screen_to_data(frame, local.x, local.y) {
-                        app.history.push("移动标注", &app.project);
+                        app.history.push(sciplot_core::t("移动标注"), &app.project);
                         app.dirty = true;
                         app.selected_ann = Some((id, layer, ann_id));
                         app.ann_drag = Some(AnnDrag { graph: id, layer, id: ann_id, origin, start_x: sx, start_y: sy });
@@ -1326,8 +1329,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
             if sel.graph == id && (sel.x0 - sel.x1).abs() > 1e-9 {
                 let lo = sel.x0.min(sel.x1);
                 let hi = sel.x0.max(sel.x1);
-                app.status = format!(
-                    "已选择 X 区间 [{}, {}]，拟合和求交点会用这个区间",
+                app.status = sciplot_core::trf!("已选择 X 区间 [{}, {}]，拟合和求交点会用这个区间", "X range [{}, {}] selected. Fitting and intersections will use it.",
                     sciplot_core::format_number(lo),
                     sciplot_core::format_number(hi)
                 );
@@ -1391,7 +1393,7 @@ fn classify_plot(app: &mut SciPlotApp, id: GraphId, local: egui::Vec2, scene: &S
 fn paint_scene(app: &mut SciPlotApp, ui: &egui::Ui, rect: egui::Rect, scene: &Scene, surface: bool) {
     if surface {
         if app.glyphs.is_none() {
-            app.glyphs = sciplot_plot::GlyphFont::from_bytes(&app.font);
+            app.glyphs = crate::fonts::plot_glyphs(&app.fonts);
         }
         if let Ok((width, height, rgba)) = sciplot_plot::to_rgba(scene, app.glyphs.as_ref()) {
             let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
@@ -1425,7 +1427,7 @@ fn paint_overlays(app: &SciPlotApp, ui: &egui::Ui, id: GraphId, rect: egui::Rect
                         egui::pos2(band.center().x, band.top()),
                         egui::Align2::CENTER_BOTTOM,
                         format!("[{}, {}]", sciplot_core::format_number(lo), sciplot_core::format_number(hi)),
-                        egui::FontId::proportional(13.0),
+                        egui::FontId::new(13.0, egui::FontFamily::Name(sciplot_plot::PLOT_FONT_FAMILY.into())),
                         egui::Color32::from_rgb(20, 60, 140),
                     );
                 }
@@ -1447,12 +1449,12 @@ fn paint_overlays(app: &SciPlotApp, ui: &egui::Ui, id: GraphId, rect: egui::Rect
                         painter.line_segment([egui::pos2(rect.min.x + frame.plot.x, p.y), egui::pos2(rect.min.x + frame.plot.right(), p.y)], stroke);
                         painter.line_segment([egui::pos2(p.x, rect.min.y + frame.plot.y), egui::pos2(p.x, rect.min.y + frame.plot.bottom())], stroke);
                         painter.circle_stroke(p, 4.0, stroke);
-                        let name = graph.layers.get(layer).and_then(|l| l.curves.get(hit.curve)).map(|c| c.name.as_str()).unwrap_or("点");
+                        let name = graph.layers.get(layer).and_then(|l| l.curves.get(hit.curve)).map(|c| c.name.as_str()).unwrap_or(sciplot_core::t("点"));
                         painter.text(
                             p + egui::vec2(8.0, -8.0),
                             egui::Align2::LEFT_BOTTOM,
                             format!("{name} ({}, {})", sciplot_core::format_number(hit.x), sciplot_core::format_number(hit.y)),
-                            egui::FontId::proportional(13.0),
+                            egui::FontId::new(13.0, egui::FontFamily::Name(sciplot_plot::PLOT_FONT_FAMILY.into())),
                             color,
                         );
                     }
@@ -1495,29 +1497,29 @@ fn shift_kind(kind: &AnnotationKind, dx: f64, dy: f64) -> AnnotationKind {
 }
 
 fn set_curve_visible(app: &mut SciPlotApp, graph: GraphId, layer: usize, curve: usize, visible: bool) {
-    app.edit("曲线可见性", |project| {
+    app.edit(sciplot_core::t("曲线可见性"), |project| {
         let curve = project
             .graph_mut(graph)
             .and_then(|item| item.layers.get_mut(layer))
             .and_then(|item| item.curves.get_mut(curve))
-            .ok_or("找不到曲线")?;
+            .ok_or(sciplot_core::t("找不到曲线"))?;
         curve.visible = visible;
         Ok(())
     });
-    app.status = if visible { "已显示曲线".into() } else { "已隐藏曲线。可在图例、工具栏或右键「曲线可见性」里再显示".into() };
+    app.status = if visible { sciplot_core::t("已显示曲线").into() } else { sciplot_core::t("已隐藏曲线。可在图例、工具栏或右键「曲线可见性」里再显示").into() };
 }
 
 fn delete_selected_annotation(app: &mut SciPlotApp) {
     let Some((graph, layer, id)) = app.selected_ann else {
-        app.status = "先在图上点选一个标注".into();
+        app.status = sciplot_core::t("先在图上点选一个标注").into();
         return;
     };
-    app.edit("删除标注", |project| {
-        let layer = project.graph_mut(graph).ok_or("找不到图形")?.layers.get_mut(layer).ok_or("找不到图层")?;
+    app.edit(sciplot_core::t("删除标注"), |project| {
+        let layer = project.graph_mut(graph).ok_or(sciplot_core::t("找不到图形"))?.layers.get_mut(layer).ok_or(sciplot_core::t("找不到图层"))?;
         let before = layer.annotations.len();
         layer.annotations.retain(|a| a.id != id);
         if layer.annotations.len() == before {
-            return Err("没有这个标注".into());
+            return Err(sciplot_core::t("没有这个标注").into());
         }
         Ok(())
     });
@@ -1526,7 +1528,7 @@ fn delete_selected_annotation(app: &mut SciPlotApp) {
 
 fn delete_focused(app: &mut SciPlotApp) {
     let Some(tab) = app.focus.clone() else { return };
-    let removed = app.edit("删除", |project| {
+    let removed = app.edit(sciplot_core::t("删除"), |project| {
         let ok = match &tab {
             Tab::Table(id) => project.delete_table(*id),
             Tab::Matrix(id) => project.delete_matrix(*id),
@@ -1536,7 +1538,7 @@ fn delete_focused(app: &mut SciPlotApp) {
         if ok {
             Ok(())
         } else {
-            Err("没有找到要删除的对象".into())
+            Err(sciplot_core::t("没有找到要删除的对象").into())
         }
     });
     if removed.is_some() {
@@ -1548,17 +1550,17 @@ fn delete_focused(app: &mut SciPlotApp) {
 }
 
 fn new_project(app: &mut SciPlotApp) {
-    app.project = Project::new("未命名项目");
+    app.project = Project::new(sciplot_core::t("未命名项目"));
     app.history = History::new();
     app.views.clear();
     app.path = None;
     app.dirty = false;
     app.dock = DockState::new(Vec::new());
     chinese_dock(&mut app.dock);
-    if let Some(id) = Some(app.project.new_table("表格1")) {
+    if let Some(id) = Some(app.project.new_table(sciplot_core::t("表格1"))) {
         app.open_tab(Tab::Table(id));
     }
-    app.status = "已新建项目".into();
+    app.status = sciplot_core::t("已新建项目").into();
 }
 
 fn request_after(app: &mut SciPlotApp, then: AfterSave) {
@@ -1599,7 +1601,7 @@ fn load_demo(app: &mut SciPlotApp) {
     app.path = None;
     app.dirty = false;
     app.rebuild_dock(true);
-    app.status = "已重新载入示例项目".into();
+    app.status = sciplot_core::t("已重新载入示例项目").into();
 }
 
 pub(crate) fn start_file(app: &mut SciPlotApp, action: PathAction, extra: &str) {
@@ -1621,7 +1623,7 @@ pub(crate) fn native_dialog(app: &SciPlotApp, action: PathAction, file_name: &st
         dialog = dialog.set_file_name(file_name);
     }
     dialog = match action {
-        PathAction::Open | PathAction::SaveAs => dialog.add_filter("SciPlot 项目", &["splot"]),
+        PathAction::Open | PathAction::SaveAs => dialog.add_filter(sciplot_core::t("SciPlot 项目"), &["splot"]),
         PathAction::ImportCsv | PathAction::ExportCsv => dialog.add_filter("CSV", &["csv", "txt", "tsv"]),
         PathAction::ExportPng => dialog.add_filter("PNG", &["png"]),
         PathAction::ExportSvg => dialog.add_filter("SVG", &["svg"]),
@@ -1636,9 +1638,9 @@ fn default_file_name(app: &SciPlotApp, action: PathAction) -> String {
     match action {
         PathAction::Open => String::new(),
         PathAction::SaveAs => safe_file_name(&app.project.name, "splot"),
-        PathAction::ImportCsv => "数据.csv".into(),
+        PathAction::ImportCsv => sciplot_core::t("数据.csv").into(),
         PathAction::ExportCsv => {
-            let name = app.active_table().and_then(|id| app.project.table(id)).map(|table| table.name.clone()).unwrap_or_else(|| "数据".into());
+            let name = app.active_table().and_then(|id| app.project.table(id)).map(|table| table.name.clone()).unwrap_or_else(|| sciplot_core::t("数据").into());
             safe_file_name(&name, "csv")
         }
         PathAction::ExportPng => graph_file_name(app, "png"),
@@ -1647,14 +1649,14 @@ fn default_file_name(app: &SciPlotApp, action: PathAction) -> String {
 }
 
 fn graph_file_name(app: &SciPlotApp, ext: &str) -> String {
-    let name = app.active_graph().and_then(|id| app.project.graph(id)).map(|graph| graph.name.clone()).unwrap_or_else(|| "图形".into());
+    let name = app.active_graph().and_then(|id| app.project.graph(id)).map(|graph| graph.name.clone()).unwrap_or_else(|| sciplot_core::t("图形").into());
     safe_file_name(&name, ext)
 }
 
 fn safe_file_name(name: &str, ext: &str) -> String {
     let stem: String = name.chars().map(|ch| if "\\/:*?\"<>|".contains(ch) { '_' } else { ch }).collect();
     let stem = stem.trim().trim_matches('.');
-    let stem = if stem.is_empty() { "未命名" } else { stem };
+    let stem = if stem.is_empty() { sciplot_core::t("未命名") } else { stem };
     format!("{stem}.{ext}")
 }
 
@@ -1673,7 +1675,7 @@ pub(crate) fn default_dir(app: &SciPlotApp) -> PathBuf {
     if documents.is_dir() {
         return documents;
     }
-    let documents = home.join("文档");
+    let documents = home.join(sciplot_core::t("文档"));
     if documents.is_dir() {
         documents
     } else {
@@ -1690,20 +1692,24 @@ pub(crate) fn resolve_user_path(app: &SciPlotApp, text: &str) -> PathBuf {
     }
 }
 
+fn demo_name(actual: &str, zh: &str, en: &str) -> bool {
+    actual == zh || actual == en
+}
+
 fn chinese_dock(dock: &mut DockState<Tab>) {
-    dock.translations.tab_context_menu.close_button = "关闭".into();
-    dock.translations.tab_context_menu.eject_button = "弹出为窗口".into();
+    dock.translations.tab_context_menu.close_button = sciplot_core::t("关闭").into();
+    dock.translations.tab_context_menu.eject_button = sciplot_core::t("弹出为窗口").into();
     let leaf = &mut dock.translations.leaf;
-    leaf.close_button_disabled_tooltip = "这个标签不能关闭".into();
-    leaf.close_all_button = "关闭窗口".into();
-    leaf.close_all_button_menu_hint = "右键关闭窗口".into();
-    leaf.close_all_button_modifier_hint = "按住 Shift 关闭窗口".into();
-    leaf.close_all_button_modifier_menu_hint = "按住 Shift 或右键关闭窗口".into();
-    leaf.close_all_button_disabled_tooltip = "窗口里有不能关闭的标签".into();
-    leaf.minimize_button = "最小化".into();
-    leaf.minimize_button_menu_hint = "右键最小化".into();
-    leaf.minimize_button_modifier_hint = "按住 Shift 最小化".into();
-    leaf.minimize_button_modifier_menu_hint = "按住 Shift 或右键最小化".into();
+    leaf.close_button_disabled_tooltip = sciplot_core::t("这个标签不能关闭").into();
+    leaf.close_all_button = sciplot_core::t("关闭窗口").into();
+    leaf.close_all_button_menu_hint = sciplot_core::t("右键关闭窗口").into();
+    leaf.close_all_button_modifier_hint = sciplot_core::t("按住 Shift 关闭窗口").into();
+    leaf.close_all_button_modifier_menu_hint = sciplot_core::t("按住 Shift 或右键关闭窗口").into();
+    leaf.close_all_button_disabled_tooltip = sciplot_core::t("窗口里有不能关闭的标签").into();
+    leaf.minimize_button = sciplot_core::t("最小化").into();
+    leaf.minimize_button_menu_hint = sciplot_core::t("右键最小化").into();
+    leaf.minimize_button_modifier_hint = sciplot_core::t("按住 Shift 最小化").into();
+    leaf.minimize_button_modifier_menu_hint = sciplot_core::t("按住 Shift 或右键最小化").into();
 }
 
 fn load_recent() -> Vec<PathBuf> {

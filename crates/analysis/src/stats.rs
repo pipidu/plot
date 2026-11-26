@@ -11,8 +11,7 @@ pub struct Summary {
 
 impl Summary {
     pub fn report(&self, title: &str) -> String {
-        format!(
-            "{title}\n  个数 = {}\n  最小值 = {}\n  最大值 = {}\n  求和 = {}\n  均值 = {}\n  中位数 = {}\n  标准差（样本，n−1） = {}",
+        sciplot_core::trf!("{title}\n  个数 = {}\n  最小值 = {}\n  最大值 = {}\n  求和 = {}\n  均值 = {}\n  中位数 = {}\n  标准差（样本，n−1） = {}", "{title}\n  count = {}\n  minimum = {}\n  maximum = {}\n  sum = {}\n  mean = {}\n  median = {}\n  std. dev. (sample, n−1) = {}",
             self.n,
             sciplot_core::format_number(self.min),
             sciplot_core::format_number(self.max),
@@ -20,7 +19,7 @@ impl Summary {
             sciplot_core::format_number(self.mean),
             sciplot_core::format_number(self.median),
             sciplot_core::format_number(self.stdev)
-        )
+        , title = title)
     }
 }
 
@@ -64,7 +63,7 @@ pub fn pearson(a: &[f64], b: &[f64]) -> Result<f64, String> {
         .map(|(x, y)| (*x, *y))
         .collect();
     if pairs.len() < 2 {
-        return Err("相关性至少需要两对有限数值".into());
+        return Err(sciplot_core::t("相关性至少需要两对有限数值").into());
     }
     let n = pairs.len() as f64;
     let mean_x = pairs.iter().map(|p| p.0).sum::<f64>() / n;
@@ -80,7 +79,7 @@ pub fn pearson(a: &[f64], b: &[f64]) -> Result<f64, String> {
         sxy += dx * dy;
     }
     if sxx <= 0.0 || syy <= 0.0 {
-        return Err("其中一列没有变化，相关系数无定义".into());
+        return Err(sciplot_core::t("其中一列没有变化，相关系数无定义").into());
     }
     Ok(sxy / (sxx * syy).sqrt())
 }

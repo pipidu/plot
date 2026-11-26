@@ -2,7 +2,7 @@ use sciplot_core::Dash;
 
 use crate::scene::{dash_intervals, HAlign, Prim, Scene, VAlign};
 
-pub const SVG_FONT: &str = "Microsoft YaHei, Noto Sans SC, Droid Sans Fallback, WenQuanYi Micro Hei, sans-serif";
+pub const SVG_FONT: &str = "Times New Roman, Times, Liberation Serif, SimSun, Songti SC, STSong, Noto Serif CJK SC, Source Han Serif SC, serif";
 
 pub fn to_svg(scene: &Scene) -> String {
     let w = scene.width.max(1.0);
@@ -58,7 +58,13 @@ pub fn to_svg(scene: &Scene) -> String {
                 ));
             }
             Prim::Text { x, y, text, size, color, halign, valign, vertical } => {
-                if *vertical {
+                if *vertical && !crate::scene::stack_vertical(text) {
+                    out.push_str(&format!(
+                        "<text x=\"{x}\" y=\"{y}\" fill=\"{}\" font-size=\"{size}\" font-family='{SVG_FONT}' text-anchor=\"middle\" dominant-baseline=\"middle\" transform=\"rotate(-90 {x} {y})\">{}</text>\n",
+                        hex(*color),
+                        escape(text)
+                    ));
+                } else if *vertical {
                     let chars: Vec<char> = text.chars().collect();
                     let start = match valign {
                         VAlign::Top => *y,
@@ -68,7 +74,7 @@ pub fn to_svg(scene: &Scene) -> String {
                     for (index, ch) in chars.into_iter().enumerate() {
                         let yy = start + (index as f32 + 0.85) * *size;
                         out.push_str(&format!(
-                            "<text x=\"{x}\" y=\"{yy}\" fill=\"{}\" font-size=\"{size}\" font-family=\"{SVG_FONT}\" text-anchor=\"middle\">{ch}</text>\n",
+                            "<text x=\"{x}\" y=\"{yy}\" fill=\"{}\" font-size=\"{size}\" font-family='{SVG_FONT}' text-anchor=\"middle\">{ch}</text>\n",
                             hex(*color)
                         ));
                     }
@@ -84,7 +90,7 @@ pub fn to_svg(scene: &Scene) -> String {
                         VAlign::Bottom => "auto",
                     };
                     out.push_str(&format!(
-                        "<text x=\"{x}\" y=\"{y}\" fill=\"{}\" font-size=\"{size}\" font-family=\"{SVG_FONT}\" text-anchor=\"{anchor}\" dominant-baseline=\"{baseline}\">{}</text>\n",
+                        "<text x=\"{x}\" y=\"{y}\" fill=\"{}\" font-size=\"{size}\" font-family='{SVG_FONT}' text-anchor=\"{anchor}\" dominant-baseline=\"{baseline}\">{}</text>\n",
                         hex(*color),
                         escape(text)
                     ));

@@ -4,18 +4,36 @@ use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, StrokeDas
 use crate::scene::{dash_intervals, HAlign, Prim, Scene, VAlign};
 
 pub struct GlyphFont {
-    font: FontVec,
+    fonts: Vec<FontVec>,
 }
 
 impl GlyphFont {
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let owned = prepare_font(bytes)?;
-        FontVec::try_from_vec(owned).ok().map(|font| Self { font })
+        FontVec::try_from_vec(owned).ok().map(|font| Self { fonts: vec![font] })
+    }
+
+    /// 按顺序使用：英文字符用前面的 Times 类字体，缺字再落到宋体。
+    pub fn from_faces(faces: &[Vec<u8>]) -> Option<Self> {
+        let fonts: Vec<FontVec> = faces.iter().filter_map(|bytes| FontVec::try_from_vec(prepare_font(bytes)?).ok()).collect();
+        if fonts.is_empty() {
+            None
+        } else {
+            Some(Self { fonts })
+        }
+    }
+
+    fn index_for(&self, ch: char) -> usize {
+        self.fonts.iter().position(|font| font.glyph_id(ch).0 != 0).unwrap_or(0)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&self, pixmap: &mut Pixmap, text: &str, x: f32, y: f32, size: f32, color: [u8; 4], halign: HAlign, valign: VAlign, vertical: bool) {
-        if text.is_empty() || size < 1.0 {
+        if text.is_empty() || size < 1.0 || self.fonts.is_empty() {
+            return;
+        }
+        if vertical && !crate::scene::stack_vertical(text) {
+            self.draw_turned(pixmap, text, x, y, size, color);
             return;
         }
         if vertical {
@@ -31,16 +49,20 @@ impl GlyphFont {
             return;
         }
         let scale = PxScale::from(size.max(1.0));
-        let scaled = self.font.as_scaled(scale);
+        let primary = self.fonts[0].as_scaled(scale);
         let mut width = 0.0;
-        let mut prev = None;
+        let mut prev: Option<(usize, ab_glyph::GlyphId)> = None;
         for ch in text.chars() {
+            let index = self.index_for(ch);
+            let scaled = self.fonts[index].as_scaled(scale);
             let id = scaled.glyph_id(ch);
-            if let Some(previous) = prev {
-                width += scaled.kern(previous, id);
+            if let Some((prev_index, previous)) = prev {
+                if prev_index == index {
+                    width += scaled.kern(previous, id);
+                }
             }
             width += scaled.h_advance(id);
-            prev = Some(id);
+            prev = Some((index, id));
         }
         let origin_x = match halign {
             HAlign::Left => x,
@@ -48,16 +70,20 @@ impl GlyphFont {
             HAlign::Right => x - width,
         };
         let origin_y = match valign {
-            VAlign::Top => y + scaled.ascent(),
-            VAlign::Center => y + scaled.ascent() * 0.5 - scaled.descent() * 0.15,
+            VAlign::Top => y + primary.ascent(),
+            VAlign::Center => y + primary.ascent() * 0.5 - primary.descent() * 0.15,
             VAlign::Bottom => y,
         };
         let mut cursor = origin_x;
         let mut prev = None;
         for ch in text.chars() {
+            let index = self.index_for(ch);
+            let scaled = self.fonts[index].as_scaled(scale);
             let id = scaled.glyph_id(ch);
-            if let Some(previous) = prev {
-                cursor += scaled.kern(previous, id);
+            if let Some((prev_index, previous)) = prev {
+                if prev_index == index {
+                    cursor += scaled.kern(previous, id);
+                }
             }
             let glyph = id.with_scale_and_position(scale, ab_glyph::point(cursor, origin_y));
             if let Some(outlined) = scaled.outline_glyph(glyph) {
@@ -66,7 +92,45 @@ impl GlyphFont {
                 });
             }
             cursor += scaled.h_advance(id);
-            prev = Some(id);
+            prev = Some((index, id));
+        }
+    }
+
+    /// 把一行英文逆时针转 90 度，读起来自下而上，轴旁只占一行的厚度。
+    fn draw_turned(&self, pixmap: &mut Pixmap, text: &str, x: f32, y: f32, size: f32, color: [u8; 4]) {
+        let scale = PxScale::from(size.max(1.0));
+        let primary = self.fonts[0].as_scaled(scale);
+        let mut width = 0.0;
+        let mut prev: Option<(usize, ab_glyph::GlyphId)> = None;
+        let mut placed = Vec::new();
+        for ch in text.chars() {
+            let index = self.index_for(ch);
+            let scaled = self.fonts[index].as_scaled(scale);
+            let id = scaled.glyph_id(ch);
+            if let Some((prev_index, previous)) = prev {
+                if prev_index == index {
+                    width += scaled.kern(previous, id);
+                }
+            }
+            placed.push((index, id, width));
+            width += scaled.h_advance(id);
+            prev = Some((index, id));
+        }
+        let origin_x = x - width * 0.5;
+        let origin_y = y + primary.ascent() * 0.5 - primary.descent() * 0.15;
+        for (index, id, cursor) in placed {
+            let scaled = self.fonts[index].as_scaled(scale);
+            let glyph = id.with_scale_and_position(scale, ab_glyph::point(origin_x + cursor, origin_y));
+            if let Some(outlined) = scaled.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|dx, dy, coverage| {
+                    let px = bounds.min.x + dx as f32;
+                    let py = bounds.min.y + dy as f32;
+                    let turned_x = x + (py - y);
+                    let turned_y = y - (px - x);
+                    blend(pixmap, turned_x as i32, turned_y as i32, color, coverage);
+                });
+            }
         }
     }
 }
@@ -118,7 +182,7 @@ pub fn to_rgba(scene: &Scene, font: Option<&GlyphFont>) -> Result<(u32, u32, Vec
 fn draw_pixmap(scene: &Scene, font: Option<&GlyphFont>) -> Result<Pixmap, String> {
     let width = scene.width.max(1.0).round() as u32;
     let height = scene.height.max(1.0).round() as u32;
-    let mut pixmap = Pixmap::new(width, height).ok_or("无法创建位图")?;
+    let mut pixmap = Pixmap::new(width, height).ok_or(sciplot_core::t("无法创建位图"))?;
     pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
     for prim in &scene.primitives {
         match prim {

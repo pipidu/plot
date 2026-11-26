@@ -143,8 +143,8 @@ mod tests {
 
     #[test]
     fn unique_suffix() {
-        let existing = vec!["图".to_string(), "图2".to_string()];
-        assert_eq!(unique_name(&existing, "图"), "图3");
-        assert_eq!(unique_name(&existing, "表"), "表");
+        let existing = vec![crate::locale::t("图").to_string(), crate::locale::t("图2").to_string()];
+        assert_eq!(unique_name(&existing, "图"), crate::locale::t("图3"));
+        assert_eq!(unique_name(&existing, "表"), crate::locale::t("表"));
     }
 }

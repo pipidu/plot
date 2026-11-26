@@ -12,7 +12,7 @@ pub fn render_surface(project: &Project, spec: &SurfaceSpec, scene: &mut Scene, 
         }
     };
     if grid.rows < 2 || grid.cols < 2 {
-        scene.notes.push("三维网格至少需要 2×2".to_string());
+        scene.notes.push(sciplot_core::t("三维网格至少需要 2×2").to_string());
         return;
     }
     let mut zmin = f64::INFINITY;
@@ -24,7 +24,7 @@ pub fn render_surface(project: &Project, spec: &SurfaceSpec, scene: &mut Scene, 
         }
     }
     if !zmin.is_finite() {
-        scene.notes.push("曲面上没有有效数值".to_string());
+        scene.notes.push(sciplot_core::t("曲面上没有有效数值").to_string());
         return;
     }
     let zspan = (zmax - zmin).abs().max(1e-9);
@@ -340,7 +340,7 @@ fn axis_at(min: f64, max: f64, index: usize, count: usize) -> f64 {
 fn surface_grid(project: &Project, source: &SurfaceSource) -> Result<GridData, String> {
     match source {
         SurfaceSource::Matrix(id) => {
-            let matrix = project.matrix(*id).ok_or("找不到三维图对应的矩阵")?;
+            let matrix = project.matrix(*id).ok_or(sciplot_core::t("找不到三维图对应的矩阵"))?;
             Ok(GridData::from_matrix(matrix))
         }
         SurfaceSource::Function { expr, x_min, x_max, y_min, y_max, n } => {

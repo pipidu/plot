@@ -51,7 +51,7 @@ fn finish_fetch(current: String) -> UpdateView {
     match response {
         Ok(response) => match response.into_string() {
             Ok(body) => interpret(&current, &body),
-            Err(_) => UpdateView::Failed("GitHub 的回复读不完整。".into()),
+            Err(_) => UpdateView::Failed(sciplot_core::t("GitHub 的回复读不完整。").into()),
         },
         Err(ureq::Error::Status(code, response)) => {
             let detail = response.into_string().unwrap_or_default();
@@ -59,22 +59,22 @@ fn finish_fetch(current: String) -> UpdateView {
                 .ok()
                 .and_then(|value| value.get("message").and_then(|item| item.as_str()).map(str::to_string));
             match message {
-                Some(message) => UpdateView::Failed(format!("检查更新失败：{message}")),
-                None => UpdateView::Failed(format!("检查更新失败（HTTP {code}）。")),
+                Some(message) => UpdateView::Failed(sciplot_core::trf!("检查更新失败：{message}", "Update check failed: {message}", message = message)),
+                None => UpdateView::Failed(sciplot_core::trf!("检查更新失败（HTTP {code}）。", "Update check failed (HTTP {code}).", code = code)),
             }
         }
-        Err(_) => UpdateView::Failed("连不上 GitHub，请检查网络后再试。".into()),
+        Err(_) => UpdateView::Failed(sciplot_core::t("连不上 GitHub，请检查网络后再试。").into()),
     }
 }
 
 pub fn interpret(current: &str, body: &str) -> UpdateView {
     let value: serde_json::Value = match serde_json::from_str(body) {
         Ok(value) => value,
-        Err(_) => return UpdateView::Failed("GitHub 返回的内容无法解析。".into()),
+        Err(_) => return UpdateView::Failed(sciplot_core::t("GitHub 返回的内容无法解析。").into()),
     };
     let Some(tag) = value.get("tag_name").and_then(|item| item.as_str()) else {
-        let message = value.get("message").and_then(|item| item.as_str()).unwrap_or("GitHub 没有给出版本号。");
-        return UpdateView::Failed(format!("检查更新失败：{message}"));
+        let message = value.get("message").and_then(|item| item.as_str()).unwrap_or(sciplot_core::t("GitHub 没有给出版本号。"));
+        return UpdateView::Failed(sciplot_core::trf!("检查更新失败：{message}", "Update check failed: {message}", message = message));
     };
     let page = value.get("html_url").and_then(|item| item.as_str()).unwrap_or(i18n::RELEASES_URL).to_string();
     let notes = value.get("body").and_then(|item| item.as_str()).unwrap_or("").trim().to_string();
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn release_json_becomes_a_dialog_state() {
-        let body = r#"{"tag_name":"v0.9.0","html_url":"https://github.com/pipidu/plot/releases/tag/v0.9.0","body":"新版本说明"}"#;
+        let body = sciplot_core::t(r#"{"tag_name":"v0.9.0","html_url":"https://github.com/pipidu/plot/releases/tag/v0.9.0","body":"新版本说明"}"#);
         match interpret("0.2.0", body) {
             UpdateView::Newer { version, page, notes } => {
                 assert_eq!(version, "0.9.0");
@@ -147,6 +147,6 @@ mod tests {
             other => panic!("应当发现新版本，得到 {other:?}"),
         }
         assert_eq!(interpret("0.9.0", body), UpdateView::Current);
-        assert!(matches!(interpret("0.2.0", "不是 json"), UpdateView::Failed(_)));
+        assert!(matches!(interpret("0.2.0", sciplot_core::t("不是 json")), UpdateView::Failed(_)));
     }
 }

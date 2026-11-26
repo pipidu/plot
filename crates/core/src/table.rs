@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::tr;
 use crate::util::{default_true, format_number, parse_date};
 
 /// 表格标识。用新类型避免和矩阵、图形的 id 混用。
@@ -31,10 +32,10 @@ impl ColumnMode {
             ColumnMode::X => "X",
             ColumnMode::Y => "Y",
             ColumnMode::Z => "Z",
-            ColumnMode::XErr => "x误差",
-            ColumnMode::YErr => "y误差",
-            ColumnMode::Label => "标签",
-            ColumnMode::None => "无",
+            ColumnMode::XErr => tr!("x误差", "x error"),
+            ColumnMode::YErr => tr!("y误差", "y error"),
+            ColumnMode::Label => tr!("标签", "Label"),
+            ColumnMode::None => tr!("无", "None"),
         }
     }
 
@@ -62,9 +63,9 @@ pub enum ColumnType {
 impl ColumnType {
     pub fn label(self) -> &'static str {
         match self {
-            ColumnType::Numeric => "数值",
-            ColumnType::Text => "文本",
-            ColumnType::Date => "日期",
+            ColumnType::Numeric => tr!("数值", "Numeric"),
+            ColumnType::Text => tr!("文本", "Text"),
+            ColumnType::Date => tr!("日期", "Date"),
         }
     }
 
@@ -214,7 +215,7 @@ impl Default for Table {
     fn default() -> Self {
         Self {
             id: TableId(0),
-            name: "表".to_string(),
+            name: crate::locale::t("表").to_string(),
             columns: Vec::new(),
             comment: String::new(),
             show_headers: true,

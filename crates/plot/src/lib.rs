@@ -12,7 +12,7 @@ mod surface;
 mod svg;
 
 pub use interact::{data_to_screen, nearest_curve, nearest_point, pan_limits, screen_to_data, zoom_limits, CurveHit, NearestPoint};
-pub use paint::paint;
+pub use paint::{paint, PLOT_FONT_FAMILY};
 pub use raster::{prepare_font, to_png, to_rgba, GlyphFont};
 pub use render::render;
 pub use scene::{LayerFrame, LayerView, LegendHit, Prim, Scene};
@@ -26,7 +26,7 @@ mod tests {
     #[test]
     fn demo_svg_contains_chinese_axis_title() {
         let project = demo_project();
-        let graph = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap();
+        let graph = project.graphs.iter().find(|graph| graph.name == sciplot_core::t("正弦与余弦")).unwrap();
         let scene = render(&project, graph, &[], 900.0, 560.0, 1.0);
         let svg = to_svg(&scene);
         assert!(svg.contains("正弦与余弦"), "{svg}");
@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn png_starts_with_signature_and_draws_glyphs() {
         let project = demo_project();
-        let graph = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap();
+        let graph = project.graphs.iter().find(|graph| graph.name == sciplot_core::t("正弦与余弦")).unwrap();
         let scene = render(&project, graph, &[], 640.0, 400.0, 1.0);
         let bytes = include_bytes!("../../../assets/fonts/DroidSansFallbackFull.ttf");
         let font = GlyphFont::from_bytes(bytes).expect("内嵌字体应能加载");
@@ -95,7 +95,7 @@ mod tests {
                 n: 12,
             },
             SurfaceMode::Wireframe,
-            "函数曲面",
+            sciplot_core::t("函数曲面"),
         );
         let graph = &project.graphs[0];
         let scene = render(&project, graph, &[], 600.0, 400.0, 1.0);
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn bars_keep_chinese_categories() {
         let project = demo_project();
-        let graph = project.graphs.iter().find(|graph| graph.name == "水果销量").unwrap();
+        let graph = project.graphs.iter().find(|graph| graph.name == sciplot_core::t("水果销量")).unwrap();
         let scene = render(&project, graph, &[], 800.0, 480.0, 1.0);
         let text = scene.text_content();
         assert!(text.contains("苹果"));
@@ -116,9 +116,9 @@ mod tests {
     #[test]
     fn hidden_curve_stays_in_the_legend() {
         let mut project = demo_project();
-        let graph = project.graphs.iter_mut().find(|graph| graph.name == "正弦与余弦").unwrap();
+        let graph = project.graphs.iter_mut().find(|graph| graph.name == sciplot_core::t("正弦与余弦")).unwrap();
         graph.layers[0].curves[1].visible = false;
-        let graph = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap();
+        let graph = project.graphs.iter().find(|graph| graph.name == sciplot_core::t("正弦与余弦")).unwrap();
         let scene = render(&project, graph, &[], 900.0, 560.0, 1.0);
         let text = scene.text_content();
         assert!(text.contains("cos（已隐藏）"), "{text}");
@@ -127,9 +127,22 @@ mod tests {
     }
 
     #[test]
+    fn latin_y_axis_title_is_one_rotated_line() {
+        let project = Project::new("p");
+        let mut graph = Graph::new(sciplot_core::GraphId(1), "g");
+        graph.layers = vec![Layer::default()];
+        graph.layers[0].y_axis.label = "Sales (tonnes)".into();
+        let scene = render(&project, &graph, &[], 800.0, 480.0, 1.0);
+        let svg = to_svg(&scene);
+        assert!(svg.contains("rotate(-90"), "{svg}");
+        assert!(svg.contains("Sales (tonnes)"), "{svg}");
+        assert!(!svg.contains(">S</text>"), "{svg}");
+    }
+
+    #[test]
     fn empty_layer_still_has_a_frame() {
         let project = Project::new("empty");
-        let mut graph = Graph::new(sciplot_core::GraphId(1), "空");
+        let mut graph = Graph::new(sciplot_core::GraphId(1), sciplot_core::t("空"));
         graph.layers = vec![Layer::default()];
         let scene = render(&project, &graph, &[], 400.0, 300.0, 1.0);
         assert_eq!(scene.layers.len(), 1);

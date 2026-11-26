@@ -2,7 +2,7 @@ use nalgebra::DMatrix;
 
 pub fn moving_average(y: &[f64], window: usize) -> Result<Vec<f64>, String> {
     if window == 0 || window % 2 == 0 {
-        return Err("移动平均的窗口必须是正奇数".into());
+        return Err(sciplot_core::t("移动平均的窗口必须是正奇数").into());
     }
     let half = window / 2;
     let mut out = vec![f64::NAN; y.len()];
@@ -26,16 +26,16 @@ pub fn moving_average(y: &[f64], window: usize) -> Result<Vec<f64>, String> {
 
 pub fn savitzky_golay(y: &[f64], window: usize, order: usize) -> Result<Vec<f64>, String> {
     if window < 3 || window % 2 == 0 {
-        return Err("Savitzky-Golay 窗口必须是不小于 3 的奇数".into());
+        return Err(sciplot_core::t("Savitzky-Golay 窗口必须是不小于 3 的奇数").into());
     }
     if order >= window {
-        return Err("多项式阶数必须小于窗口长度".into());
+        return Err(sciplot_core::t("多项式阶数必须小于窗口长度").into());
     }
     let half = (window / 2) as isize;
     let table = sg_table(half, order)?;
     let n = y.len();
     if n < window {
-        return Err(format!("数据长度 {n} 小于平滑窗口 {window}"));
+        return Err(sciplot_core::trf!("数据长度 {n} 小于平滑窗口 {window}", "The series length {n} is shorter than the smoothing window {window}", n = n, window = window));
     }
     let mut out = vec![f64::NAN; n];
     for (i, slot) in out.iter_mut().enumerate() {
@@ -47,7 +47,7 @@ pub fn savitzky_golay(y: &[f64], window: usize, order: usize) -> Result<Vec<f64>
         } else {
             (i - half as usize, 0)
         };
-        let coeff = table.get(&at).ok_or("缺少平滑系数")?;
+        let coeff = table.get(&at).ok_or(sciplot_core::t("缺少平滑系数"))?;
         let mut acc = 0.0;
         let mut bad = false;
         for (k, &c) in coeff.iter().enumerate() {
@@ -78,7 +78,7 @@ fn sg_table(half: isize, order: usize) -> Result<std::collections::BTreeMap<isiz
         }
     }
     let normal = design.transpose() * &design;
-    let inverse = normal.try_inverse().ok_or("无法计算 Savitzky-Golay 系数")?;
+    let inverse = normal.try_inverse().ok_or(sciplot_core::t("无法计算 Savitzky-Golay 系数"))?;
     let mut table = std::collections::BTreeMap::new();
     for at in -half..=half {
         let mut monomial = nalgebra::DVector::zeros(cols);
