@@ -38,6 +38,10 @@ pub fn poll(app: &mut SciPlotApp) {
 }
 
 fn fetch_latest() -> UpdateView {
+    finish_fetch(i18n::current_version())
+}
+
+fn finish_fetch(current: String) -> UpdateView {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
     let response = agent
         .get(i18n::RELEASES_API)
@@ -46,7 +50,7 @@ fn fetch_latest() -> UpdateView {
         .call();
     match response {
         Ok(response) => match response.into_string() {
-            Ok(body) => interpret(i18n::VERSION, &body),
+            Ok(body) => interpret(&current, &body),
             Err(_) => UpdateView::Failed("GitHub 的回复读不完整。".into()),
         },
         Err(ureq::Error::Status(code, response)) => {
@@ -85,20 +89,32 @@ fn display_version(tag: &str) -> String {
     tag.trim().trim_start_matches(['v', 'V']).to_string()
 }
 
+struct ReleaseVersion {
+    parts: (u64, u64, u64),
+    build: u64,
+}
+
 fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
-        (Some(latest), Some(current)) => latest > current,
+        (Some(latest), Some(current)) => latest.parts > current.parts || (latest.parts == current.parts && latest.build > current.build),
         _ => false,
     }
 }
 
-fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+fn parse_version(text: &str) -> Option<ReleaseVersion> {
     let text = text.trim().trim_start_matches(['v', 'V']);
-    let mut parts = text.split('.');
-    let major = parts.next()?.split(['-', '+']).next()?.parse().ok()?;
-    let minor = parts.next()?.split(['-', '+']).next()?.parse().ok()?;
-    let patch = parts.next().unwrap_or("0").split(['-', '+']).next()?.parse().ok()?;
-    Some((major, minor, patch))
+    let (numbers, build) = match text.split_once('-') {
+        Some((numbers, rest)) => {
+            let build = rest.strip_prefix('b').or_else(|| rest.strip_prefix('B')).unwrap_or(rest).parse().unwrap_or(0);
+            (numbers, build)
+        }
+        None => (text, 0),
+    };
+    let mut parts = numbers.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some(ReleaseVersion { parts: (major, minor, patch), build })
 }
 
 #[cfg(test)]
@@ -110,7 +126,12 @@ mod tests {
         assert!(is_newer("v0.2.0", "0.1.0"));
         assert!(is_newer("v0.10.0", "0.9.1"));
         assert!(is_newer("0.2.1", "0.2.0"));
+        assert!(is_newer("v0.2.1-b2", "0.2.1-b1"));
+        assert!(is_newer("v0.2.1-b1", "0.2.1"));
+        assert!(is_newer("v0.2.2", "0.2.1-b9"));
         assert!(!is_newer("v0.2.0", "0.2.0"));
+        assert!(!is_newer("v0.2.1-b1", "0.2.1-b1"));
+        assert!(!is_newer("v0.2.1", "0.2.1-b3"));
         assert!(!is_newer("v0.1.0", "0.2.0"));
     }
 

@@ -1,0 +1,73 @@
+name: 编译 Windows 并发布
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-main
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-gnu
+
+      - name: 安装 MinGW
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: 读取版本号
+        id: version
+        run: |
+          version=$(awk '/^\[workspace.package\]/{flag=1; next} /^\[/{flag=0} flag && /^version = /{gsub(/"/, "", $3); print $3; exit}' Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}-b${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "asset=sciplot-${version}-b${GITHUB_RUN_NUMBER}-windows-x86_64.exe" >> "$GITHUB_OUTPUT"
+
+      - name: 编译
+        env:
+          SCIPLOT_BUILD: ${{ github.run_number }}
+        run: cargo build -p sciplot --release --target x86_64-pc-windows-gnu
+
+      - name: 打包
+        run: |
+          cp target/x86_64-pc-windows-gnu/release/sciplot.exe "${{ steps.version.outputs.asset }}"
+          sha256sum "${{ steps.version.outputs.asset }}" | tee SHA256.txt
+          {
+            echo "自动构建自 ${GITHUB_SHA}。"
+            echo
+            echo "下载 \`${{ steps.version.outputs.asset }}\` 后双击运行，不需要安装。面向 64 位 Windows。找不到微软雅黑时，会使用程序内嵌的中文字体。"
+            echo
+            echo "提交说明：$(git log -1 --pretty=%s)"
+            echo
+            echo "SHA256：\`$(cut -d' ' -f1 SHA256.txt)\`"
+          } > notes.md
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          asset="${{ steps.version.outputs.asset }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" SHA256.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" "$asset" SHA256.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "SciPlot ${tag#v}" \
+              --notes-file notes.md \
+              --latest
+          fi

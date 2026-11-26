@@ -325,6 +325,7 @@ impl SciPlotApp {
     }
 
     fn flush_tabs(&mut self) {
+        ensure_main_surface(&mut self.dock);
         let tabs = std::mem::take(&mut self.pending_tabs);
         for tab in tabs {
             if self.dock.find_tab(&tab).is_none() {
@@ -889,13 +890,38 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     });
 }
 
-fn drop_stale_tabs(app: &mut SciPlotApp) {
-    app.dock.retain_tabs(|tab| match tab {
+fn tab_still_exists(app: &SciPlotApp, tab: &Tab) -> bool {
+    match tab {
         Tab::Table(id) => app.project.table(*id).is_some(),
         Tab::Matrix(id) => app.project.matrix(*id).is_some(),
         Tab::Graph(id) => app.project.graph(*id).is_some(),
         Tab::Note(id) => app.project.notes.iter().any(|note| note.id == *id),
-    });
+    }
+}
+
+fn drop_stale_tabs(app: &mut SciPlotApp) {
+    // `DockState::retain_tabs` 会把已经空掉的主表面删掉。标签关光后再从项目树打开，
+    // `push_to_focused_leaf` 会因为没有主表面直接崩溃。
+    let stale: Vec<Tab> = app.dock.iter_all_tabs().filter(|(_, tab)| !tab_still_exists(app, tab)).map(|(_, tab)| tab.clone()).collect();
+    for tab in stale {
+        if let Some(path) = app.dock.find_tab(&tab) {
+            app.dock.remove_tab(path);
+        }
+    }
+}
+
+fn ensure_main_surface(dock: &mut DockState<Tab>) {
+    let missing = match dock.get_surface(egui_dock::SurfaceIndex::main()) {
+        Some(surface) => surface.is_empty(),
+        None => true,
+    };
+    if !missing {
+        return;
+    }
+    let translations = dock.translations.clone();
+    let tabs: Vec<Tab> = dock.iter_all_tabs().map(|(_, tab)| tab.clone()).collect();
+    *dock = DockState::new(tabs);
+    dock.translations = translations;
 }
 
 fn tree_row(ui: &mut egui::Ui, selected: bool, name: &str) -> egui::Response {
@@ -1697,4 +1723,44 @@ fn remember(recent: &mut Vec<PathBuf>, path: &Path) {
 fn recent_path() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join(".sciplot_recent.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close_every_tab(app: &mut SciPlotApp) {
+        let open: Vec<Tab> = app.dock.iter_all_tabs().map(|(_, tab)| tab.clone()).collect();
+        for tab in open {
+            if let Some(path) = app.dock.find_tab(&tab) {
+                app.dock.remove_tab(path);
+            }
+        }
+    }
+
+    #[test]
+    fn reopening_a_table_after_closing_every_tab_keeps_the_dock() {
+        let mut app = SciPlotApp::empty(demo_project());
+        app.rebuild_dock(true);
+        app.flush_tabs();
+        assert!(app.dock.iter_all_tabs().next().is_some());
+        close_every_tab(&mut app);
+        drop_stale_tabs(&mut app);
+        let id = app.project.tables[0].id;
+        app.open_tab(Tab::Table(id));
+        app.flush_tabs();
+        assert!(app.dock.find_tab(&Tab::Table(id)).is_some());
+    }
+
+    #[test]
+    fn flush_rebuilds_a_dock_whose_main_surface_was_removed() {
+        let mut app = SciPlotApp::empty(demo_project());
+        app.rebuild_dock(true);
+        app.flush_tabs();
+        app.dock.retain_tabs(|_| false);
+        let id = app.project.tables[0].id;
+        app.open_tab(Tab::Table(id));
+        app.flush_tabs();
+        assert!(app.dock.find_tab(&Tab::Table(id)).is_some());
+    }
 }

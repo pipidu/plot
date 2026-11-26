@@ -181,7 +181,7 @@ fn import_instead(app: &mut SciPlotApp, ui: &mut egui::Ui, path: &str) -> bool {
 }
 
 fn about_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui) -> bool {
-    ui.heading(format!("SciPlot {}", i18n::VERSION));
+    ui.heading(format!("SciPlot {}", i18n::current_version()));
     ui.label(i18n::ABOUT);
     ui.horizontal(|ui| {
         ui.label("仓库");
@@ -210,11 +210,11 @@ fn update_dialog(ui: &mut egui::Ui, view: &crate::update::UpdateView) -> bool {
             !ui.button("取消").clicked()
         }
         crate::update::UpdateView::Current => {
-            ui.label(format!("当前已是最新版本 {}。", i18n::VERSION));
+            ui.label(format!("当前已是最新版本 {}。", i18n::current_version()));
             button_closes(ui, "关闭")
         }
         crate::update::UpdateView::Newer { version, page, notes } => {
-            ui.label(format!("发现新版本 {version}，当前是 {}。", i18n::VERSION));
+            ui.label(format!("发现新版本 {version}，当前是 {}。", i18n::current_version()));
             if !notes.is_empty() {
                 egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
                     ui.add(egui::Label::new(notes).wrap_mode(egui::TextWrapMode::Wrap));

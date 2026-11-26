@@ -3052,7 +3052,7 @@ dependencies = [
 
 [[package]]
 name = "sciplot"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arboard",
  "eframe",
@@ -3071,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "sciplot-analysis"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "nalgebra",
  "rustfft",
@@ -3080,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "sciplot-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "csv",
  "encoding_rs",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "sciplot-plot"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ab_glyph",
  "egui",

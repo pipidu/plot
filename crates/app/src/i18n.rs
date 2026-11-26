@@ -2,6 +2,14 @@
 
 pub const APP_TITLE: &str = "SciPlot";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 工作流编译时写入 `SCIPLOT_BUILD`，本地构建为空。
+pub fn current_version() -> String {
+    match option_env!("SCIPLOT_BUILD") {
+        Some(build) if !build.is_empty() => format!("{VERSION}-b{build}"),
+        _ => VERSION.to_string(),
+    }
+}
 pub const REPO_URL: &str = "https://github.com/pipidu/plot";
 pub const RELEASES_URL: &str = "https://github.com/pipidu/plot/releases";
 pub const RELEASES_API: &str = "https://api.github.com/repos/pipidu/plot/releases/latest";

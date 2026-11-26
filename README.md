@@ -4,7 +4,7 @@
 
 ## 下载
 
-Windows 64 位程序在 [GitHub Releases](https://github.com/pipidu/plot/releases)。下载 `sciplot-<版本>-windows-x86_64.exe` 后双击运行，不需要安装。仓库地址是 <https://github.com/pipidu/plot>。程序里「帮助 → 关于」可以打开这个地址，也可以检查更新。
+Windows 64 位程序在 [GitHub Releases](https://github.com/pipidu/plot/releases)。每次推送到 `main` 都会编译并发布一个新的 `sciplot-<版本>-b<构建号>-windows-x86_64.exe`，下载后双击运行，不需要安装。仓库地址是 <https://github.com/pipidu/plot>。程序里「帮助 → 关于」可以打开这个地址，也可以检查更新。
 
 ## 构建
 
