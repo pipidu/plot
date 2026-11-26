@@ -9,10 +9,10 @@ pub const WINDOW: &str = "窗口";
 pub const HELP: &str = "帮助";
 
 pub const FORMULA_HELP: &str = "\
-列公式和拟合表达式使用 evalexpr 语法。
+表达式规则：用普通的算式写列公式和拟合公式。
 
 运算：+  -  *  /  %  ^（乘方）和括号。
-整数相除会截断，需要小数时写成 1.0/2。
+两个整数相除只会得到整数，需要小数时写成 1.0/2。
 
 函数：sin cos tan asin acos atan atan2 sinh cosh tanh
       exp ln log（以 10 为底）log10 log2 sqrt abs
@@ -30,7 +30,7 @@ pub const FORMULA_HELP: &str = "\
 
 pub const ABOUT: &str = "\
 SciPlot 0.1
-用 Rust 和 egui 编写的科学绘图程序，界面对齐 SciDAVis。
+科学绘图软件。用 Rust 和 egui 编写，界面对齐 SciDAVis。
 
 表格、矩阵、多种二维图、三维曲面、拟合、微积分、插值、平滑、FFT，
 以及曲线/折线求交点（可限制 X 区间，也可与水平线、竖直线求交）。

@@ -41,7 +41,7 @@ pub fn vertical_line(x: f64) -> CurveInput {
     CurveInput::Vertical { name: format!("x={}", format_number(x)), x }
 }
 
-/// 把交点标到图上，并写入一张新表。返回交点个数。
+/// 把交点标到图上，并写入一张新表。没有交点时不建表、不标点，返回 0。
 pub fn apply_intersection(
     project: &mut Project,
     graph_id: GraphId,
@@ -49,6 +49,12 @@ pub fn apply_intersection(
     output_name: &str,
     result: &sciplot_analysis::IntersectOutput,
 ) -> Result<usize, String> {
+    let count = result.points.len();
+    if count == 0 {
+        let why = if result.note.is_empty() { "没有找到交点".to_string() } else { result.note.clone() };
+        project.log_line(format!("{why}，没有新建表格。"));
+        return Ok(0);
+    }
     let color = [214, 39, 40, 255];
     {
         let graph = project.graph_mut(graph_id).ok_or("找不到图形")?;
@@ -59,7 +65,7 @@ pub fn apply_intersection(
                 kind: AnnotationKind::Marker {
                     x: point.x,
                     y: point.y,
-                    label: format!("({}, {})", format_number(point.x), format_number(point.y)),
+                    label: format!("({}, {})", sciplot_core::format_short(point.x), sciplot_core::format_short(point.y)),
                     color,
                 },
             });
@@ -98,7 +104,6 @@ pub fn apply_intersection(
         }
         table.comment = result.note.clone();
     }
-    let count = result.points.len();
     let note = if result.note.is_empty() {
         format!("求得 {count} 个交点，已写入表格「{output_name}」。")
     } else {
@@ -178,8 +183,17 @@ pub fn xy_of(project: &Project, graph: GraphId, layer: usize, curve: usize) -> R
     Ok((name, x, y))
 }
 
-pub fn fit_on_graph(project: &mut Project, graph: GraphId, layer: usize, curve: usize, model: &FitModel) -> Result<String, String> {
+pub fn fit_on_graph(
+    project: &mut Project,
+    graph: GraphId,
+    layer: usize,
+    curve: usize,
+    model: &FitModel,
+    x_min: Option<f64>,
+    x_max: Option<f64>,
+) -> Result<String, String> {
     let (name, x, y) = xy_of(project, graph, layer, curve)?;
+    let (x, y) = restrict_interval(&x, &y, x_min, x_max)?;
     let result = fit_series(&x, &y, model)?;
     let xmin = x.iter().copied().fold(f64::INFINITY, f64::min);
     let xmax = x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -202,6 +216,27 @@ pub fn fit_on_graph(project: &mut Project, graph: GraphId, layer: usize, curve: 
     }
     project.log_line(&report);
     Ok(report)
+}
+
+fn restrict_interval(x: &[f64], y: &[f64], x_min: Option<f64>, x_max: Option<f64>) -> Result<(Vec<f64>, Vec<f64>), String> {
+    if x_min.is_none() && x_max.is_none() {
+        return Ok((x.to_vec(), y.to_vec()));
+    }
+    let lo = x_min.unwrap_or(f64::NEG_INFINITY);
+    let hi = x_max.unwrap_or(f64::INFINITY);
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    for (x, y) in x.iter().zip(y) {
+        if *x >= lo && *x <= hi {
+            xs.push(*x);
+            ys.push(*y);
+        }
+    }
+    if xs.len() < 2 {
+        return Err(format!("区间 [{}, {}] 里的有效点少于 2 个", format_number(lo), format_number(hi)));
+    }
+    Ok((xs, ys))
 }
 
 pub fn add_xy_table(project: &mut Project, name: &str, x_name: &str, x: &[f64], y_name: &str, y: &[f64]) -> sciplot_core::TableId {
@@ -349,5 +384,41 @@ mod tests {
         let graph = project.graphs.iter().find(|g| g.name == "正弦与余弦").unwrap();
         let markers = graph.layers[0].annotations.iter().filter(|a| matches!(a.kind, AnnotationKind::Marker { .. })).count();
         assert!(markers >= 2);
+    }
+
+    #[test]
+    fn empty_intersection_does_not_create_a_table() {
+        let mut project = demo_project();
+        let before = project.tables.len();
+        let graph_id = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap().id;
+        let result = sciplot_analysis::IntersectOutput {
+            points: Vec::new(),
+            note: "区间内没有交点".into(),
+        };
+        let count = apply_intersection(&mut project, graph_id, 0, "交点_空", &result).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(project.tables.len(), before);
+        assert!(project.log.iter().any(|line| line.contains("没有新建表格")));
+        let graph = project.graphs.iter().find(|graph| graph.id == graph_id).unwrap();
+        assert!(graph.layers[0].annotations.iter().all(|annotation| !matches!(annotation.kind, AnnotationKind::Marker { .. })));
+    }
+
+    #[test]
+    fn fit_uses_the_requested_interval() {
+        let mut project = sciplot_core::demo_project();
+        let graph = project.graphs.iter().find(|graph| graph.name == "正弦与余弦").unwrap().id;
+        let wide = fit_on_graph(&mut project, graph, 0, 0, &FitModel::Linear, None, None).unwrap();
+        let curves_after_wide = project.graph(graph).unwrap().layers[0].curves.len();
+        let narrow = fit_on_graph(&mut project, graph, 0, 0, &FitModel::Linear, Some(0.0), Some(1.0)).unwrap();
+        assert!(wide.contains("n = 200") || wide.contains("n = 200"), "{wide}");
+        assert!(narrow.contains("n = ") && !narrow.contains("n = 200"), "{narrow}");
+        let curve = project.graph(graph).unwrap().layers[0].curves.last().unwrap();
+        match &curve.source {
+            sciplot_core::DataSource::Function { x_min, x_max, .. } => {
+                assert!(*x_min >= -1e-6 && *x_max <= 1.0 + 1e-6, "{x_min} {x_max}");
+            }
+            other => panic!("拟合线应是函数，实际 {other:?}"),
+        }
+        assert!(project.graph(graph).unwrap().layers[0].curves.len() > curves_after_wide);
     }
 }

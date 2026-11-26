@@ -19,6 +19,12 @@ pub struct Prefs {
     /// 为真时每条新曲线按序号取调色板，为假时用 `color`。
     pub use_palette: bool,
     pub color: [u8; 4],
+    /// 上次成功打开或保存文件的目录。空表示还没有。
+    #[serde(default)]
+    pub last_dir: String,
+    /// 导入导出 CSV 时用的编码。自动导入会识别 UTF-8 和 GBK。
+    #[serde(default)]
+    pub csv_encoding: sciplot_core::CsvEncoding,
 }
 
 impl Default for Prefs {
@@ -35,6 +41,8 @@ impl Default for Prefs {
             histogram_bins: 12,
             use_palette: true,
             color: palette_color(0),
+            last_dir: String::new(),
+            csv_encoding: sciplot_core::CsvEncoding::Auto,
         }
     }
 }

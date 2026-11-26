@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
-    demo_project, export_csv, import_csv, AnnotationKind, CurveKind, Graph, GraphId, History, MatrixId, NoteId,
-    Project, SurfaceMode, SurfaceSource, TableId,
+    demo_project, export_csv_with, import_csv_with, AnnotationKind, CurveKind, CsvEncoding, Graph, GraphId, History,
+    MatrixId, NoteId, Project, SurfaceMode, SurfaceSource, TableId,
 };
 use sciplot_plot::{
     data_to_screen, nearest_curve, nearest_point, pan_limits, render, screen_to_data, to_png, to_rgba, to_svg,
@@ -95,13 +95,22 @@ pub enum PathAction {
 }
 
 #[derive(Clone)]
-pub enum Dialog {
-    Message(String),
+pub enum AfterSave {
     Quit,
+    NewProject,
+    Open(PathBuf),
+    OpenPicker,
+    Demo,
+}
+
+#[derive(Clone)]
+pub enum Dialog {
+    Message { title: String, text: String },
+    Unsaved { then: AfterSave },
     Help,
     About,
     Path { action: PathAction, path: String, extra: String },
-    Formula { table: TableId, column: usize, expr: String },
+    Formula { table: TableId, column: usize, expr: String, error: String, warning: String },
     MatrixFormula { matrix: MatrixId, expr: String },
     NewMatrix { name: String, rows: String, cols: String },
     ColumnProps { table: TableId, column: usize },
@@ -127,7 +136,7 @@ pub enum Dialog {
         xmax: String,
         tol: String,
     },
-    Fit { graph: GraphId, layer: usize, curve: usize, which: FitWhich, degree: String, expr: String, initial: String },
+    Fit { graph: GraphId, layer: usize, curve: usize, which: FitWhich, degree: String, expr: String, initial: String, xmin: String, xmax: String },
     Range {
         graph: GraphId,
         layer: usize,
@@ -156,6 +165,7 @@ pub enum Dialog {
     },
     AddCurve { graph: GraphId, table: TableId, kind: CurveKind },
     Prefs(crate::prefs::Prefs),
+    ImportInstead { path: String },
 }
 
 pub(crate) struct XSel {
@@ -209,6 +219,9 @@ pub struct SciPlotApp {
     pub(crate) prefs: crate::prefs::Prefs,
     pub(crate) plot_hit: Option<PlotHit>,
     pending_tabs: Vec<Tab>,
+    pub(crate)     pending_after: Option<AfterSave>,
+    pub(crate) confirm_style: bool,
+    narrow_collapsed: bool,
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -265,6 +278,9 @@ impl SciPlotApp {
             glyphs: None,
             frames: 0,
             pending_tabs: Vec::new(),
+            pending_after: None,
+            confirm_style: false,
+            narrow_collapsed: false,
         };
         app.reload_font_silent();
         app
@@ -369,11 +385,7 @@ impl SciPlotApp {
             self.write_path(&path)
         } else {
             self.status = "还没有文件名，请用「另存为」".into();
-            self.dialog = Some(Dialog::Path {
-                action: PathAction::SaveAs,
-                path: format!("{}.splot", self.project.name),
-                extra: String::new(),
-            });
+            start_file(self, PathAction::SaveAs, "");
             false
         }
     }
@@ -384,6 +396,7 @@ impl SciPlotApp {
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;
                 remember(&mut self.recent, path);
+                self.note_dir(path);
                 self.status = format!("已保存 {}", path.display());
                 true
             }
@@ -395,9 +408,9 @@ impl SciPlotApp {
     }
 
     pub fn perform_path(&mut self, action: PathAction, path: &str, extra: &str) {
-        let path = PathBuf::from(path.trim());
-        if path.as_os_str().is_empty() {
-            self.status = "路径是空的".into();
+        let path = resolve_user_path(self, path);
+        if path.as_os_str().is_empty() || path.is_dir() {
+            self.status = "请填写文件路径，不能只写文件夹".into();
             return;
         }
         match action {
@@ -406,11 +419,17 @@ impl SciPlotApp {
                 self.write_path(&path);
             }
             PathAction::ImportCsv => {
-                match std::fs::read(&path).map_err(|err| err.to_string()).and_then(|bytes| import_csv(&bytes)) {
-                    Ok(table) => {
+                let encoding = self.prefs.csv_encoding;
+                match std::fs::read(&path).map_err(|err| err.to_string()).and_then(|bytes| import_csv_with(&bytes, encoding)) {
+                    Ok(mut table) => {
+                        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()).filter(|stem| !stem.is_empty()) {
+                            table.name = stem.to_string();
+                        }
+                        let shown = path.display().to_string();
                         if let Some(id) = self.edit("导入 CSV", move |project| Ok(project.insert_table(table))) {
                             self.open_tab(Tab::Table(id));
-                            self.status = format!("已导入 {}", path.display());
+                            self.note_dir(&path);
+                            self.status = format!("已导入 {shown}（{}）", encoding.label());
                         }
                     }
                     Err(err) => self.status = err,
@@ -421,10 +440,17 @@ impl SciPlotApp {
                     self.status = "没有可导出的表格".into();
                     return;
                 };
-                let Some(table) = self.project.table(id) else { return };
-                let bytes = export_csv(table);
+                let Some(table) = self.project.table(id).cloned() else { return };
+                let encoding = match self.prefs.csv_encoding {
+                    CsvEncoding::Gbk => CsvEncoding::Gbk,
+                    CsvEncoding::Auto | CsvEncoding::Utf8 => CsvEncoding::Utf8,
+                };
+                let bytes = export_csv_with(&table, encoding);
                 match std::fs::write(&path, bytes) {
-                    Ok(()) => self.status = format!("已导出 {}", path.display()),
+                    Ok(()) => {
+                        self.note_dir(&path);
+                        self.status = format!("已导出 {}（{}）", path.display(), encoding.label());
+                    }
                     Err(err) => self.status = err.to_string(),
                 }
             }
@@ -432,7 +458,21 @@ impl SciPlotApp {
         }
     }
 
+    fn note_dir(&mut self, path: &Path) {
+        let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+            return;
+        };
+        self.prefs.last_dir = dir.display().to_string();
+        crate::prefs::save(&self.prefs);
+    }
+
     fn load_path(&mut self, path: &Path) {
+        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase();
+        if matches!(ext.as_str(), "csv" | "txt" | "tsv") {
+            self.status = "这不是 SciPlot 项目。项目文件的扩展名是 .splot，表格请用导入。".into();
+            self.dialog = Some(Dialog::ImportInstead { path: path.display().to_string() });
+            return;
+        }
         match std::fs::read_to_string(path).map_err(|err| err.to_string()).and_then(|text| Project::from_json(&text)) {
             Ok(project) => {
                 self.project = project;
@@ -441,10 +481,11 @@ impl SciPlotApp {
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;
                 remember(&mut self.recent, path);
+                self.note_dir(path);
                 self.rebuild_dock(false);
                 self.status = format!("已打开 {}", path.display());
             }
-            Err(err) => self.status = err,
+            Err(err) => self.status = format!("打不开这个项目。请选择 .splot 文件。{err}"),
         }
     }
 
@@ -461,7 +502,10 @@ impl SciPlotApp {
             }
         };
         self.status = match result {
-            Ok(()) => format!("已导出 {}", path.display()),
+            Ok(()) => {
+                self.note_dir(path);
+                format!("已导出 {}", path.display())
+            }
             Err(err) => err,
         };
     }
@@ -549,7 +593,8 @@ impl SciPlotApp {
 
     pub(crate) fn plot_surface_as(&mut self, matrix: MatrixId, mode: SurfaceMode) {
         let prefs = self.prefs.clone();
-        let title = self.project.matrix(matrix).map(|m| m.name.clone()).unwrap_or_else(|| "三维图".into());
+        let base = self.project.matrix(matrix).map(|m| m.name.clone()).unwrap_or_else(|| "三维图".into());
+        let title = format!("{base}-{}", mode.label());
         if let Some(id) = self.edit("三维图", |project| {
             let id = project.plot_surface(SurfaceSource::Matrix(matrix), mode, &title);
             prefs.apply_new_graph(project, id);
@@ -562,10 +607,10 @@ impl SciPlotApp {
 
     fn tab_title(&self, tab: &Tab) -> String {
         match tab {
-            Tab::Table(id) => self.project.table(*id).map(|t| t.name.clone()).unwrap_or_else(|| "表格".into()),
-            Tab::Matrix(id) => self.project.matrix(*id).map(|m| m.name.clone()).unwrap_or_else(|| "矩阵".into()),
-            Tab::Graph(id) => self.project.graph(*id).map(|g| g.name.clone()).unwrap_or_else(|| "图".into()),
-            Tab::Note(id) => self.project.notes.iter().find(|n| n.id == *id).map(|n| n.name.clone()).unwrap_or_else(|| "备注".into()),
+            Tab::Table(id) => format!("表·{}", self.project.table(*id).map(|t| t.name.clone()).unwrap_or_else(|| "表格".into())),
+            Tab::Matrix(id) => format!("矩阵·{}", self.project.matrix(*id).map(|m| m.name.clone()).unwrap_or_else(|| "矩阵".into())),
+            Tab::Graph(id) => format!("图·{}", self.project.graph(*id).map(|g| g.name.clone()).unwrap_or_else(|| "图".into())),
+            Tab::Note(id) => format!("备注·{}", self.project.notes.iter().find(|n| n.id == *id).map(|n| n.name.clone()).unwrap_or_else(|| "备注".into())),
         }
     }
 }
@@ -578,14 +623,25 @@ impl eframe::App for SciPlotApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !matches!(self.dialog, Some(Dialog::Quit)) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !matches!(self.dialog, Some(Dialog::Unsaved { .. })) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(Dialog::Quit);
+            self.dialog = Some(Dialog::Unsaved { then: AfterSave::Quit });
         }
         shortcuts(self, ctx);
         egui::TopBottomPanel::top("menu").show(ctx, |ui| menus(self, ui));
+        let screen_w = ctx.screen_rect().width();
+        if screen_w < 520.0 {
+            if self.show_tree && !self.narrow_collapsed {
+                self.show_tree = false;
+                self.narrow_collapsed = true;
+                self.status = "窗口较窄，已收起项目树。可在「窗口」菜单里重新打开。".into();
+            }
+        } else if screen_w > 900.0 {
+            self.narrow_collapsed = false;
+        }
         if self.show_tree {
-            egui::SidePanel::left("tree").resizable(true).default_width(220.0).show(ctx, |ui| tree(self, ui));
+            let max_w = if screen_w < 800.0 { (screen_w * 0.30).clamp(140.0, 220.0) } else { 360.0 };
+            egui::SidePanel::left("tree").resizable(true).default_width(200.0).max_width(max_w).show(ctx, |ui| tree(self, ui));
         }
         egui::TopBottomPanel::bottom("status").exact_height(24.0).show(ctx, |ui| {
             ui.label(&self.status);
@@ -600,17 +656,25 @@ impl eframe::App for SciPlotApp {
             self.dock = dock;
         });
         self.flush_tabs();
+        drop_stale_tabs(self);
         dialogs::show(self, ctx);
+        if self.dialog.is_none() {
+            if let Some(then) = self.pending_after.take() {
+                if !self.dirty {
+                    run_after(self, then, ctx);
+                }
+            }
+        }
     }
 }
 
 fn shortcuts(app: &mut SciPlotApp, ctx: &egui::Context) {
     let cmd = egui::Modifiers::COMMAND;
     if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::N)) {
-        new_project(app);
+        request_after(app, AfterSave::NewProject);
     }
     if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::O)) {
-        browse_open(app);
+        request_after(app, AfterSave::OpenPicker);
     }
     if ctx.input_mut(|i| i.consume_key(cmd, egui::Key::S)) {
         app.save_current();
@@ -665,32 +729,46 @@ fn clicked(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
 
 fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     if clicked(ui, "新建项目", "Ctrl+N") {
-        new_project(app);
+        request_after(app, AfterSave::NewProject);
     }
     if clicked(ui, "打开…", "Ctrl+O") {
-        browse_open(app);
+        request_after(app, AfterSave::OpenPicker);
     }
     if clicked(ui, "保存", "Ctrl+S") {
         app.save_current();
     }
     if clicked(ui, "另存为…", "") {
-        app.dialog = Some(Dialog::Path { action: PathAction::SaveAs, path: format!("{}.splot", app.project.name), extra: String::new() });
+        start_file(app, PathAction::SaveAs, "");
+    }
+    if clicked(ui, "导入 CSV…", "") {
+        start_file(app, PathAction::ImportCsv, "");
+    }
+    if clicked(ui, "导出当前图形 PNG…", "") {
+        start_file(app, PathAction::ExportPng, "144");
+    }
+    if clicked(ui, "导出当前图形 SVG…", "") {
+        start_file(app, PathAction::ExportSvg, "");
     }
     ui.separator();
     ui.menu_button("最近文件", |ui| {
         if app.recent.is_empty() {
             ui.label("（空）");
         }
+        ui.set_min_width(320.0);
         let recent = app.recent.clone();
         for path in recent {
-            if ui.button(path.display().to_string()).clicked() {
-                app.load_path(&path);
+            let name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string());
+            let exists = path.exists();
+            let response = ui.add_enabled(exists, egui::Button::new(name)).on_hover_text(path.display().to_string());
+            if response.clicked() {
+                ui.close_menu();
+                request_after(app, AfterSave::Open(path));
             }
         }
     });
     if clicked(ui, "退出", "") {
         if app.dirty {
-            app.dialog = Some(Dialog::Quit);
+            app.dialog = Some(Dialog::Unsaved { then: AfterSave::Quit });
         } else {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -704,14 +782,21 @@ fn edit_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     if clicked(ui, "重做", "Ctrl+Y") {
         app.redo();
     }
-    if clicked(ui, "删除当前对象", "") {
+    let delete_label = match app.focus {
+        Some(Tab::Table(_)) => "删除当前表格",
+        Some(Tab::Matrix(_)) => "删除当前矩阵",
+        Some(Tab::Graph(_)) => "删除当前图形",
+        Some(Tab::Note(_)) => "删除当前备注",
+        None => "删除当前对象",
+    };
+    if clicked(ui, delete_label, "") {
         delete_focused(app);
     }
 }
 
 
-pub(crate) fn fit_dialog(graph: GraphId, layer: usize, curve: usize, which: FitWhich) -> Dialog {
-    Dialog::Fit { graph, layer, curve, which, degree: "2".into(), expr: "a*x+b".into(), initial: "a=1, b=0".into() }
+pub(crate) fn fit_dialog(graph: GraphId, layer: usize, curve: usize, which: FitWhich, xmin: String, xmax: String) -> Dialog {
+    Dialog::Fit { graph, layer, curve, which, degree: "2".into(), expr: "a*x+b".into(), initial: "a=1, b=0".into(), xmin, xmax }
 }
 
 pub(crate) fn range_dialog(graph: GraphId, layer: usize, curve: usize, op: RangeOp) -> Dialog {
@@ -735,15 +820,7 @@ fn window_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     ui.checkbox(&mut app.show_tree, "项目树");
     ui.checkbox(&mut app.show_log, "日志");
     if clicked(ui, "示例项目", "") {
-        let mut project = demo_project();
-        ops::enrich_demo(&mut project);
-        app.project = project;
-        app.history = History::new();
-        app.views.clear();
-        app.path = None;
-        app.dirty = false;
-        app.rebuild_dock(true);
-        app.status = "已重新载入示例项目".into();
+        request_after(app, AfterSave::Demo);
     }
 }
 
@@ -761,7 +838,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         let notes: Vec<(NoteId, String)> = app.project.notes.iter().map(|n| (n.id, n.name.clone())).collect();
         let tables_header = egui::CollapsingHeader::new("表格").default_open(true).show(ui, |ui| {
             for (id, name) in tables {
-                let response = ui.selectable_label(app.focus == Some(Tab::Table(id)), name);
+                let response = tree_row(ui, app.focus == Some(Tab::Table(id)), &name);
                 if response.clicked() {
                     app.open_tab(Tab::Table(id));
                 }
@@ -771,7 +848,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         tables_header.header_response.context_menu(|ui| crate::context::section_tables(app, ui));
         let matrices_header = egui::CollapsingHeader::new("矩阵").default_open(true).show(ui, |ui| {
             for (id, name) in matrices {
-                let response = ui.selectable_label(app.focus == Some(Tab::Matrix(id)), name);
+                let response = tree_row(ui, app.focus == Some(Tab::Matrix(id)), &name);
                 if response.clicked() {
                     app.open_tab(Tab::Matrix(id));
                 }
@@ -781,7 +858,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         matrices_header.header_response.context_menu(|ui| crate::context::section_matrices(app, ui));
         let graphs_header = egui::CollapsingHeader::new("图形").default_open(true).show(ui, |ui| {
             for (id, name) in graphs {
-                let response = ui.selectable_label(app.focus == Some(Tab::Graph(id)), name);
+                let response = tree_row(ui, app.focus == Some(Tab::Graph(id)), &name);
                 if response.clicked() {
                     app.open_tab(Tab::Graph(id));
                 }
@@ -791,7 +868,7 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         graphs_header.header_response.context_menu(|ui| crate::context::section_graphs(app, ui));
         let notes_header = egui::CollapsingHeader::new("备注").default_open(true).show(ui, |ui| {
             for (id, name) in notes {
-                let response = ui.selectable_label(app.focus == Some(Tab::Note(id)), name);
+                let response = tree_row(ui, app.focus == Some(Tab::Note(id)), &name);
                 if response.clicked() {
                     app.open_tab(Tab::Note(id));
                 }
@@ -802,11 +879,24 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     });
 }
 
+fn drop_stale_tabs(app: &mut SciPlotApp) {
+    app.dock.retain_tabs(|tab| match tab {
+        Tab::Table(id) => app.project.table(*id).is_some(),
+        Tab::Matrix(id) => app.project.matrix(*id).is_some(),
+        Tab::Graph(id) => app.project.graph(*id).is_some(),
+        Tab::Note(id) => app.project.notes.iter().any(|note| note.id == *id),
+    });
+}
+
+fn tree_row(ui: &mut egui::Ui, selected: bool, name: &str) -> egui::Response {
+    ui.add_sized([ui.available_width(), 22.0], egui::SelectableLabel::new(selected, name))
+}
+
 fn log_view(app: &SciPlotApp, ui: &mut egui::Ui) {
     ui.label("日志");
     egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
         for line in &app.project.log {
-            ui.label(line);
+            ui.add(egui::Label::new(line).wrap_mode(egui::TextWrapMode::Wrap));
         }
         if app.project.log.is_empty() {
             ui.label("（空）");
@@ -841,10 +931,11 @@ impl TabViewer for Viewer<'_> {
 }
 
 fn column_header(column: &sciplot_core::Column) -> String {
-    if column.mode == sciplot_core::ColumnMode::None || column.mode.label() == column.name {
+    let role = column.mode.label();
+    if column.mode == sciplot_core::ColumnMode::None || role.is_empty() || role == column.name {
         column.name.clone()
     } else {
-        format!("{} ({})", column.name, column.mode.label())
+        format!("{} ({role})", column.name)
     }
 }
 
@@ -864,11 +955,14 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
             app.edit("重命名", |project| project.rename_table(id, &renamed));
         }
     });
-    TableBuilder::new(ui)
+    let min_width = 46.0 + 120.0 * ncols as f32;
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        ui.set_min_width(min_width);
+        TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .column(Column::exact(46.0))
-        .columns(Column::initial(108.0).resizable(true).clip(true), ncols)
+        .columns(Column::initial(120.0).range(96.0..=280.0).resizable(true).clip(true), ncols)
         .header(24.0, |mut header| {
             header.col(|ui| {
                 ui.label("#");
@@ -876,7 +970,7 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
             for (index, header_text) in headers.iter().enumerate() {
                 header.col(|ui| {
                     let selected = app.selected_column == Some((id, index));
-                    let response = ui.selectable_label(selected, header_text);
+                    let response = ui.add_sized(ui.available_size(), egui::SelectableLabel::new(selected, header_text));
                     if response.clicked() || response.secondary_clicked() {
                         app.selected_column = Some((id, index));
                     }
@@ -894,7 +988,16 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                 for column in 0..ncols {
                     row.col(|ui| {
                         let mut text = app.project.table(id).and_then(|t| t.columns.get(column)).map(|c| c.display(row_index)).unwrap_or_default();
-                        let response = ui.add(egui::TextEdit::singleline(&mut text).id(ui.id().with(("cell", column, row_index))));
+                        let mut output = egui::TextEdit::singleline(&mut text).id(ui.id().with(("cell", column, row_index))).show(ui);
+                        let response = output.response.clone();
+                        if response.gained_focus() {
+                            let end = egui::text::CCursor::new(text.chars().count());
+                            output.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::default(), end)));
+                            output.state.store(ui.ctx(), response.id);
+                        }
+                        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                            app.status = "已写入单元格".into();
+                        }
                         if response.secondary_clicked() {
                             app.selected_column = Some((id, column));
                         }
@@ -916,6 +1019,7 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                 }
             });
         });
+    });
 }
 
 fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
@@ -925,15 +1029,24 @@ fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
     };
     let rows = matrix.rows;
     let cols = matrix.cols;
+    let peak = matrix.data.iter().flatten().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let noise = (peak * 1e-12).max(0.0);
     let banner = ui.add(
-        egui::Label::new(format!("{}   {rows}×{cols}   x [{} , {}]   y [{} , {}]", matrix.name, matrix.x_min, matrix.x_max, matrix.y_min, matrix.y_max))
-            .sense(egui::Sense::click()),
+        egui::Label::new(format!(
+            "{}   {rows}×{cols}   x [{} , {}]   y [{} , {}]",
+            matrix.name,
+            sciplot_core::format_number(matrix.x_min),
+            sciplot_core::format_number(matrix.x_max),
+            sciplot_core::format_number(matrix.y_min),
+            sciplot_core::format_number(matrix.y_max)
+        ))
+        .sense(egui::Sense::click()),
     );
     banner.context_menu(|ui| crate::context::matrix_menu(app, ui, id));
     TableBuilder::new(ui)
         .striped(true)
         .column(Column::exact(40.0))
-        .columns(Column::initial(72.0).resizable(true), cols)
+        .columns(Column::initial(96.0).range(84.0..=180.0).resizable(true), cols)
         .header(22.0, |mut header| {
             header.col(|ui| {
                 ui.label("#");
@@ -952,7 +1065,12 @@ fn matrix_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
                 });
                 for c in 0..cols {
                     row.col(|ui| {
-                        let mut text = app.project.matrix(id).and_then(|m| m.get(r, c)).map(sciplot_core::format_number).unwrap_or_default();
+                        let mut text = app
+                            .project
+                            .matrix(id)
+                            .and_then(|m| m.get(r, c))
+                            .map(|value| if value.abs() <= noise { "0".into() } else { sciplot_core::format_number(value) })
+                            .unwrap_or_default();
                         let response = ui.add(egui::TextEdit::singleline(&mut text));
                         response.context_menu(|ui| crate::context::matrix_menu(app, ui, id));
                         if response.changed() {
@@ -981,7 +1099,8 @@ fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
         return;
     };
     let mut text = text;
-    let response = ui.add(egui::TextEdit::multiline(&mut text).desired_width(f32::INFINITY).desired_rows(16));
+    let rows = ((ui.available_height() / 22.0).floor() as usize).clamp(12, 80);
+    let response = ui.add(egui::TextEdit::multiline(&mut text).desired_width(f32::INFINITY).desired_rows(rows));
     if response.changed() {
         if !app.pushed_edit {
             app.history.push("编辑备注", &app.project);
@@ -1003,27 +1122,50 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         return;
     };
     let surface = graph.surface.is_some();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if !graph.layers.is_empty() && graph.surface.is_none() {
-            let names: Vec<String> = graph.layers.get(app.layer_index(id)).map(|l| l.curves.iter().map(|c| c.name.clone()).collect()).unwrap_or_default();
-            if !names.is_empty() {
-                app.curve = app.curve.min(names.len() - 1);
-                let selected = names[app.curve].clone();
+            let layer_index = app.layer_index(id);
+            let curves: Vec<(String, bool)> = graph
+                .layers
+                .get(layer_index)
+                .map(|layer| layer.curves.iter().map(|curve| (curve.name.clone(), curve.visible)).collect())
+                .unwrap_or_default();
+            if !curves.is_empty() {
+                app.curve = app.curve.min(curves.len() - 1);
+                let (name, visible) = &curves[app.curve];
+                let selected = if *visible { name.clone() } else { format!("{name}（隐藏）") };
+                let mut toggle = None;
                 egui::ComboBox::from_id_salt(("curve-pick", id.0)).selected_text(selected).show_ui(ui, |ui| {
-                    for (index, name) in names.iter().enumerate() {
-                        ui.selectable_value(&mut app.curve, index, name);
+                    for (index, (name, visible)) in curves.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let mut on = *visible;
+                            if ui.checkbox(&mut on, "").changed() {
+                                toggle = Some(index);
+                            }
+                            let label = if *visible { name.clone() } else { format!("{name}（隐藏）") };
+                            ui.selectable_value(&mut app.curve, index, label);
+                        });
                     }
                 });
+                if let Some(index) = toggle {
+                    let visible = !curves[index].1;
+                    set_curve_visible(app, id, layer_index, index, visible);
+                }
             }
         }
         ui.checkbox(&mut app.reader, "读取");
         if ui.button("清除缩放").clicked() {
             app.views.remove(&id);
         }
-        ui.label(if surface {
-            "左键拖拽旋转，滚轮缩放。右键切换曲面、线框或散点"
+        let hint = if surface {
+            "左键拖拽旋转，滚轮缩放。右键选择显示方式"
         } else {
-            "左键拖拽平移，滚轮缩放，双击恢复，Shift 拖拽选择 X 区间。右键曲线改属性或删除"
+            "左键平移，滚轮缩放，双击恢复，Shift 选择 X 区间。右键改曲线"
+        };
+        ui.label(hint).on_hover_text(if surface {
+            "在图上按住左键拖拽可以旋转，滚轮改变远近。右键打开菜单，选择曲面、线框或散点。"
+        } else {
+            "左键拖拽平移，滚轮缩放，双击恢复视图。按住 Shift 拖拽只选择 X 区间，拟合和求交点会用到它。右键曲线可以改属性、隐藏或分析。"
         });
     });
     let available = ui.available_size();
@@ -1039,8 +1181,8 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         if response.dragged_by(egui::PointerButton::Primary) {
             let delta = response.drag_delta();
             if let Some(spec) = &mut app.project.graph_mut(id).and_then(|g| g.surface.as_mut()) {
-                spec.azimuth += delta.x * 0.45;
-                spec.elevation = (spec.elevation - delta.y * 0.35).clamp(-85.0, 85.0);
+                spec.azimuth += delta.x * 0.9;
+                spec.elevation = (spec.elevation - delta.y * 0.7).clamp(-85.0, 85.0);
             }
         }
         if response.hovered() {
@@ -1144,6 +1286,17 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         }
     }
     if response.drag_stopped() {
+        if let Some(sel) = &app.xsel {
+            if sel.graph == id && (sel.x0 - sel.x1).abs() > 1e-9 {
+                let lo = sel.x0.min(sel.x1);
+                let hi = sel.x0.max(sel.x1);
+                app.status = format!(
+                    "已选择 X 区间 [{}, {}]，拟合和求交点会用这个区间",
+                    sciplot_core::format_number(lo),
+                    sciplot_core::format_number(hi)
+                );
+            }
+        }
         app.ann_drag = None;
     }
     if changed {
@@ -1179,6 +1332,11 @@ fn classify_plot(app: &mut SciPlotApp, id: GraphId, local: egui::Vec2, scene: &S
             app.selected_ann = Some((id, layer_index, ann_id));
             return PlotHit::Annotation { graph: id, layer: layer_index, id: ann_id };
         }
+    }
+    if let Some(hit) = scene.legend_hits.iter().find(|hit| hit.rect.contains(local.x, local.y)) {
+        app.curve = hit.curve;
+        app.active_layer = hit.layer;
+        return PlotHit::Curve { graph: id, layer: hit.layer, curve: hit.curve };
     }
     if let Some(hit) = nearest_curve(&app.project, &graph, &scene.layers, local.x, local.y) {
         app.curve = hit.curve;
@@ -1224,7 +1382,16 @@ fn paint_overlays(app: &SciPlotApp, ui: &egui::Ui, id: GraphId, rect: egui::Rect
                         rect.min + egui::vec2(x0.min(x1), frame.plot.y),
                         rect.min + egui::vec2(x0.max(x1), frame.plot.bottom()),
                     );
-                    painter.rect_filled(band, 0.0, egui::Color32::from_rgba_unmultiplied(40, 110, 210, 48));
+                    painter.rect_filled(band, 0.0, egui::Color32::from_rgba_unmultiplied(40, 110, 210, 96));
+                    let lo = sel.x0.min(sel.x1);
+                    let hi = sel.x0.max(sel.x1);
+                    painter.text(
+                        egui::pos2(band.center().x, band.top()),
+                        egui::Align2::CENTER_BOTTOM,
+                        format!("[{}, {}]", sciplot_core::format_number(lo), sciplot_core::format_number(hi)),
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::from_rgb(20, 60, 140),
+                    );
                 }
             }
         }
@@ -1291,6 +1458,19 @@ fn shift_kind(kind: &AnnotationKind, dx: f64, dy: f64) -> AnnotationKind {
     }
 }
 
+fn set_curve_visible(app: &mut SciPlotApp, graph: GraphId, layer: usize, curve: usize, visible: bool) {
+    app.edit("曲线可见性", |project| {
+        let curve = project
+            .graph_mut(graph)
+            .and_then(|item| item.layers.get_mut(layer))
+            .and_then(|item| item.curves.get_mut(curve))
+            .ok_or("找不到曲线")?;
+        curve.visible = visible;
+        Ok(())
+    });
+    app.status = if visible { "已显示曲线".into() } else { "已隐藏曲线。可在图例、工具栏或右键「曲线可见性」里再显示".into() };
+}
+
 fn delete_selected_annotation(app: &mut SciPlotApp) {
     let Some((graph, layer, id)) = app.selected_ann else {
         app.status = "先在图上点选一个标注".into();
@@ -1345,24 +1525,133 @@ fn new_project(app: &mut SciPlotApp) {
     app.status = "已新建项目".into();
 }
 
-fn browse_open(app: &mut SciPlotApp) {
-    if std::env::var("SCIPLOT_NO_DIALOG").is_err() {
-        if let Some(path) = rfd::FileDialog::new().add_filter("SciPlot", &["splot"]).pick_file() {
-            app.load_path(&path);
-            return;
+fn request_after(app: &mut SciPlotApp, then: AfterSave) {
+    if app.dirty {
+        app.dialog = Some(Dialog::Unsaved { then });
+    } else {
+        // 没有未保存修改时，退出需要这一帧的上下文，其余动作不需要。
+        match then {
+            AfterSave::Quit => {}
+            other => run_after_now(app, other),
         }
     }
-    app.dialog = Some(Dialog::Path { action: PathAction::Open, path: String::new(), extra: String::new() });
 }
 
-pub(crate) fn browse_or_dialog(app: &mut SciPlotApp, action: PathAction, fallback: &str) {
-    if std::env::var("SCIPLOT_NO_DIALOG").is_err() {
-        if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv", "txt"]).pick_file() {
-            app.perform_path(action, &path.display().to_string(), "");
-            return;
+fn run_after(app: &mut SciPlotApp, then: AfterSave, ctx: &egui::Context) {
+    match then {
+        AfterSave::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        other => run_after_now(app, other),
+    }
+}
+
+fn run_after_now(app: &mut SciPlotApp, then: AfterSave) {
+    match then {
+        AfterSave::Quit => {}
+        AfterSave::NewProject => new_project(app),
+        AfterSave::Open(path) => app.load_path(&path),
+        AfterSave::OpenPicker => start_file(app, PathAction::Open, ""),
+        AfterSave::Demo => load_demo(app),
+    }
+}
+
+fn load_demo(app: &mut SciPlotApp) {
+    let mut project = demo_project();
+    ops::enrich_demo(&mut project);
+    app.project = project;
+    app.history = History::new();
+    app.views.clear();
+    app.path = None;
+    app.dirty = false;
+    app.rebuild_dock(true);
+    app.status = "已重新载入示例项目".into();
+}
+
+pub(crate) fn start_file(app: &mut SciPlotApp, action: PathAction, extra: &str) {
+    let file_name = default_file_name(app, action);
+    let full = if file_name.is_empty() { default_dir(app) } else { default_dir(app).join(&file_name) };
+    if let Some(path) = native_dialog(app, action, &file_name) {
+        app.perform_path(action, &path.display().to_string(), extra);
+        return;
+    }
+    app.dialog = Some(Dialog::Path { action, path: full.display().to_string(), extra: extra.to_string() });
+}
+
+pub(crate) fn native_dialog(app: &SciPlotApp, action: PathAction, file_name: &str) -> Option<PathBuf> {
+    if std::env::var("SCIPLOT_NO_DIALOG").is_ok() {
+        return None;
+    }
+    let mut dialog = rfd::FileDialog::new().set_directory(default_dir(app));
+    if !file_name.is_empty() && !matches!(action, PathAction::Open | PathAction::ImportCsv) {
+        dialog = dialog.set_file_name(file_name);
+    }
+    dialog = match action {
+        PathAction::Open | PathAction::SaveAs => dialog.add_filter("SciPlot 项目", &["splot"]),
+        PathAction::ImportCsv | PathAction::ExportCsv => dialog.add_filter("CSV", &["csv", "txt", "tsv"]),
+        PathAction::ExportPng => dialog.add_filter("PNG", &["png"]),
+        PathAction::ExportSvg => dialog.add_filter("SVG", &["svg"]),
+    };
+    match action {
+        PathAction::Open | PathAction::ImportCsv => dialog.pick_file(),
+        PathAction::SaveAs | PathAction::ExportCsv | PathAction::ExportPng | PathAction::ExportSvg => dialog.save_file(),
+    }
+}
+
+fn default_file_name(app: &SciPlotApp, action: PathAction) -> String {
+    match action {
+        PathAction::Open => String::new(),
+        PathAction::SaveAs => safe_file_name(&app.project.name, "splot"),
+        PathAction::ImportCsv => "数据.csv".into(),
+        PathAction::ExportCsv => {
+            let name = app.active_table().and_then(|id| app.project.table(id)).map(|table| table.name.clone()).unwrap_or_else(|| "数据".into());
+            safe_file_name(&name, "csv")
+        }
+        PathAction::ExportPng => graph_file_name(app, "png"),
+        PathAction::ExportSvg => graph_file_name(app, "svg"),
+    }
+}
+
+fn graph_file_name(app: &SciPlotApp, ext: &str) -> String {
+    let name = app.active_graph().and_then(|id| app.project.graph(id)).map(|graph| graph.name.clone()).unwrap_or_else(|| "图形".into());
+    safe_file_name(&name, ext)
+}
+
+fn safe_file_name(name: &str, ext: &str) -> String {
+    let stem: String = name.chars().map(|ch| if "\\/:*?\"<>|".contains(ch) { '_' } else { ch }).collect();
+    let stem = stem.trim().trim_matches('.');
+    let stem = if stem.is_empty() { "未命名" } else { stem };
+    format!("{stem}.{ext}")
+}
+
+pub(crate) fn default_dir(app: &SciPlotApp) -> PathBuf {
+    if !app.prefs.last_dir.is_empty() {
+        let dir = PathBuf::from(&app.prefs.last_dir);
+        if dir.is_dir() {
+            return dir;
         }
     }
-    app.dialog = Some(Dialog::Path { action, path: fallback.into(), extra: String::new() });
+    if let Some(dir) = app.path.as_ref().and_then(|path| path.parent()).filter(|dir| dir.is_dir()) {
+        return dir.to_path_buf();
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let documents = home.join("Documents");
+    if documents.is_dir() {
+        return documents;
+    }
+    let documents = home.join("文档");
+    if documents.is_dir() {
+        documents
+    } else {
+        home
+    }
+}
+
+pub(crate) fn resolve_user_path(app: &SciPlotApp, text: &str) -> PathBuf {
+    let path = PathBuf::from(text.trim());
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        path
+    } else {
+        default_dir(app).join(path)
+    }
 }
 
 fn chinese_dock(dock: &mut DockState<Tab>) {

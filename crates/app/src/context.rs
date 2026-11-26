@@ -14,7 +14,7 @@ pub(crate) fn section_tables(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         }
     }
     if clicked_menu(ui, "导入 CSV…") {
-        crate::app::browse_or_dialog(app, PathAction::ImportCsv, "数据.csv");
+        crate::app::start_file(app, PathAction::ImportCsv, "");
     }
 }
 
@@ -48,7 +48,7 @@ pub(crate) fn tree_table(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
     plot_table_menu(app, ui, id);
     if clicked_menu(ui, "导出 CSV…") {
         app.open_tab(Tab::Table(id));
-        app.dialog = Some(Dialog::Path { action: PathAction::ExportCsv, path: "数据.csv".into(), extra: String::new() });
+        crate::app::start_file(app, PathAction::ExportCsv, "");
     }
     if clicked_menu(ui, "转为矩阵") {
         if let Some(matrix) = app.edit("表转矩阵", |project| project.matrix_from_table(id)) {
@@ -90,6 +90,10 @@ pub(crate) fn tree_matrix(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId)
 pub(crate) fn tree_graph(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
     if clicked_menu(ui, "打开") {
         app.open_tab(Tab::Graph(id));
+    }
+    if app.project.graph(id).is_some_and(|graph| graph.surface.is_none() && graph.layers.iter().any(|layer| !layer.curves.is_empty())) {
+        let layer = 0;
+        curve_visibility_menu(app, ui, id, layer);
     }
     export_items(app, ui, id);
     ui.separator();
@@ -149,7 +153,7 @@ pub(crate) fn table_column(app: &mut SciPlotApp, ui: &mut egui::Ui, table: Table
     ui.separator();
     if clicked_menu(ui, "列公式…") {
         let expr = app.project.table(table).and_then(|item| item.columns.get(column)).map(|col| col.formula.clone()).unwrap_or_default();
-        app.dialog = Some(Dialog::Formula { table, column, expr });
+        app.dialog = Some(Dialog::Formula { table, column, expr, error: String::new(), warning: String::new() });
     }
     if clicked_menu(ui, "重算公式") {
         recompute(app, table);
@@ -159,7 +163,7 @@ pub(crate) fn table_column(app: &mut SciPlotApp, ui: &mut egui::Ui, table: Table
     }
     if clicked_menu(ui, "统计") {
         match ops::column_stats(&app.project, table, column) {
-            Ok(text) => app.dialog = Some(Dialog::Message(text)),
+            Ok(text) => app.dialog = Some(Dialog::Message { title: "统计".into(), text }),
             Err(err) => app.status = err,
         }
     }
@@ -169,10 +173,10 @@ pub(crate) fn table_column(app: &mut SciPlotApp, ui: &mut egui::Ui, table: Table
     plot_table_menu(app, ui, table);
     if clicked_menu(ui, "导出 CSV…") {
         app.open_tab(Tab::Table(table));
-        app.dialog = Some(Dialog::Path { action: PathAction::ExportCsv, path: "数据.csv".into(), extra: String::new() });
+        crate::app::start_file(app, PathAction::ExportCsv, "");
     }
     if clicked_menu(ui, "导入 CSV…") {
-        crate::app::browse_or_dialog(app, PathAction::ImportCsv, "数据.csv");
+        crate::app::start_file(app, PathAction::ImportCsv, "");
     }
 }
 
@@ -230,7 +234,7 @@ fn insert_column(app: &mut SciPlotApp, table: TableId, index: usize) {
     let names = app.project.table(table).map(|item| item.columns.iter().map(|col| col.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
     let name = unique_name(&names, "C");
     app.edit("插入列", |project| {
-        project.table_mut(table).ok_or("找不到表格")?.insert_column(index, name, ColumnMode::Y);
+        project.table_mut(table).ok_or("找不到表格")?.insert_column(index, name, ColumnMode::None);
         Ok(())
     });
 }
@@ -259,7 +263,7 @@ fn correlation(app: &mut SciPlotApp, table: TableId) {
     match ops::correlation_report(&app.project, table) {
         Ok(text) => {
             app.project.log_line(&text);
-            app.dialog = Some(Dialog::Message(text));
+            app.dialog = Some(Dialog::Message { title: "相关性".into(), text });
         }
         Err(err) => app.status = err,
     }
@@ -301,6 +305,9 @@ fn matrix_actions(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
     if clicked_menu(ui, "求逆") {
         if let Some(created) = app.edit("求逆", |project| ops::invert_into_new(project, id)) {
             app.open_tab(Tab::Matrix(created));
+        } else {
+            let text = app.status.clone();
+            app.dialog = Some(Dialog::Message { title: "求逆失败".into(), text });
         }
     }
     if clicked_menu(ui, "转为表格") {
@@ -380,6 +387,7 @@ fn annotation_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, laye
 fn layer_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: usize) {
     ui.label("图层");
     ui.separator();
+    curve_visibility_menu(app, ui, graph, layer);
     layer_format(app, ui, graph, layer);
     ui.separator();
     if clicked_menu(ui, "添加曲线…") {
@@ -425,8 +433,10 @@ fn layer_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: us
 fn surface_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
     ui.label("三维图");
     ui.separator();
+    let current = app.project.graph(graph).and_then(|item| item.surface.as_ref()).map(|spec| spec.mode);
     for mode in [SurfaceMode::Surface, SurfaceMode::Wireframe, SurfaceMode::Scatter] {
-        if clicked_menu(ui, mode.label()) {
+        let label = if Some(mode) == current { format!("✓ {}", mode.label()) } else { mode.label().to_string() };
+        if clicked_menu(ui, &label) {
             app.edit("三维显示", |project| {
                 project.graph_mut(graph).and_then(|item| item.surface.as_mut()).ok_or("不是三维图")?.mode = mode;
                 Ok(())
@@ -435,6 +445,45 @@ fn surface_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
     }
     ui.separator();
     export_items(app, ui, graph);
+}
+
+fn curve_visibility_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: usize) {
+    let curves: Vec<(usize, String, bool)> = app
+        .project
+        .graph(graph)
+        .and_then(|item| item.layers.get(layer))
+        .map(|item| item.curves.iter().enumerate().map(|(index, curve)| (index, curve.name.clone(), curve.visible)).collect())
+        .unwrap_or_default();
+    if curves.is_empty() {
+        return;
+    }
+    if curves.iter().any(|(_, _, visible)| !*visible) && clicked_menu(ui, "显示全部曲线") {
+        app.edit("曲线可见性", |project| {
+            let layer = project.graph_mut(graph).and_then(|item| item.layers.get_mut(layer)).ok_or("找不到图层")?;
+            for curve in &mut layer.curves {
+                curve.visible = true;
+            }
+            Ok(())
+        });
+        app.status = "已显示全部曲线".into();
+    }
+    ui.menu_button("曲线可见性", |ui| {
+        for (index, name, visible) in curves {
+            let label = if visible { format!("隐藏 {name}") } else { format!("显示 {name}") };
+            if clicked_menu(ui, &label) {
+                app.edit("曲线可见性", |project| {
+                    let curve = project
+                        .graph_mut(graph)
+                        .and_then(|item| item.layers.get_mut(layer))
+                        .and_then(|item| item.curves.get_mut(index))
+                        .ok_or("找不到曲线")?;
+                    curve.visible = !visible;
+                    Ok(())
+                });
+            }
+        }
+    });
+    ui.separator();
 }
 
 fn layer_format(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: usize) {
@@ -480,22 +529,22 @@ fn layer_format(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: 
 fn analysis_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: usize, curve: usize) {
     ui.menu_button("分析", |ui| {
         if clicked_menu(ui, "线性拟合…") {
-            app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Linear));
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Linear));
         }
         if clicked_menu(ui, "多项式拟合…") {
-            app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Poly));
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Poly));
         }
         if clicked_menu(ui, "指数拟合…") {
-            app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Exp));
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Exp));
         }
         if clicked_menu(ui, "高斯拟合…") {
-            app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Gauss));
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Gauss));
         }
         if clicked_menu(ui, "洛伦兹拟合…") {
-            app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Lorentz));
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Lorentz));
         }
         if clicked_menu(ui, "自定义拟合…") {
-            app.dialog = Some(fit_dialog(graph, layer, curve, FitWhich::Custom));
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Custom));
         }
         ui.separator();
         if clicked_menu(ui, "微分") {
@@ -555,11 +604,11 @@ fn view_items(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
 fn export_items(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
     if clicked_menu(ui, "导出 PNG…") {
         app.open_tab(Tab::Graph(graph));
-        app.dialog = Some(Dialog::Path { action: PathAction::ExportPng, path: "图形.png".into(), extra: "144".into() });
+        crate::app::start_file(app, PathAction::ExportPng, "144");
     }
     if clicked_menu(ui, "导出 SVG…") {
         app.open_tab(Tab::Graph(graph));
-        app.dialog = Some(Dialog::Path { action: PathAction::ExportSvg, path: "图形.svg".into(), extra: String::new() });
+        crate::app::start_file(app, PathAction::ExportSvg, "");
     }
     if clicked_menu(ui, "复制 PNG") {
         app.open_tab(Tab::Graph(graph));
@@ -594,15 +643,52 @@ fn open_axis(app: &mut SciPlotApp, graph: GraphId, layer: usize, y_axis: bool) {
     }
 }
 
+fn x_is_strictly_increasing(app: &SciPlotApp, graph: GraphId, layer: usize, curve: usize) -> bool {
+    let Some(curve) = app.project.graph(graph).and_then(|item| item.layers.get(layer)).and_then(|item| item.curves.get(curve)) else {
+        return false;
+    };
+    let Ok(series) = sciplot_core::resolve_curve(&app.project, curve) else {
+        return false;
+    };
+    let xs: Vec<f64> = series.x.iter().copied().filter(|value| value.is_finite()).collect();
+    xs.len() >= 2 && xs.windows(2).all(|pair| pair[1] > pair[0])
+}
+
+fn open_fit(app: &SciPlotApp, graph: GraphId, layer: usize, curve: usize, which: FitWhich) -> Dialog {
+    let (xmin, xmax) = selection_text(app, graph);
+    fit_dialog(graph, layer, curve, which, xmin, xmax)
+}
+
+fn selection_text(app: &SciPlotApp, graph: GraphId) -> (String, String) {
+    app.xsel
+        .as_ref()
+        .filter(|sel| sel.graph == graph)
+        .map(|sel| {
+            (
+                crate::dialogs::number_text(Some(sel.x0.min(sel.x1))),
+                crate::dialogs::number_text(Some(sel.x0.max(sel.x1))),
+            )
+        })
+        .unwrap_or_default()
+}
+
 fn open_intersect(app: &mut SciPlotApp, graph: GraphId, layer: usize, curve: usize) {
     let count = app.project.graph(graph).and_then(|item| item.layers.get(layer)).map(|item| item.curves.len()).unwrap_or(0);
     let curve_b = if count > 1 && curve == 0 { 1 } else { 0 };
-    let (xmin, xmax) = app
+    let (xmin, xmax, constant) = app
         .xsel
         .as_ref()
         .filter(|sel| sel.graph == graph)
-        .map(|sel| (crate::dialogs::number_text(Some(sel.x0.min(sel.x1))), crate::dialogs::number_text(Some(sel.x0.max(sel.x1)))))
-        .unwrap_or_default();
+        .map(|sel| {
+            let lo = sel.x0.min(sel.x1);
+            let hi = sel.x0.max(sel.x1);
+            (
+                crate::dialogs::number_text(Some(lo)),
+                crate::dialogs::number_text(Some(hi)),
+                crate::dialogs::number_text(Some((lo + hi) / 2.0)),
+            )
+        })
+        .unwrap_or_else(|| (String::new(), String::new(), "0".into()));
     app.curve = curve;
     app.dialog = Some(Dialog::Intersect {
         graph,
@@ -611,9 +697,9 @@ fn open_intersect(app: &mut SciPlotApp, graph: GraphId, layer: usize, curve: usi
         curve_b,
         kind_a: LineChoice::Curve,
         kind_b: LineChoice::Curve,
-        value_a: "0".into(),
-        value_b: "0".into(),
-        smooth: false,
+        value_a: constant.clone(),
+        value_b: constant,
+        smooth: x_is_strictly_increasing(app, graph, layer, curve),
         xmin,
         xmax,
         tol: "1e-8".into(),

@@ -14,23 +14,37 @@ pub fn show(app: &mut SciPlotApp, ctx: &egui::Context) {
     };
     let title = title_of(&dialog);
     let mut open = true;
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        open = false;
+        app.pending_after = None;
+        app.confirm_style = false;
+    }
     let mut stay = true;
+    let screen = ctx.screen_rect();
+    let pos = egui::pos2((screen.center().x - 240.0).max(12.0), screen.top() + 64.0);
     egui::Window::new(title)
         .open(&mut open)
+        .collapsible(false)
         .resizable(true)
-        .default_width(440.0)
+        .default_pos(pos)
+        .default_width(480.0)
         .show(ctx, |ui| {
             stay = ui_of(app, ui, &mut dialog);
         });
     if open && stay {
         app.dialog = Some(dialog);
+    } else {
+        app.confirm_style = false;
     }
 }
 
 fn title_of(dialog: &Dialog) -> String {
     match dialog {
-        Dialog::Message(_) => "结果".into(),
-        Dialog::Quit => "退出 SciPlot".into(),
+        Dialog::Message { title, .. } => title.clone(),
+        Dialog::Unsaved { then } => match then {
+            crate::app::AfterSave::Quit => "退出 SciPlot".into(),
+            _ => "未保存的修改".into(),
+        },
         Dialog::Help => "公式说明".into(),
         Dialog::About => "关于".into(),
         Dialog::Path { action, .. } => match action {
@@ -59,15 +73,13 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::Function { .. } => "函数曲线或曲面".into(),
         Dialog::AddCurve { .. } => "添加到当前图".into(),
         Dialog::Prefs(_) => "默认样式与字体".into(),
+        Dialog::ImportInstead { .. } => "这不是项目文件".into(),
     }
 }
 
 fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
     match dialog {
-        Dialog::Message(text) => {
-            ui.label(text.as_str());
-            button_closes(ui, "关闭")
-        }
+        Dialog::Message { title, text } => message_dialog(app, ui, title, text),
         Dialog::Help => {
             ui.label(i18n::FORMULA_HELP);
             button_closes(ui, "关闭")
@@ -76,9 +88,9 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             ui.label(i18n::ABOUT);
             button_closes(ui, "关闭")
         }
-        Dialog::Quit => quit(app, ui),
+        Dialog::Unsaved { then } => unsaved(app, ui, then),
         Dialog::Path { action, path, extra } => path_dialog(app, ui, *action, path, extra),
-        Dialog::Formula { table, column, expr } => formula(app, ui, *table, *column, expr),
+        Dialog::Formula { table, column, expr, error, warning } => formula(app, ui, *table, *column, expr, error, warning),
         Dialog::MatrixFormula { matrix, expr } => matrix_formula(app, ui, *matrix, expr),
         Dialog::NewMatrix { name, rows, cols } => new_matrix(app, ui, name, rows, cols),
         Dialog::ColumnProps { table, column } => column_props(app, ui, *table, *column),
@@ -93,7 +105,9 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         Dialog::Intersect { graph, layer, curve_a, curve_b, kind_a, kind_b, value_a, value_b, smooth, xmin, xmax, tol } => {
             intersect_dialog(app, ui, *graph, *layer, curve_a, curve_b, kind_a, kind_b, value_a, value_b, smooth, xmin, xmax, tol)
         }
-        Dialog::Fit { graph, layer, curve, which, degree, expr, initial } => fit_dialog(app, ui, *graph, *layer, curve, which, degree, expr, initial),
+        Dialog::Fit { graph, layer, curve, which, degree, expr, initial, xmin, xmax } => {
+            fit_dialog(app, ui, *graph, *layer, curve, which, degree, expr, initial, xmin, xmax)
+        }
         Dialog::Range { graph, layer, curve, op, a, b, n, method, window, order, sg, highpass } => {
             range_dialog(app, ui, *graph, *layer, curve, *op, a, b, n, method, window, order, sg, highpass)
         }
@@ -102,7 +116,66 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         }
         Dialog::AddCurve { graph, table, kind } => add_curve(app, ui, *graph, table, kind),
         Dialog::Prefs(prefs) => prefs_dialog(app, ui, prefs),
+        Dialog::ImportInstead { path } => import_instead(app, ui, path),
     }
+}
+
+fn message_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, title: &str, text: &str) -> bool {
+    ui.label(text);
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if ui.button("复制").clicked() {
+            match arboard::Clipboard::new().and_then(|mut clip| clip.set_text(text.to_string())) {
+                Ok(()) => app.status = "已复制到剪贴板".into(),
+                Err(err) => app.status = format!("剪贴板不可用：{err}"),
+            }
+        }
+        if title == "统计" && ui.button("写入新表").clicked() {
+            if let Some(id) = app.edit("写入统计", |project| Ok(stats_table(project, text))) {
+                app.open_tab(crate::app::Tab::Table(id));
+                app.status = "统计已写入新表".into();
+                stay = false;
+            }
+        }
+        if ui.button("关闭").clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn stats_table(project: &mut sciplot_core::Project, text: &str) -> sciplot_core::TableId {
+    let id = project.new_table("统计");
+    let table = project.table_mut(id).unwrap();
+    table.columns.clear();
+    table.add_column("项目", sciplot_core::ColumnMode::X);
+    table.add_column("数值", sciplot_core::ColumnMode::Y);
+    for line in text.lines().skip(1) {
+        let Some((name, value)) = line.trim().split_once('=') else { continue };
+        let row = table.nrows();
+        table.ensure_rows(row + 1);
+        table.columns[0].set_text(row, name.trim());
+        table.columns[1].set_text(row, value.trim());
+    }
+    id
+}
+
+fn import_instead(app: &mut SciPlotApp, ui: &mut egui::Ui, path: &str) -> bool {
+    ui.label("这个文件是表格，不是 SciPlot 项目（.splot）。");
+    ui.label("可以改成导入 CSV，成为一张新表。");
+    ui.label(path);
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if ui.button("导入为表格").clicked() {
+            let path = path.to_string();
+            app.perform_path(PathAction::ImportCsv, &path, "");
+            stay = false;
+        }
+        if ui.button("取消").clicked() {
+            stay = false;
+        }
+    });
+    stay
 }
 
 fn button_closes(ui: &mut egui::Ui, label: &str) -> bool {
@@ -166,13 +239,24 @@ fn prefs_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, prefs: &mut crate::pref
         }
     });
     ui.separator();
+    ui.label("「用到当前图」会改掉正在看的这张图，和「保存」是两件事。");
+    if app.confirm_style {
+        ui.colored_label(egui::Color32::from_rgb(140, 90, 0), "确定把默认样式套到当前图吗？已有曲线的线宽、颜色和字号会被换掉。");
+    }
     let mut stay = true;
     ui.horizontal(|ui| {
         if ui.button("保存").clicked() {
             store_prefs(app, prefs, ui.ctx());
+            app.confirm_style = false;
             stay = false;
         }
-        if ui.button("用到当前图").clicked() {
+        if ui.button("关闭").clicked() {
+            app.confirm_style = false;
+            stay = false;
+        }
+    });
+    if app.confirm_style {
+        if ui.button("确定套用到当前图").clicked() {
             store_prefs(app, prefs, ui.ctx());
             if let Some(id) = app.active_graph() {
                 let stored = app.prefs.clone();
@@ -184,12 +268,12 @@ fn prefs_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, prefs: &mut crate::pref
             } else {
                 app.status = "当前没有打开的图形".into();
             }
+            app.confirm_style = false;
             stay = false;
         }
-        if ui.button("关闭").clicked() {
-            stay = false;
-        }
-    });
+    } else if ui.button("用到当前图…").clicked() {
+        app.confirm_style = true;
+    }
     stay
 }
 
@@ -215,23 +299,28 @@ fn size_row(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f32, max: f32)
     });
 }
 
-fn quit(app: &mut SciPlotApp, ui: &mut egui::Ui) -> bool {
-    ui.label("当前项目有未保存的修改。");
+fn unsaved(app: &mut SciPlotApp, ui: &mut egui::Ui, then: &crate::app::AfterSave) -> bool {
+    let quitting = matches!(then, crate::app::AfterSave::Quit);
+    ui.label(if quitting { "当前项目有未保存的修改。要先保存再退出吗？" } else { "当前项目有未保存的修改。" });
     let mut stay = true;
     ui.horizontal(|ui| {
-        if ui.button("保存并退出").clicked() {
-            if app.save_current() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-            } else if matches!(app.dialog, Some(Dialog::Path { .. })) {
+        let save_label = if quitting { "保存并退出" } else { "保存" };
+        let drop_label = if quitting { "不保存退出" } else { "不保存" };
+        if ui.button(save_label).clicked() {
+            let saved = app.save_current();
+            let asking_path = matches!(app.dialog, Some(Dialog::Path { .. }));
+            if saved || asking_path {
+                app.pending_after = Some(then.clone());
                 stay = false;
             }
         }
-        if ui.button("不保存退出").clicked() {
+        if ui.button(drop_label).clicked() {
             app.dirty = false;
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            app.pending_after = Some(then.clone());
             stay = false;
         }
         if ui.button("取消").clicked() {
+            app.pending_after = None;
             stay = false;
         }
     });
@@ -240,32 +329,132 @@ fn quit(app: &mut SciPlotApp, ui: &mut egui::Ui) -> bool {
 
 fn path_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, action: PathAction, path: &mut String, extra: &mut String) -> bool {
     ui.label("路径");
-    ui.text_edit_singleline(path);
+    ui.add(egui::TextEdit::singleline(path).desired_width(ui.available_width().max(420.0)));
+    if std::env::var("SCIPLOT_NO_DIALOG").is_err() && ui.button("浏览…").clicked() {
+        let name = std::path::Path::new(path.as_str()).file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+        if let Some(picked) = crate::app::native_dialog(app, action, &name) {
+            *path = picked.display().to_string();
+        }
+    }
+    if matches!(action, PathAction::ImportCsv | PathAction::ExportCsv) {
+        ui.label(if matches!(action, PathAction::ImportCsv) {
+            "编码。自动会先按 UTF-8 读，读不了再按 GBK。"
+        } else {
+            "编码。自动和 UTF-8 都会写出带 BOM 的 UTF-8，Excel 能直接打开。"
+        });
+        egui::ComboBox::from_id_salt("csv-encoding").selected_text(app.prefs.csv_encoding.label()).show_ui(ui, |ui| {
+            for item in sciplot_core::CsvEncoding::all() {
+                ui.selectable_value(&mut app.prefs.csv_encoding, *item, item.label());
+            }
+        });
+    }
     if matches!(action, PathAction::ExportPng) {
         ui.label("分辨率 DPI");
         ui.text_edit_singleline(extra);
     }
-    if ui.button("确定").clicked() {
-        app.perform_path(action, path, extra);
-        return false;
-    }
-    true
+    let target = crate::app::resolve_user_path(app, path);
+    let verb = if matches!(action, PathAction::Open | PathAction::ImportCsv) { "将读取" } else { "将写入" };
+    ui.label(format!("{verb}：{}", target.display()));
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if ui.button("确定").clicked() {
+            app.perform_path(action, path, extra);
+            stay = false;
+        }
+        if ui.button("取消").clicked() {
+            app.status = "已取消".into();
+            stay = false;
+        }
+    });
+    stay
 }
 
-fn formula(app: &mut SciPlotApp, ui: &mut egui::Ui, table: sciplot_core::TableId, column: usize, expr: &mut String) -> bool {
-    ui.label("例如 sin(col(\"X\"))*2 。整数除法会截断，小数请写 1.0/2。");
-    ui.text_edit_singleline(expr);
-    if ui.button("计算并写入列").clicked() {
-        let formula = expr.clone();
-        if app.edit("列公式", |project| {
-            let table = project.table_mut(table).ok_or("找不到表格")?;
-            sciplot_core::apply_formula(table, column, &formula).map(|_| ())
-        }).is_some() {
-            app.status = "列公式已计算".into();
-            return false;
+fn formula(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    table: sciplot_core::TableId,
+    column: usize,
+    expr: &mut String,
+    error: &mut String,
+    warning: &mut String,
+) -> bool {
+    let hint = formula_hint(app, table);
+    ui.label(hint);
+    if let Some(current) = app.project.table(table).and_then(|item| item.columns.get(column)) {
+        ui.label(format!("写入列：{}（{}）", current.name, current.ty.label()));
+    }
+    if let Some(table) = app.project.table(table) {
+        let listed: Vec<String> = table.columns.iter().map(|column| format!("{}（{}）", column.name, column.ty.label())).collect();
+        if !listed.is_empty() {
+            ui.label(format!("可用的列：{}", listed.join("、")));
         }
     }
-    true
+    ui.label("整数除法会截断，需要小数时写成 1.0/2。");
+    ui.text_edit_singleline(expr);
+    if !error.is_empty() {
+        ui.colored_label(egui::Color32::from_rgb(176, 32, 32), error.as_str());
+    }
+    if !warning.is_empty() {
+        ui.colored_label(egui::Color32::from_rgb(140, 90, 0), warning.as_str());
+    }
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if ui.button("计算并写入列").clicked() {
+            let formula = expr.clone();
+            let outcome = app.edit("列公式", |project| {
+                let table = project.table_mut(table).ok_or("找不到表格")?;
+                sciplot_core::apply_formula(table, column, &formula)
+            });
+            match outcome {
+                Some(evaluated) if evaluated.values.iter().all(|value| value.is_none()) => {
+                    error.clear();
+                    *warning = "结果全为空：所引用的列可能是文本列，或列名不对。".into();
+                    app.status = warning.clone();
+                }
+                Some(evaluated) => {
+                    error.clear();
+                    warning.clear();
+                    if evaluated.warnings > 0 {
+                        let detail = evaluated.first_error.as_deref().map(sciplot_core::explain_error).unwrap_or_default();
+                        *warning = format!("有 {} 行没有得到数值。{detail}", evaluated.warnings);
+                        app.status = warning.clone();
+                    } else {
+                        app.status = "列公式已计算".into();
+                        stay = false;
+                    }
+                }
+                None => {
+                    warning.clear();
+                    *error = sciplot_core::explain_error(&app.status);
+                    app.status = error.clone();
+                }
+            }
+        }
+        if ui.button("取消").clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn formula_hint(app: &SciPlotApp, table: sciplot_core::TableId) -> String {
+    let Some(table) = app.project.table(table) else {
+        return "例如 col(\"X\")*2".into();
+    };
+    let numeric = table.columns.iter().find(|column| {
+        column.ty == sciplot_core::ColumnType::Numeric && column.numbers.iter().any(|value| value.is_some())
+    });
+    let x_col = table
+        .columns
+        .iter()
+        .find(|column| column.mode == sciplot_core::ColumnMode::X && column.ty == sciplot_core::ColumnType::Numeric);
+    if let Some(column) = x_col.or(numeric) {
+        format!("例如 col(\"{}\")*2", column.name)
+    } else if let Some(column) = table.columns.first() {
+        format!("这一列「{}」是{}，不能直接做乘法。", column.name, column.ty.label())
+    } else {
+        "例如 col(\"X\")*2".into()
+    }
 }
 
 fn matrix_formula(app: &mut SciPlotApp, ui: &mut egui::Ui, matrix: sciplot_core::MatrixId, expr: &mut String) -> bool {
@@ -280,7 +469,7 @@ fn matrix_formula(app: &mut SciPlotApp, ui: &mut egui::Ui, matrix: sciplot_core:
             return false;
         }
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn new_matrix(app: &mut SciPlotApp, ui: &mut egui::Ui, name: &mut String, rows: &mut String, cols: &mut String) -> bool {
@@ -300,7 +489,7 @@ fn new_matrix(app: &mut SciPlotApp, ui: &mut egui::Ui, name: &mut String, rows: 
             return false;
         }
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn column_props(app: &mut SciPlotApp, ui: &mut egui::Ui, table: sciplot_core::TableId, column: usize) -> bool {
@@ -309,9 +498,9 @@ fn column_props(app: &mut SciPlotApp, ui: &mut egui::Ui, table: sciplot_core::Ta
         return true;
     };
     ui.label(format!("当前：{} / {} / {}", current.name, current.ty.label(), current.mode.label()));
-    ui.label("改名、类型和角色后点应用。名称留在表格里直接改也可以。");
-    if ui.button("应用为数值列").clicked() {
-        apply_column(app, table, column, ColumnType::Numeric, None);
+    ui.label("点下面的类型或角色，会立刻改这一列。名称可以在表头左边的表格名称旁改列名。");
+    if ui.button(format!("设为{}", current.ty.label())).clicked() {
+        apply_column(app, table, column, current.ty, None);
     }
     ui.horizontal(|ui| {
         for ty in ColumnType::all() {
@@ -327,7 +516,7 @@ fn column_props(app: &mut SciPlotApp, ui: &mut egui::Ui, table: sciplot_core::Ta
             }
         }
     });
-    true
+    !ui.button("取消").clicked()
 }
 
 fn apply_column(app: &mut SciPlotApp, table: sciplot_core::TableId, column: usize, ty: ColumnType, mode: Option<ColumnMode>) {
@@ -355,7 +544,8 @@ fn sort_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, table: sciplot_core::Tab
             ui.selectable_value(column, index, name);
         }
     });
-    ui.checkbox(ascending, "升序");
+    ui.radio_value(ascending, true, "升序");
+    ui.radio_value(ascending, false, "降序");
     if ui.button("排序").clicked() {
         let column = *column;
         let ascending = *ascending;
@@ -367,7 +557,7 @@ fn sort_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, table: sciplot_core::Tab
             return false;
         }
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -411,7 +601,7 @@ fn axis_dialog(
         });
         app.status = "已更新坐标轴".into();
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn legend_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::GraphId, layer: usize, legend: &mut sciplot_core::Legend) -> bool {
@@ -429,7 +619,7 @@ fn legend_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::G
         });
         app.status = "已更新图例".into();
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn title_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::GraphId, layer: usize, title: &mut String, size: &mut String) -> bool {
@@ -448,7 +638,7 @@ fn title_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::Gr
         });
         app.status = "已更新标题".into();
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn style_dialog(
@@ -474,7 +664,10 @@ fn style_dialog(
     });
     ui.add(egui::Slider::new(&mut style.line_width, 0.4..=8.0).text("线宽"));
     ui.add(egui::Slider::new(&mut style.symbol_size, 2.0..=18.0).text("符号"));
-    ui.add(egui::Slider::new(&mut style.histogram_bins, 2..=80).text("直方图箱数"));
+    let kind = app.project.graph(graph).and_then(|item| item.layers.get(layer)).and_then(|item| item.curves.get(curve)).map(|item| item.kind);
+    if kind == Some(CurveKind::Histogram) {
+        ui.add(egui::Slider::new(&mut style.histogram_bins, 2..=80).text("直方图箱数"));
+    }
     color_sliders(ui, &mut style.color);
     if ui.button("应用").clicked() {
         let style = style.clone();
@@ -487,7 +680,7 @@ fn style_dialog(
         });
         app.status = "已更新曲线样式".into();
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn color_sliders(ui: &mut egui::Ui, color: &mut [u8; 4]) {
@@ -522,7 +715,7 @@ fn frame_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::Gr
         });
         app.status = "已更新图层位置".into();
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn text_ann(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::GraphId, layer: usize, x: &mut String, y: &mut String, text: &mut String) -> bool {
@@ -540,7 +733,7 @@ fn text_ann(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::GraphI
         app.status = "已添加文本".into();
         return false;
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -576,7 +769,7 @@ fn arrow_ann(
         app.status = "已添加标注".into();
         return false;
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -605,6 +798,9 @@ fn intersect_dialog(
     labeled(ui, "X 最小（可空）", xmin);
     labeled(ui, "X 最大（可空）", xmax);
     labeled(ui, "容差", tol);
+    if let Some(text) = constant_outside(*kind_a, value_a, *kind_b, value_b, xmin, xmax) {
+        ui.colored_label(egui::Color32::from_rgb(140, 90, 0), text);
+    }
     if ui.button("计算").clicked() {
         let built_a = build_input(app, graph, layer, *kind_a, *curve_a, value_a);
         let built_b = build_input(app, graph, layer, *kind_b, *curve_b, value_b);
@@ -617,15 +813,45 @@ fn intersect_dialog(
                     tolerance: parse_opt(tol).unwrap_or(1e-8),
                 };
                 let name = format!("交点_{}_{}", a.name(), b.name());
-                if app.edit("求交点", |project| ops::apply_intersection(project, graph, layer, &name, &ops_intersect(&a, &b, &options)).map(|_| ())).is_some() {
-                    app.status = "交点已标在图上，并写入新表格".into();
+                if let Some(count) = app.edit("求交点", |project| ops::apply_intersection(project, graph, layer, &name, &ops_intersect(&a, &b, &options))) {
+                    if count == 0 {
+                        app.status = "没有找到交点，没有新建表格，也没有在图上标点".into();
+                        return true;
+                    }
+                    app.status = format!("求得 {count} 个交点，已标在图上，并写入新表格");
                     return false;
                 }
             }
             (Err(err), _) | (_, Err(err)) => app.status = err,
         }
     }
-    true
+    !ui.button("取消").clicked()
+}
+
+fn constant_outside(kind_a: LineChoice, value_a: &str, kind_b: LineChoice, value_b: &str, xmin: &str, xmax: &str) -> Option<String> {
+    let lo = parse_opt(xmin)?;
+    let hi = parse_opt(xmax)?;
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
+    let mut notes = Vec::new();
+    if kind_a == LineChoice::Vertical {
+        if let Some(value) = parse_opt(value_a) {
+            if value < lo || value > hi {
+                notes.push(format!("竖直线 x={} 在区间 [{}, {}] 外面", format_number(value), format_number(lo), format_number(hi)));
+            }
+        }
+    }
+    if kind_b == LineChoice::Vertical {
+        if let Some(value) = parse_opt(value_b) {
+            if value < lo || value > hi {
+                notes.push(format!("竖直线 x={} 在区间 [{}, {}] 外面", format_number(value), format_number(lo), format_number(hi)));
+            }
+        }
+    }
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join("。"))
+    }
 }
 
 fn ops_intersect(a: &sciplot_analysis::CurveInput, b: &sciplot_analysis::CurveInput, options: &sciplot_analysis::IntersectOptions) -> sciplot_analysis::IntersectOutput {
@@ -665,6 +891,8 @@ fn fit_dialog(
     degree: &mut String,
     expr: &mut String,
     initial: &mut String,
+    xmin: &mut String,
+    xmax: &mut String,
 ) -> bool {
     let names = curve_names(app, graph, layer);
     if names.is_empty() {
@@ -689,6 +917,9 @@ fn fit_dialog(
         labeled(ui, "表达式，例如 a*exp(-b*x)", expr);
         labeled(ui, "初值，例如 a=1, b=0.5", initial);
     }
+    ui.label("X 区间留空表示用全部点。图上 Shift 拖出的区间会填在这里。");
+    labeled(ui, "X 最小（可空）", xmin);
+    labeled(ui, "X 最大（可空）", xmax);
     if ui.button("拟合").clicked() {
         let model = match which {
             FitWhich::Linear => Ok(FitModel::Linear),
@@ -701,21 +932,24 @@ fn fit_dialog(
         match model {
             Ok(model) => {
                 let curve = *curve;
+                let x_min = parse_opt(xmin);
+                let x_max = parse_opt(xmax);
+                let title = format!("{}拟合结果", which.label());
                 let before = app.project.graph(graph).and_then(|item| item.layers.get(layer)).map(|item| item.curves.len()).unwrap_or(0);
                 let prefs = app.prefs.clone();
                 if let Some(report) = app.edit("拟合", |project| {
-                    let report = ops::fit_on_graph(project, graph, layer, curve, &model)?;
+                    let report = ops::fit_on_graph(project, graph, layer, curve, &model, x_min, x_max)?;
                     prefs.apply_curves(project, graph, layer, before);
                     Ok(report)
                 }) {
-                    app.dialog = Some(Dialog::Message(report));
+                    app.dialog = Some(Dialog::Message { title, text: report });
                     return false;
                 }
             }
             Err(err) => app.status = err,
         }
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -813,7 +1047,7 @@ fn range_dialog(
             return false;
         }
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -900,7 +1134,7 @@ fn function_dialog(
             }
         }
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn add_curve(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::GraphId, table: &mut sciplot_core::TableId, kind: &mut CurveKind) -> bool {
@@ -940,7 +1174,7 @@ fn add_curve(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: sciplot_core::Graph
             return false;
         }
     }
-    true
+    !ui.button("取消").clicked()
 }
 
 fn plot_kinds() -> &'static [CurveKind] {
