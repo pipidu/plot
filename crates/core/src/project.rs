@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
-    Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSource, SurfaceSpec, TickKind, VectorMode,
+    Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSource, SurfaceSpec, TablePlot3D, TickKind,
+    VectorMode,
 };
 use crate::matrix::Matrix;
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
@@ -207,9 +208,14 @@ impl Project {
         self.graphs
             .iter()
             .filter(|graph| {
-                graph.layers.iter().any(|layer| {
+                let curve = graph.layers.iter().any(|layer| {
                     layer.curves.iter().any(|curve| matches!(curve.source, DataSource::Columns { table, .. } if table == id))
-                })
+                });
+                let surface = matches!(
+                    graph.surface.as_ref().map(|spec| &spec.source),
+                    Some(SurfaceSource::Table { table, .. }) if *table == id
+                );
+                curve || surface
             })
             .map(|graph| graph.name.clone())
             .collect()
@@ -268,6 +274,29 @@ impl Project {
             self.log_line(crate::trf!(
                 "曲线「{name}」因列被删除而移除",
                 "Curve \"{name}\" was removed because its column was deleted",
+                name = name
+            ));
+        }
+        let mut cleared = Vec::new();
+        for graph in &mut self.graphs {
+            let drop_surface = graph.surface.as_mut().is_some_and(|spec| {
+                let SurfaceSource::Table { table, column, .. } = &mut spec.source else {
+                    return false;
+                };
+                if *table != id {
+                    return false;
+                }
+                shift_index(column, at, inserted)
+            });
+            if drop_surface {
+                cleared.push(graph.name.clone());
+                graph.surface = None;
+            }
+        }
+        for name in cleared {
+            self.log_line(crate::trf!(
+                "三维图「{name}」因列被删除而去掉",
+                "3D plot \"{name}\" was removed because its column was deleted",
                 name = name
             ));
         }
@@ -605,6 +634,35 @@ impl Project {
                 ..Curve::default()
             });
         }
+        Ok(graph_id)
+    }
+
+    /// 用表格里选中的一列画三维色带、三维柱或三维轨迹。
+    pub fn plot_table_surface(&mut self, table_id: TableId, column: usize, kind: TablePlot3D) -> Result<GraphId, String> {
+        let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
+        let data = crate::column_3d(table, column, kind)?;
+        let title = crate::trf!(
+            "{table}-{kind}",
+            "{table}-{kind}",
+            table = table.name,
+            kind = kind.label()
+        );
+        let graph_id = self.plot_surface(
+            SurfaceSource::Table {
+                table: table_id,
+                column,
+                kind,
+            },
+            SurfaceMode::Surface,
+            &title,
+        );
+        let shown = data.z_name;
+        self.log_line(crate::trf!(
+            "已用列「{shown}」绘制{kind}。",
+            "Plotted {kind} from column \"{shown}\".",
+            shown = shown,
+            kind = kind.label()
+        ));
         Ok(graph_id)
     }
 
@@ -991,6 +1049,28 @@ mod tests {
         project.remove_table_column(table_id, 2).unwrap();
         assert!(project.graph(graph_id).unwrap().layers[0].curves.is_empty());
         assert!(project.log.iter().any(|line| line.contains("因列被删除而移除")));
+    }
+
+    #[test]
+    fn table_surface_follows_the_selected_column() {
+        let mut project = Project::new("p");
+        let table_id = project.new_table("t");
+        {
+            let table = project.table_mut(table_id).unwrap();
+            table.columns[0].set_numbers(&[0.0, 1.0, 2.0]);
+            table.columns[1].set_numbers(&[1.0, 2.0, 3.0]);
+        }
+        let graph_id = project.plot_table_surface(table_id, 1, TablePlot3D::Trajectory).unwrap();
+        project.insert_table_column(table_id, 0, "备注", ColumnMode::None).unwrap();
+        match &project.graph(graph_id).unwrap().surface.as_ref().unwrap().source {
+            SurfaceSource::Table { column, kind, .. } => {
+                assert_eq!(*column, 2);
+                assert_eq!(*kind, TablePlot3D::Trajectory);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        project.remove_table_column(table_id, 2).unwrap();
+        assert!(project.graph(graph_id).unwrap().surface.is_none());
     }
 
     #[test]

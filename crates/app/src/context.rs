@@ -1,12 +1,12 @@
 //! 右键菜单。对象上的操作放在这里，菜单栏只保留项目级命令。
 
 use sciplot_core::{
-    unique_name, ColumnMode, CurveKind, GraphId, MatrixId, NoteId, SurfaceMode, TableId,
+    unique_name, ColumnMode, CurveKind, GraphId, MatrixId, NoteId, SurfaceMode, TableId, TablePlot3D,
 };
 
 use crate::app::{
     clicked_menu, fit_dialog, range_dialog, Dialog, FitWhich, LineChoice, PathAction, PlotHit,
-    RangeOp, SciPlotApp, Tab,
+    RangeOp, SciPlotApp, SignalKind, Tab,
 };
 use crate::ops;
 
@@ -332,6 +332,15 @@ pub(crate) fn table_column(
         });
     }
     plot_table_menu(app, ui, table);
+    if clicked_menu(ui, sciplot_core::tr!("卷积…", "Convolve…")) {
+        app.dialog = Some(signal_dialog(table, SignalKind::Convolve, column));
+    }
+    if clicked_menu(ui, sciplot_core::tr!("反卷积…", "Deconvolve…")) {
+        app.dialog = Some(signal_dialog(table, SignalKind::Deconvolve, column));
+    }
+    if clicked_menu(ui, sciplot_core::tr!("信号相关…", "Correlate…")) {
+        app.dialog = Some(signal_dialog(table, SignalKind::Correlate, column));
+    }
     if clicked_menu(ui, sciplot_core::t("导出 CSV…")) {
         app.open_tab(Tab::Table(table));
         crate::app::start_file(app, PathAction::ExportCsv, "");
@@ -500,7 +509,40 @@ fn plot_table_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, table: TableId) {
         if clicked_menu(ui, sciplot_core::tr!("向量角度和模长", "Vector angle and magnitude")) {
             app.plot_table_as_mode(table, CurveKind::Vector, sciplot_core::VectorMode::AngleMagnitude);
         }
+        ui.separator();
+        let column = selected_plot_column(app, table);
+        for kind in [TablePlot3D::Ribbon, TablePlot3D::Bars, TablePlot3D::Trajectory] {
+            if clicked_menu(ui, kind.label()) {
+                app.plot_table_3d(table, column, kind);
+            }
+        }
     });
+}
+
+fn selected_plot_column(app: &SciPlotApp, table: TableId) -> usize {
+    if let Some((id, column)) = app.selected_column {
+        if id == table {
+            return column;
+        }
+    }
+    app.project
+        .table(table)
+        .and_then(|item| {
+            item.columns
+                .iter()
+                .position(|column| column.mode == ColumnMode::Y || column.mode == ColumnMode::Z)
+        })
+        .unwrap_or(0)
+}
+
+fn signal_dialog(table: TableId, kind: SignalKind, column: usize) -> Dialog {
+    Dialog::Signal {
+        table,
+        kind,
+        auto: false,
+        column_a: column,
+        column_b: column.saturating_add(1),
+    }
 }
 
 fn open_wizard(app: &SciPlotApp, table: TableId) -> Dialog {
@@ -587,6 +629,11 @@ fn matrix_actions(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
         }
         if clicked_menu(ui, sciplot_core::t("三维散点")) {
             app.plot_surface_as(id, SurfaceMode::Scatter);
+        }
+        for mode in [SurfaceMode::HiddenLines, SurfaceMode::Polygons, SurfaceMode::WireSurface] {
+            if clicked_menu(ui, mode.label()) {
+                app.plot_surface_as(id, mode);
+            }
         }
     });
 }
@@ -738,11 +785,7 @@ fn surface_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
         .graph(graph)
         .and_then(|item| item.surface.as_ref())
         .map(|spec| spec.mode);
-    for mode in [
-        SurfaceMode::Surface,
-        SurfaceMode::Wireframe,
-        SurfaceMode::Scatter,
-    ] {
+    for mode in SurfaceMode::all().iter().copied() {
         let label = if Some(mode) == current {
             format!("✓ {}", mode.label())
         } else {
@@ -756,6 +799,15 @@ fn surface_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
                     .ok_or(sciplot_core::t("不是三维图"))?
                     .mode = mode;
                 Ok(())
+            });
+        }
+    }
+    if clicked_menu(ui, sciplot_core::tr!("三维设置…", "3D settings…")) {
+        if let Some(spec) = app.project.graph(graph).and_then(|item| item.surface.clone()) {
+            app.dialog = Some(Dialog::SurfaceSettings {
+                graph,
+                mode: spec.mode,
+                point_style: spec.point_style,
             });
         }
     }
@@ -931,14 +983,35 @@ fn analysis_menu(
         if clicked_menu(ui, sciplot_core::t("指数拟合…")) {
             app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Exp));
         }
+        if clicked_menu(ui, sciplot_core::tr!("一阶指数衰减…", "Exponential decay, 1st order…")) {
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::ExpDecay1));
+        }
+        if clicked_menu(ui, sciplot_core::tr!("二阶指数衰减…", "Exponential decay, 2nd order…")) {
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::ExpDecay2));
+        }
+        if clicked_menu(ui, sciplot_core::tr!("三阶指数衰减…", "Exponential decay, 3rd order…")) {
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::ExpDecay3));
+        }
+        if clicked_menu(ui, sciplot_core::tr!("指数增长…", "Exponential growth…")) {
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::ExpGrowth));
+        }
+        if clicked_menu(ui, sciplot_core::tr!("Boltzmann 拟合…", "Boltzmann fit…")) {
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Boltzmann));
+        }
         if clicked_menu(ui, sciplot_core::t("高斯拟合…")) {
             app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Gauss));
         }
         if clicked_menu(ui, sciplot_core::t("洛伦兹拟合…")) {
             app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Lorentz));
         }
+        if clicked_menu(ui, sciplot_core::tr!("多峰拟合…", "Multi-peak fit…")) {
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::MultiPeak));
+        }
         if clicked_menu(ui, sciplot_core::t("自定义拟合…")) {
             app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Custom));
+        }
+        if clicked_menu(ui, sciplot_core::tr!("拟合插件…", "Fit plugin…")) {
+            app.dialog = Some(open_fit(app, graph, layer, curve, FitWhich::Plugin));
         }
         ui.separator();
         if clicked_menu(ui, sciplot_core::t("微分")) {
@@ -976,6 +1049,12 @@ fn analysis_menu(
         }
         if clicked_menu(ui, sciplot_core::t("FFT 滤波…")) {
             app.dialog = Some(range_dialog(graph, layer, curve, RangeOp::Filter));
+        }
+        if clicked_menu(ui, sciplot_core::tr!("FFT…", "FFT…")) {
+            app.dialog = Some(fft_dialog(graph, layer, curve, false));
+        }
+        if clicked_menu(ui, sciplot_core::tr!("逆 FFT…", "Inverse FFT…")) {
+            app.dialog = Some(fft_dialog(graph, layer, curve, true));
         }
         ui.separator();
         if clicked_menu(ui, sciplot_core::t("求交点…")) {
@@ -1123,14 +1202,30 @@ fn x_is_strictly_increasing(app: &SciPlotApp, graph: GraphId, layer: usize, curv
 }
 
 fn open_fit(
-    app: &SciPlotApp,
+    app: &mut SciPlotApp,
     graph: GraphId,
     layer: usize,
     curve: usize,
     which: FitWhich,
 ) -> Dialog {
+    if which == FitWhich::Plugin {
+        app.reload_fit_plugins();
+    }
     let (xmin, xmax) = selection_text(app, graph);
     fit_dialog(graph, layer, curve, which, xmin, xmax)
+}
+
+fn fft_dialog(graph: GraphId, layer: usize, curve: usize, inverse: bool) -> Dialog {
+    Dialog::Fft {
+        graph,
+        layer,
+        curve,
+        inverse,
+        normalize: true,
+        shift: false,
+        imag: String::new(),
+        dt: String::new(),
+    }
 }
 
 fn selection_text(app: &SciPlotApp, graph: GraphId) -> (String, String) {

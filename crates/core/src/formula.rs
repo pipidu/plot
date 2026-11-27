@@ -904,6 +904,95 @@ fn escape_formula_string(name: &str) -> String {
     out
 }
 
+/// 备注里的一行求值结果。`line` 从 1 开始。
+#[derive(Clone, Debug)]
+pub struct NoteLine {
+    pub line: usize,
+    pub source: String,
+    pub output: String,
+    pub ok: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct NoteRun {
+    pub lines: Vec<NoteLine>,
+}
+
+/// 用现有公式引擎逐行求值。`名字 = 表达式` 会记住这个数，后面的行可以用它。
+/// 空行、`#` 和 `//` 跳过。这里没有表格，也不能跑 Python。
+pub fn eval_note(text: &str) -> NoteRun {
+    let mut lines = Vec::new();
+    let mut vars: Vec<(String, f64)> = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let source = raw.trim();
+        if source.is_empty() || source.starts_with('#') || source.starts_with("//") {
+            continue;
+        }
+        let (name, expr) = split_assignment(source);
+        let borrowed: Vec<(&str, f64)> = vars.iter().map(|(key, value)| (key.as_str(), *value)).collect();
+        match CompiledExpr::compile(expr).and_then(|compiled| compiled.eval(&borrowed)) {
+            Ok(value) => {
+                if let Some(name) = name {
+                    if let Some(slot) = vars.iter_mut().find(|(key, _)| key == name) {
+                        slot.1 = value;
+                    } else {
+                        vars.push((name.to_string(), value));
+                    }
+                }
+                lines.push(NoteLine {
+                    line: index + 1,
+                    source: source.to_string(),
+                    output: format!("{value}"),
+                    ok: true,
+                });
+            }
+            Err(err) => lines.push(NoteLine {
+                line: index + 1,
+                source: source.to_string(),
+                output: err,
+                ok: false,
+            }),
+        }
+    }
+    NoteRun { lines }
+}
+
+fn split_assignment(source: &str) -> (Option<&str>, &str) {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let start = index;
+    if index >= bytes.len() || !is_ident_start(bytes[index] as char) {
+        return (None, source);
+    }
+    index += 1;
+    while index < bytes.len() && is_note_ident(bytes[index] as char) {
+        index += 1;
+    }
+    let name_end = index;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index >= bytes.len() || bytes[index] != b'=' {
+        return (None, source);
+    }
+    let next = bytes.get(index + 1).copied();
+    if matches!(next, Some(b'=') | Some(b'!') | Some(b'<') | Some(b'>')) {
+        return (None, source);
+    }
+    let expr = source[index + 1..].trim();
+    if expr.is_empty() {
+        return (None, source);
+    }
+    (Some(&source[start..name_end]), expr)
+}
+
+fn is_note_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
 fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
@@ -916,6 +1005,17 @@ fn is_ident_continue(c: char) -> bool {
 mod tests {
     use super::*;
     use crate::table::{ColumnMode, Table, TableId};
+
+    #[test]
+    fn note_evaluates_assignments_and_skips_comments() {
+        let run = eval_note("1+2\n# 说明\na = 3\na*4\n// 再来一行\n");
+        assert_eq!(run.lines.len(), 3);
+        assert_eq!(run.lines[0].output, "3");
+        assert!(run.lines[1].ok);
+        assert_eq!(run.lines[2].output, "12");
+        let bad = eval_note("1 = 2");
+        assert!(!bad.lines[0].ok);
+    }
 
     #[test]
     fn sin_pi_and_column_formula() {

@@ -804,7 +804,13 @@ impl Default for Layer {
 pub enum SurfaceMode {
     #[default]
     Surface,
+    /// 填色多边形，不加光照。
+    Polygons,
     Wireframe,
+    /// 用画家算法挡住被挡住的网格线。
+    HiddenLines,
+    /// 填色多边形上再画网格。
+    WireSurface,
     Scatter,
 }
 
@@ -812,7 +818,10 @@ impl SurfaceMode {
     pub fn label(self) -> &'static str {
         match self {
             SurfaceMode::Surface => tr!("曲面", "Surface"),
+            SurfaceMode::Polygons => tr!("多边形", "Polygons"),
             SurfaceMode::Wireframe => tr!("线框", "Wireframe"),
+            SurfaceMode::HiddenLines => tr!("隐藏线", "Hidden lines"),
+            SurfaceMode::WireSurface => tr!("网格曲面", "Wire surface"),
             SurfaceMode::Scatter => tr!("散点", "Scatter"),
         }
     }
@@ -820,9 +829,60 @@ impl SurfaceMode {
     pub fn all() -> &'static [SurfaceMode] {
         &[
             SurfaceMode::Surface,
+            SurfaceMode::Polygons,
             SurfaceMode::Wireframe,
+            SurfaceMode::HiddenLines,
+            SurfaceMode::WireSurface,
             SurfaceMode::Scatter,
         ]
+    }
+}
+
+/// 散点模式下的点样式。圆点是原来的样子。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SurfacePointStyle {
+    #[default]
+    Dot,
+    Cross,
+    Cone,
+    Bar,
+}
+
+impl SurfacePointStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            SurfacePointStyle::Dot => tr!("圆点", "Dots"),
+            SurfacePointStyle::Cross => tr!("十字", "Cross"),
+            SurfacePointStyle::Cone => tr!("锥体", "Cone"),
+            SurfacePointStyle::Bar => tr!("竖线", "Vertical bar"),
+        }
+    }
+
+    pub fn all() -> &'static [SurfacePointStyle] {
+        &[
+            SurfacePointStyle::Dot,
+            SurfacePointStyle::Cross,
+            SurfacePointStyle::Cone,
+            SurfacePointStyle::Bar,
+        ]
+    }
+}
+
+/// 表格里选中一列之后的三维图。色带、柱和轨迹都只认这一列。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TablePlot3D {
+    Ribbon,
+    Bars,
+    Trajectory,
+}
+
+impl TablePlot3D {
+    pub fn label(self) -> &'static str {
+        match self {
+            TablePlot3D::Ribbon => tr!("三维色带", "3D ribbons"),
+            TablePlot3D::Bars => tr!("三维柱", "3D bars"),
+            TablePlot3D::Trajectory => tr!("三维轨迹", "3D trajectory"),
+        }
     }
 }
 
@@ -836,6 +896,12 @@ pub enum SurfaceSource {
         y_min: f64,
         y_max: f64,
         n: usize,
+    },
+    /// 表格中选中的一列。`column` 是 Z。
+    Table {
+        table: TableId,
+        column: usize,
+        kind: TablePlot3D,
     },
 }
 
@@ -863,6 +929,7 @@ pub struct SurfaceSpec {
     #[serde(default = "default_true")]
     pub perspective: bool,
     pub title: String,
+    pub point_style: SurfacePointStyle,
 }
 
 impl Default for SurfaceSpec {
@@ -875,6 +942,7 @@ impl Default for SurfaceSpec {
             zoom: 1.0,
             perspective: true,
             title: crate::locale::t("三维图").to_string(),
+            point_style: SurfacePointStyle::Dot,
         }
     }
 }

@@ -54,6 +54,8 @@ const FORMULA_HELP_ZH: &str = "\
 某一格可以有自己的公式，计算时盖过这一列的公式。表格工具栏或右键菜单里的「公式编辑模式」会在格子里显示公式。以 = 开头的文本在离开格子时也会当成公式。
 
 例如：sin(col(\"X\")) * 2
+
+备注也可以当计算器。打开备注后点「运行备注」：每一行是一个表达式，`名字 = 表达式` 会记住这个数，后面的行可以用它。空行、# 和 // 会跳过。这用的是同一套公式引擎，不是 Python，也不能在备注里用 col() 读表格。
 ";
 
 const FORMULA_HELP_EN: &str = "\
@@ -80,6 +82,8 @@ Column formulas can also use:
 A cell can have its own formula, which overrides the column formula. Formula edit mode, on the table toolbar or the context menu, shows those formulas in the cells. Text that starts with = is also treated as a formula when you leave the cell.
 
 Example: sin(col(\"X\")) * 2
+
+A note can also be used as a calculator. Open it and choose Run note. Each line is an expression, and `name = expression` remembers the number for later lines. Blank lines, #, and // are skipped. This is the same formula engine, not Python, and a note cannot use col() to read a table.
 ";
 
 pub fn formula_help() -> &'static str {

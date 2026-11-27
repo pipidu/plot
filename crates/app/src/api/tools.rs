@@ -2,10 +2,12 @@
 
 use std::path::Path;
 
-use sciplot_analysis::{intersect, FitModel, IntersectMode, IntersectOptions};
+use sciplot_analysis::{
+    intersect, FitAlgorithm, FitModel, FitOptions, IntersectMode, IntersectOptions, Weighting,
+};
 use sciplot_core::{
     apply_formula, parse_initials, unique_name, Axis, AxisScale, ColumnMode, Curve, CurveKind,
-    CurveStyle, DataSource, GraphId, LegendPos, Project, Table, TableId,
+    CurveStyle, DataSource, GraphId, LegendPos, Project, Table, TableId, TablePlot3D,
 };
 use sciplot_plot::GlyphFont;
 use serde_json::{json, Map, Value};
@@ -156,7 +158,7 @@ pub fn list() -> Vec<ToolSpec> {
         ),
         spec(
             "fit_curve",
-            "拟合一条曲线，并把拟合函数画到同一张图上。model 可以是 linear、polynomial、exponential、gaussian、lorentzian、custom。Fit a curve and draw the fit on the same graph.",
+            "拟合一条曲线，并把拟合函数画到同一张图上。model 可以是 linear、polynomial、exponential、exp_decay1、exp_decay2、exp_decay3、exp_growth、boltzmann、gaussian、lorentzian、multi_gaussian、multi_lorentzian、custom、plugin。Fit a curve and draw the fit on the same graph.",
             props(&[
                 ("graph", id_prop("图形名称或 id。Graph name or id.")),
                 ("curve", id_prop("曲线名，或从 1 开始的序号。Curve name or 1-based index.")),
@@ -164,10 +166,38 @@ pub fn list() -> Vec<ToolSpec> {
                 ("degree", json!({"type": "integer", "description": "多项式阶数，默认 2。Polynomial degree, default 2."})),
                 ("expr", string("自定义公式，例如 a*exp(-b*x)+c。Custom expression.")),
                 ("initial", string("自定义参数初值，例如 a=1, b=0.5。Initial values.")),
+                ("centers", json!({"type": "array", "items": {"type": "number"}, "description": "多峰的峰位。Peak centers."})),
+                ("plugin", string("插件文件路径，model 为 plugin 时使用。Path to a fit plugin.")),
+                ("weight", string("none、instrumental、statistical、dataset、direct。")),
+                ("weight_column", string("dataset 或 direct 用的列名。Column used as errors or weights.")),
+                ("algorithm", string("scaled_lm、unscaled_lm、nelder_mead。")),
+                ("tolerance", json!({"type": "number"})),
+                ("max_iterations", json!({"type": "integer"})),
                 ("x_min", json!({"type": "number"})),
                 ("x_max", json!({"type": "number"})),
             ]),
             &["graph", "curve"],
+        ),
+        spec(
+            "plot_table_3d",
+            "用表格里的一列画三维色带、三维柱或三维轨迹。kind 是 ribbon、bars 或 trajectory。Plot a table column as a 3D ribbon, bars, or trajectory.",
+            props(&[
+                ("table", id_prop("表格名称或 id。Table name or id.")),
+                ("column", id_prop("作为高度的列。Column used as Z.")),
+                ("kind", string("ribbon、bars 或 trajectory。")),
+            ]),
+            &["table", "column", "kind"],
+        ),
+        spec(
+            "signal_columns",
+            "对表格列做卷积、反卷积、互相关或自相关。kind 是 convolve、deconvolve、correlate、autocorrelate。Convolve, deconvolve, or correlate table columns.",
+            props(&[
+                ("table", id_prop("表格名称或 id。Table name or id.")),
+                ("kind", string("convolve、deconvolve、correlate 或 autocorrelate。")),
+                ("column_a", id_prop("第一列。First column.")),
+                ("column_b", id_prop("第二列。自相关可以省略。Second column. Optional for autocorrelation.")),
+            ]),
+            &["table", "kind", "column_a"],
         ),
         spec(
             "find_intersections",
@@ -256,6 +286,8 @@ pub fn dispatch(
         "add_function_curve" => add_function_curve(project, prefs, obj),
         "set_graph_options" => set_graph_options(project, obj),
         "fit_curve" => fit_curve(project, prefs, obj),
+        "plot_table_3d" => plot_table_3d(project, prefs, obj),
+        "signal_columns" => signal_columns(project, prefs, obj),
         "find_intersections" => find_intersections(project, obj),
         "render_graph" => render_graph(project, font, obj),
         "open_project" => open_project(project, obj),
@@ -815,10 +847,27 @@ fn fit_curve(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>) ->
     };
     let model_name = args.get("model").and_then(Value::as_str).unwrap_or("linear");
     let model = parse_model(model_name, args)?;
+    let mut options = parse_fit_options(args)?;
+    if matches!(model_name.trim().to_ascii_lowercase().as_str(), "plugin" | "插件") {
+        if let Some(path) = args.get("plugin").and_then(Value::as_str) {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(plugin) = sciplot_analysis::parse_fit_plugin(&text) {
+                    options.plugin_name = Some(plugin.name);
+                }
+            }
+        }
+    }
+    if matches!(options.weighting, Weighting::Dataset | Weighting::Direct) {
+        let column = args
+            .get("weight_column")
+            .and_then(Value::as_str)
+            .ok_or_else(|| sciplot_core::tr!("请给出 weight_column", "weight_column is required").to_string())?;
+        options.column = ops::weight_column(project, graph_id, 0, curve, column)?;
+    }
     let x_min = args.get("x_min").and_then(Value::as_f64);
     let x_max = args.get("x_max").and_then(Value::as_f64);
     let before = project.graph(graph_id).and_then(|graph| graph.layers.first()).map(|layer| layer.curves.len()).unwrap_or(0);
-    let report = ops::fit_on_graph(project, graph_id, 0, curve, &model, x_min, x_max)?;
+    let report = ops::fit_on_graph(project, graph_id, 0, curve, &model, x_min, x_max, &options)?;
     prefs.apply_curves(project, graph_id, 0, before);
     let mut output = ToolOutput::new(report.clone(), json!({"graph_id": graph_id.raw(), "report": report}));
     output.graph = Some(graph_id);
@@ -1174,6 +1223,104 @@ fn parse_legend(text: &str) -> Result<LegendPos, String> {
     }
 }
 
+fn plot_table_3d(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let table = find_table(project, req(args, "table")?)?;
+    let column = {
+        let table_ref = project.table(table).ok_or_else(|| sciplot_core::t("找不到表格").to_string())?;
+        find_column(table_ref, req(args, "column")?)?
+    };
+    let kind = match args.get("kind").and_then(Value::as_str).unwrap_or("ribbon").trim().to_ascii_lowercase().as_str() {
+        "ribbon" | "色带" | "三维色带" => TablePlot3D::Ribbon,
+        "bars" | "bar" | "柱" | "三维柱" => TablePlot3D::Bars,
+        "trajectory" | "line" | "轨迹" | "三维轨迹" => TablePlot3D::Trajectory,
+        other => {
+            return Err(sciplot_core::trf!("不认识的三维类型：{kind}", "Unknown 3D kind: {kind}", kind = other));
+        }
+    };
+    let graph = project.plot_table_surface(table, column, kind)?;
+    prefs.apply_new_graph(project, graph);
+    let name = project.graph(graph).map(|graph| graph.name.clone()).unwrap_or_default();
+    let mut output = ToolOutput::new(
+        sciplot_core::trf!("已绘制{kind}「{name}」。", "Plotted {kind} \"{name}\".", kind = kind.label(), name = name),
+        json!({"graph_id": graph.raw(), "name": name}),
+    );
+    output.graph = Some(graph);
+    output.open_graph = true;
+    Ok(output)
+}
+
+fn signal_columns(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let table = find_table(project, req(args, "table")?)?;
+    let kind = args.get("kind").and_then(Value::as_str).unwrap_or("correlate");
+    let column_a = {
+        let table_ref = project.table(table).ok_or_else(|| sciplot_core::t("找不到表格").to_string())?;
+        find_column(table_ref, req(args, "column_a")?)?
+    };
+    let column_b = match args.get("column_b") {
+        Some(value) if !value.is_null() => {
+            let table_ref = project.table(table).ok_or_else(|| sciplot_core::t("找不到表格").to_string())?;
+            Some(find_column(table_ref, value)?)
+        }
+        _ => None,
+    };
+    let created = ops::signal_table(project, table, kind, column_a, column_b)?;
+    let graph = project.plot_table(created, CurveKind::Line)?;
+    prefs.apply_new_graph(project, graph);
+    let name = project.table(created).map(|table| table.name.clone()).unwrap_or_default();
+    let mut output = ToolOutput::new(
+        sciplot_core::trf!("已计算「{name}」。", "Computed \"{name}\".", name = name),
+        json!({"table_id": created.raw(), "graph_id": graph.raw(), "name": name}),
+    );
+    output.table = Some(created);
+    output.graph = Some(graph);
+    output.open_table = true;
+    output.open_graph = true;
+    Ok(output)
+}
+
+fn parse_fit_options(args: &Map<String, Value>) -> Result<FitOptions, String> {
+    let weighting = match args.get("weight").and_then(Value::as_str).unwrap_or("none").trim().to_ascii_lowercase().as_str() {
+        "none" | "" | "不加权" => Weighting::None,
+        "instrumental" | "仪器" => Weighting::Instrumental,
+        "statistical" | "统计" => Weighting::Statistical,
+        "dataset" | "误差列" => Weighting::Dataset,
+        "direct" | "直接" => Weighting::Direct,
+        other => {
+            return Err(sciplot_core::trf!("不认识的权重：{name}", "Unknown weighting: {name}", name = other));
+        }
+    };
+    let algorithm = match args.get("algorithm").and_then(Value::as_str).unwrap_or("scaled_lm").trim().to_ascii_lowercase().as_str()
+    {
+        "scaled_lm" | "scaled" | "levenberg" => FitAlgorithm::ScaledLm,
+        "unscaled_lm" | "unscaled" => FitAlgorithm::UnscaledLm,
+        "nelder_mead" | "nelder" | "simplex" => FitAlgorithm::NelderMead,
+        other => {
+            return Err(sciplot_core::trf!("不认识的拟合算法：{name}", "Unknown fit algorithm: {name}", name = other));
+        }
+    };
+    let tolerance = args.get("tolerance").and_then(Value::as_f64).unwrap_or(1e-12);
+    let max_iterations = args.get("max_iterations").and_then(Value::as_u64).unwrap_or(80) as usize;
+    Ok(FitOptions {
+        weighting,
+        algorithm,
+        tolerance,
+        max_iterations: max_iterations.max(1),
+        ..FitOptions::default()
+    })
+}
+
+fn number_list(args: &Map<String, Value>, key: &str) -> Result<Vec<f64>, String> {
+    let Some(value) = args.get(key) else {
+        return Err(sciplot_core::tr!("多峰拟合需要 centers", "A multi-peak fit needs centers").into());
+    };
+    let list = value.as_array().ok_or_else(|| sciplot_core::tr!("centers 必须是数组", "centers must be an array").to_string())?;
+    let numbers: Vec<f64> = list.iter().filter_map(Value::as_f64).filter(|value| value.is_finite()).collect();
+    if numbers.is_empty() {
+        return Err(sciplot_core::tr!("centers 里没有有限数值", "centers has no finite numbers").into());
+    }
+    Ok(numbers)
+}
+
 fn parse_model(name: &str, args: &Map<String, Value>) -> Result<FitModel, String> {
     match name.trim().to_ascii_lowercase().as_str() {
         "linear" | "线性" => Ok(FitModel::Linear),
@@ -1185,8 +1332,33 @@ fn parse_model(name: &str, args: &Map<String, Value>) -> Result<FitModel, String
             Ok(FitModel::Polynomial(degree))
         }
         "exponential" | "指数" => Ok(FitModel::Exponential),
+        "exp_decay1" | "decay1" | "一阶指数衰减" => Ok(FitModel::ExpDecay1),
+        "exp_decay2" | "decay2" | "二阶指数衰减" => Ok(FitModel::ExpDecay2),
+        "exp_decay3" | "decay3" | "三阶指数衰减" => Ok(FitModel::ExpDecay3),
+        "exp_growth" | "growth" | "指数增长" => Ok(FitModel::ExpGrowth),
+        "boltzmann" | "玻尔兹曼" => Ok(FitModel::Boltzmann),
         "gaussian" | "高斯" => Ok(FitModel::Gaussian),
         "lorentzian" | "洛伦兹" => Ok(FitModel::Lorentzian),
+        "multi_gaussian" | "multigaussian" | "多峰高斯" => Ok(FitModel::MultiPeak {
+            gaussian: true,
+            centers: number_list(args, "centers")?,
+        }),
+        "multi_lorentzian" | "multilorentzian" | "多峰洛伦兹" => Ok(FitModel::MultiPeak {
+            gaussian: false,
+            centers: number_list(args, "centers")?,
+        }),
+        "plugin" | "插件" => {
+            let path = args
+                .get("plugin")
+                .and_then(Value::as_str)
+                .ok_or_else(|| sciplot_core::tr!("插件拟合需要 plugin 路径", "A plugin fit needs a plugin path").to_string())?;
+            let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+            let plugin = sciplot_analysis::parse_fit_plugin(&text)?;
+            Ok(FitModel::Custom {
+                expr: plugin.expr,
+                initial: plugin.initial,
+            })
+        }
         "custom" | "自定义" => {
             let expr = args
                 .get("expr")

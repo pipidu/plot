@@ -60,9 +60,16 @@ pub enum FitWhich {
     Linear,
     Poly,
     Exp,
+    ExpDecay1,
+    ExpDecay2,
+    ExpDecay3,
+    ExpGrowth,
+    Boltzmann,
     Gauss,
     Lorentz,
+    MultiPeak,
     Custom,
+    Plugin,
 }
 
 impl FitWhich {
@@ -71,9 +78,130 @@ impl FitWhich {
             FitWhich::Linear => tr!("线性", "Linear"),
             FitWhich::Poly => tr!("多项式", "Polynomial"),
             FitWhich::Exp => tr!("指数", "Exponential"),
+            FitWhich::ExpDecay1 => tr!("一阶指数衰减", "Exponential decay, 1st order"),
+            FitWhich::ExpDecay2 => tr!("二阶指数衰减", "Exponential decay, 2nd order"),
+            FitWhich::ExpDecay3 => tr!("三阶指数衰减", "Exponential decay, 3rd order"),
+            FitWhich::ExpGrowth => tr!("指数增长", "Exponential growth"),
+            FitWhich::Boltzmann => tr!("Boltzmann", "Boltzmann"),
             FitWhich::Gauss => tr!("高斯", "Gaussian"),
             FitWhich::Lorentz => tr!("洛伦兹", "Lorentzian"),
+            FitWhich::MultiPeak => tr!("多峰", "Multi-peak"),
             FitWhich::Custom => tr!("自定义", "Custom"),
+            FitWhich::Plugin => tr!("拟合插件", "Fit plugin"),
+        }
+    }
+
+    pub fn all() -> &'static [FitWhich] {
+        &[
+            FitWhich::Linear,
+            FitWhich::Poly,
+            FitWhich::Exp,
+            FitWhich::ExpDecay1,
+            FitWhich::ExpDecay2,
+            FitWhich::ExpDecay3,
+            FitWhich::ExpGrowth,
+            FitWhich::Boltzmann,
+            FitWhich::Gauss,
+            FitWhich::Lorentz,
+            FitWhich::MultiPeak,
+            FitWhich::Custom,
+            FitWhich::Plugin,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum WeightChoice {
+    #[default]
+    None,
+    Instrumental,
+    Statistical,
+    Dataset,
+    Direct,
+}
+
+impl WeightChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            WeightChoice::None => tr!("不加权", "No weighting"),
+            WeightChoice::Instrumental => tr!("仪器误差 1/σ²", "Instrumental 1/σ²"),
+            WeightChoice::Statistical => tr!("统计 1/|y|", "Statistical 1/|y|"),
+            WeightChoice::Dataset => tr!("数据列当作误差", "Data column as errors"),
+            WeightChoice::Direct => tr!("数据列直接作权重", "Data column as weights"),
+        }
+    }
+
+    pub fn all() -> &'static [WeightChoice] {
+        &[
+            WeightChoice::None,
+            WeightChoice::Instrumental,
+            WeightChoice::Statistical,
+            WeightChoice::Dataset,
+            WeightChoice::Direct,
+        ]
+    }
+
+    pub fn to_weighting(self) -> sciplot_analysis::Weighting {
+        match self {
+            WeightChoice::None => sciplot_analysis::Weighting::None,
+            WeightChoice::Instrumental => sciplot_analysis::Weighting::Instrumental,
+            WeightChoice::Statistical => sciplot_analysis::Weighting::Statistical,
+            WeightChoice::Dataset => sciplot_analysis::Weighting::Dataset,
+            WeightChoice::Direct => sciplot_analysis::Weighting::Direct,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterKind {
+    #[default]
+    LowPass,
+    HighPass,
+    BandPass,
+    BandStop,
+}
+
+impl FilterKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            FilterKind::LowPass => tr!("低通", "Low pass"),
+            FilterKind::HighPass => tr!("高通", "High pass"),
+            FilterKind::BandPass => tr!("带通", "Band pass"),
+            FilterKind::BandStop => tr!("带阻", "Band stop"),
+        }
+    }
+
+    pub fn all() -> &'static [FilterKind] {
+        &[
+            FilterKind::LowPass,
+            FilterKind::HighPass,
+            FilterKind::BandPass,
+            FilterKind::BandStop,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SignalKind {
+    Convolve,
+    Deconvolve,
+    Correlate,
+}
+
+impl SignalKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SignalKind::Convolve => tr!("卷积", "Convolve"),
+            SignalKind::Deconvolve => tr!("反卷积", "Deconvolve"),
+            SignalKind::Correlate => tr!("信号相关", "Correlate"),
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            SignalKind::Convolve => "convolve",
+            SignalKind::Deconvolve => "deconvolve",
+            SignalKind::Correlate => "correlate",
         }
     }
 }
@@ -326,6 +454,15 @@ pub enum Dialog {
         initial: String,
         xmin: String,
         xmax: String,
+        weight: WeightChoice,
+        weight_column: String,
+        algorithm: sciplot_analysis::FitAlgorithm,
+        tolerance: String,
+        max_iter: String,
+        peaks: String,
+        centers: String,
+        gaussian: bool,
+        plugin: usize,
     },
     Range {
         graph: GraphId,
@@ -339,7 +476,29 @@ pub enum Dialog {
         window: String,
         order: String,
         sg: bool,
-        highpass: bool,
+        filter: FilterKind,
+    },
+    Fft {
+        graph: GraphId,
+        layer: usize,
+        curve: usize,
+        inverse: bool,
+        normalize: bool,
+        shift: bool,
+        imag: String,
+        dt: String,
+    },
+    Signal {
+        table: TableId,
+        kind: SignalKind,
+        auto: bool,
+        column_a: usize,
+        column_b: usize,
+    },
+    SurfaceSettings {
+        graph: GraphId,
+        mode: SurfaceMode,
+        point_style: sciplot_core::SurfacePointStyle,
     },
     Function {
         graph: Option<GraphId>,
@@ -453,7 +612,24 @@ pub struct SciPlotApp {
     api: Option<crate::api::ApiServer>,
     /// 插入图像时记住目标图和图层。空着表示导入成强度矩阵。
     image_target: Option<(GraphId, usize)>,
+    /// 导入图像之后再画成三维曲面。
+    image_as_surface: bool,
+    pub(crate) peak_pick: Option<PeakPick>,
+    pub(crate) fit_plugins: Vec<sciplot_analysis::FitPlugin>,
+    note_result: Option<(NoteId, String)>,
     api_failed: Option<u16>,
+}
+
+pub(crate) struct PeakPick {
+    pub(crate) graph: GraphId,
+    pub(crate) layer: usize,
+    pub(crate) curve: usize,
+    pub(crate) gaussian: bool,
+    pub(crate) need: usize,
+    pub(crate) centers: Vec<f64>,
+    pub(crate) options: sciplot_analysis::FitOptions,
+    pub(crate) x_min: Option<f64>,
+    pub(crate) x_max: Option<f64>,
 }
 
 fn window_icon() -> Option<egui::IconData> {
@@ -545,6 +721,10 @@ impl SciPlotApp {
             api: None,
             api_failed: None,
             image_target: None,
+            image_as_surface: false,
+            peak_pick: None,
+            fit_plugins: Vec::new(),
+            note_result: None,
         };
         app.reload_font_silent();
         app
@@ -1228,9 +1408,12 @@ impl SciPlotApp {
             }
         };
         if let Some((graph, layer)) = self.image_target.take() {
+            self.image_as_surface = false;
             self.insert_graph_image(graph, layer, &decoded);
             return;
         }
+        let as_surface = self.image_as_surface;
+        self.image_as_surface = false;
         let name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -1240,17 +1423,39 @@ impl SciPlotApp {
         let width = decoded.width as usize;
         let height = decoded.height as usize;
         let rgba = decoded.rgba;
-        if let Some(id) = self.edit(sciplot_core::tr!("导入图像", "Import image"), move |project| {
-            project.matrix_from_rgba(&name, width, height, &rgba)
+        let prefs = self.prefs.clone();
+        if let Some((id, graph)) = self.edit(sciplot_core::tr!("导入图像", "Import image"), move |project| {
+            let id = project.matrix_from_rgba(&name, width, height, &rgba)?;
+            let graph = if as_surface {
+                let title = sciplot_core::trf!("{name}-三维", "{name}-3D", name = name);
+                let graph = project.plot_surface(SurfaceSource::Matrix(id), SurfaceMode::Surface, &title);
+                prefs.apply_new_graph(project, graph);
+                Some(graph)
+            } else {
+                None
+            };
+            Ok((id, graph))
         }) {
             self.open_tab(Tab::Matrix(id));
+            if let Some(graph) = graph {
+                self.open_tab(Tab::Graph(graph));
+            }
             self.note_dir(path);
-            self.status = sciplot_core::trf!(
-                "已把图像导入为强度矩阵（{}×{}）",
-                "Imported the image as an intensity matrix ({}×{})",
-                width,
-                height
-            );
+            self.status = if graph.is_some() {
+                sciplot_core::trf!(
+                    "已把图像导入为强度矩阵（{}×{}）并绘制三维曲面",
+                    "Imported the image as an intensity matrix ({}×{}) and plotted a 3D surface",
+                    width,
+                    height
+                )
+            } else {
+                sciplot_core::trf!(
+                    "已把图像导入为强度矩阵（{}×{}）",
+                    "Imported the image as an intensity matrix ({}×{})",
+                    width,
+                    height
+                )
+            };
         }
     }
 
@@ -1292,6 +1497,7 @@ impl SciPlotApp {
     }
 
     pub(crate) fn start_image_insert(&mut self, graph: GraphId, layer: usize) {
+        self.image_as_surface = false;
         self.image_target = Some((graph, layer));
         start_file(self, PathAction::ImportImage, "");
     }
@@ -1349,6 +1555,111 @@ impl SciPlotApp {
             self.status = sciplot_core::trf!("已新建三维{}", "Created 3D {}", mode.label());
         }
     }
+
+    pub(crate) fn plot_table_3d(&mut self, table: TableId, column: usize, kind: sciplot_core::TablePlot3D) {
+        let prefs = self.prefs.clone();
+        if let Some(id) = self.edit(kind.label(), |project| {
+            let id = project.plot_table_surface(table, column, kind)?;
+            prefs.apply_new_graph(project, id);
+            Ok(id)
+        }) {
+            self.open_tab(Tab::Graph(id));
+            self.status = sciplot_core::trf!("已新建{}", "Created {}", kind.label());
+        }
+    }
+
+    pub(crate) fn reload_fit_plugins(&mut self) {
+        let mut plugins = Vec::new();
+        for dir in Self::fit_plugin_dirs() {
+            for item in sciplot_analysis::load_fit_plugins(&dir) {
+                match item {
+                    Ok(plugin) => {
+                        if let Some(slot) = plugins.iter_mut().find(|kept: &&mut sciplot_analysis::FitPlugin| kept.name == plugin.name)
+                        {
+                            *slot = plugin;
+                        } else {
+                            plugins.push(plugin);
+                        }
+                    }
+                    Err(err) => self.status = err,
+                }
+            }
+        }
+        self.fit_plugins = plugins;
+    }
+
+fn fit_plugin_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.join("fitPlugins"));
+        }
+    }
+    dirs.push(crate::prefs::home_dir().join("fitPlugins"));
+    dirs
+}
+
+fn record_peak(app: &mut SciPlotApp, id: GraphId, scene: &sciplot_plot::Scene, local: egui::Vec2) {
+    if scene.legend_hits.iter().any(|hit| hit.rect.contains(local.x, local.y)) {
+        return;
+    }
+    let Some(layer_index) = scene.layers.iter().position(|frame| frame.plot.contains(local.x, local.y)) else {
+        return;
+    };
+    let Some((x, _)) = screen_to_data(&scene.layers[layer_index], local.x, local.y) else {
+        return;
+    };
+    let Some(pick) = &mut app.peak_pick else {
+        return;
+    };
+    if pick.graph != id {
+        return;
+    }
+    pick.centers.push(x);
+    let got = pick.centers.len();
+    let need = pick.need;
+    if got < need {
+        app.status = sciplot_core::trf!(
+            "已记录峰位 {}（{got}/{need}）。Esc 取消。",
+            "Recorded peak {} ({got}/{need}). Esc cancels.",
+            sciplot_core::format_number(x),
+            got = got,
+            need = need
+        );
+        return;
+    }
+    let pick = app.peak_pick.take().unwrap();
+    let model = sciplot_analysis::FitModel::MultiPeak {
+        gaussian: pick.gaussian,
+        centers: pick.centers.clone(),
+    };
+    let prefs = app.prefs.clone();
+    let before = app
+        .project
+        .graph(pick.graph)
+        .and_then(|item| item.layers.get(pick.layer))
+        .map(|item| item.curves.len())
+        .unwrap_or(0);
+    if let Some(report) = app.edit(sciplot_core::tr!("多峰拟合", "Multi-peak fit"), |project| {
+        let report = ops::fit_on_graph(
+            project,
+            pick.graph,
+            pick.layer,
+            pick.curve,
+            &model,
+            pick.x_min,
+            pick.x_max,
+            &pick.options,
+        )?;
+        prefs.apply_curves(project, pick.graph, pick.layer, before);
+        Ok(report)
+    }) {
+        app.dialog = Some(Dialog::Message {
+            title: sciplot_core::tr!("多峰拟合结果", "Multi-peak fit").into(),
+            text: report,
+        });
+    }
+}
 
     fn tab_title(&self, tab: &Tab) -> String {
         match tab {
@@ -1614,6 +1925,12 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     }
     if clicked(ui, sciplot_core::tr!("导入图像…", "Import image…"), "") {
         app.image_target = None;
+        app.image_as_surface = false;
+        start_file(app, PathAction::ImportImage, "");
+    }
+    if clicked(ui, sciplot_core::tr!("导入图像为三维图…", "Import image as 3D plot…"), "") {
+        app.image_target = None;
+        app.image_as_surface = true;
         start_file(app, PathAction::ImportImage, "");
     }
     if clicked(ui, sciplot_core::t("导出当前图形 PNG…"), "") {
@@ -1715,6 +2032,15 @@ pub(crate) fn fit_dialog(
         initial: "a=1, b=0".into(),
         xmin,
         xmax,
+        weight: WeightChoice::None,
+        weight_column: String::new(),
+        algorithm: sciplot_analysis::FitAlgorithm::ScaledLm,
+        tolerance: "1e-12".into(),
+        max_iter: "80".into(),
+        peaks: "2".into(),
+        centers: String::new(),
+        gaussian: true,
+        plugin: 0,
     }
 }
 
@@ -1731,7 +2057,7 @@ pub(crate) fn range_dialog(graph: GraphId, layer: usize, curve: usize, op: Range
         window: "7".into(),
         order: "2".into(),
         sg: false,
-        highpass: false,
+        filter: FilterKind::LowPass,
     }
 }
 
@@ -2256,8 +2582,29 @@ fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
         ui.label(sciplot_core::t("备注已删除"));
         return;
     };
+    ui.horizontal(|ui| {
+        ui.label(sciplot_core::tr!(
+            "用公式引擎逐行求值。名字 = 表达式 会记住结果。这不是 Python。",
+            "Each line is evaluated with the formula engine. name = expression remembers the value. This is not Python."
+        ));
+        if ui.button(sciplot_core::tr!("运行备注", "Run note")).clicked() {
+            app.note_result = Some((id, note_report(&text)));
+        }
+        if ui.button(sciplot_core::tr!("追加结果", "Append results")).clicked() {
+            let report = note_report(&text);
+            let appended = format!("{text}\n{report}");
+            app.edit(sciplot_core::tr!("追加备注结果", "Append note results"), |project| {
+                project
+                    .note_mut(id)
+                    .ok_or_else(|| sciplot_core::t("备注已删除").to_string())?
+                    .text = appended.clone();
+                Ok(())
+            });
+            app.note_result = Some((id, report));
+        }
+    });
     let mut text = text;
-    let rows = ((ui.available_height() / 22.0).floor() as usize).clamp(12, 80);
+    let rows = ((ui.available_height() / 22.0).floor() as usize).clamp(8, 40);
     let response = ui.add(
         egui::TextEdit::multiline(&mut text)
             .desired_width(f32::INFINITY)
@@ -2276,6 +2623,33 @@ fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
     if response.lost_focus() {
         app.pushed_edit = false;
     }
+    if let Some((note, report)) = &app.note_result {
+        if *note == id {
+            ui.separator();
+            ui.label(sciplot_core::tr!("求值结果", "Results"));
+            ui.add(
+                egui::TextEdit::multiline(&mut report.clone())
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(6)
+                    .interactive(false),
+            );
+        }
+    }
+}
+
+fn note_report(text: &str) -> String {
+    let run = sciplot_core::eval_note(text);
+    if run.lines.is_empty() {
+        return sciplot_core::tr!("没有可求值的行", "There is nothing to evaluate").into();
+    }
+    run.lines
+        .iter()
+        .map(|line| {
+            let mark = if line.ok { "=" } else { "!" };
+            format!("# {mark} {}  {}", line.source, line.output)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
@@ -2420,13 +2794,14 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         {
             app.active_layer = layer;
             let frame = &scene.layers[layer];
-            if response.double_clicked() {
+            let picking = app.peak_pick.as_ref().is_some_and(|pick| pick.graph == id);
+            if response.double_clicked() && !picking {
                 views[layer] = LayerView::default();
                 changed = true;
             }
             let shift = ui.input(|i| i.modifiers.shift);
             let primary_started = response.drag_started_by(egui::PointerButton::Primary);
-            if primary_started && shift {
+            if primary_started && shift && !picking {
                 if let Some((x, _)) = screen_to_data(frame, local.x, local.y) {
                     app.xsel = Some(XSel {
                         graph: id,
@@ -2435,7 +2810,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                         x1: x,
                     });
                 }
-            } else if primary_started {
+            } else if primary_started && !picking {
                 app.ann_drag = None;
                 if let Some((ann_id, origin, _, _)) =
                     hit_annotation(&graph, layer, frame, local.x, local.y)
@@ -2462,7 +2837,7 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                         sel.x1 = x;
                     }
                 }
-            } else if primary_drag {
+            } else if primary_drag && !picking {
                 let drag = app.ann_drag.as_ref().map(|drag| {
                     (
                         drag.graph,
@@ -2546,10 +2921,16 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
         }
         app.ann_drag = None;
     }
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) && app.peak_pick.is_some() {
+        app.peak_pick = None;
+        app.status = sciplot_core::tr!("已取消点选峰位", "Cancelled peak picking").into();
+    }
     if response.clicked() && !response.double_clicked() {
         if let Some(pos) = response.interact_pointer_pos().or(response.hover_pos()) {
             let local = pos - rect.min;
-            if let Some((layer, curve)) = scene
+            if app.peak_pick.as_ref().is_some_and(|pick| pick.graph == id) {
+                SciPlotApp::record_peak(app, id, &scene, local);
+            } else if let Some((layer, curve)) = scene
                 .legend_hits
                 .iter()
                 .find(|hit| hit.rect.contains(local.x, local.y))

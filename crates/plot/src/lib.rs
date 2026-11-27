@@ -23,7 +23,10 @@ pub use svg::{to_svg, SVG_FONT};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sciplot_core::{demo_project, AxisScale, CurveKind, Graph, Layer, Project, SurfaceMode, SurfaceSource};
+    use sciplot_core::{
+        demo_project, AxisScale, CurveKind, Graph, Layer, Project, SurfaceMode, SurfacePointStyle, SurfaceSource,
+        TablePlot3D,
+    };
 
     #[test]
     fn demo_svg_contains_chinese_axis_title() {
@@ -181,6 +184,83 @@ mod tests {
         let triangles = scene.primitives.iter().filter(|prim| matches!(prim, Prim::Triangle { .. })).count();
         assert!(triangles > 100, "triangles={triangles}");
         assert!(scene.text_content().contains("波面"));
+    }
+
+    fn table_3d(kind: TablePlot3D) -> Project {
+        let mut project = Project::new("p");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns[0].set_numbers(&[0.0, 1.0, 2.0, 3.0, 4.0]);
+            table.columns[1].set_numbers(&[0.0, 1.0, 0.0, 1.0, 0.0]);
+        }
+        project.plot_table_surface(table, 1, kind).unwrap();
+        project
+    }
+
+    #[test]
+    fn table_ribbon_bars_and_trajectory_render() {
+        let ribbon = table_3d(TablePlot3D::Ribbon);
+        let scene = render(&ribbon, &ribbon.graphs[0], &[], 640.0, 480.0, 1.0);
+        let triangles = scene.primitives.iter().filter(|prim| matches!(prim, Prim::Triangle { .. })).count();
+        assert_eq!(triangles, 8, "five samples make four ribbon quads");
+
+        let bars = table_3d(TablePlot3D::Bars);
+        let scene = render(&bars, &bars.graphs[0], &[], 640.0, 480.0, 1.0);
+        let triangles = scene.primitives.iter().filter(|prim| matches!(prim, Prim::Triangle { .. })).count();
+        assert!(triangles > 10, "bars={triangles}");
+
+        let path = table_3d(TablePlot3D::Trajectory);
+        let scene = render(&path, &path.graphs[0], &[], 640.0, 480.0, 1.0);
+        let lines = scene.primitives.iter().filter(|prim| matches!(prim, Prim::Line { .. })).count();
+        assert!(lines >= 3, "trajectory lines={lines}");
+    }
+
+    #[test]
+    fn hidden_lines_wire_surface_and_cross_markers() {
+        let mut project = Project::new("fn");
+        project.plot_surface(
+            SurfaceSource::Function {
+                expr: "sin(x)*cos(y)".into(),
+                x_min: -2.0,
+                x_max: 2.0,
+                y_min: -2.0,
+                y_max: 2.0,
+                n: 8,
+            },
+            SurfaceMode::HiddenLines,
+            "hidden",
+        );
+        let scene = render(&project, &project.graphs[0], &[], 500.0, 400.0, 1.0);
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Triangle { .. })));
+        assert!(scene.primitives.iter().filter(|prim| matches!(prim, Prim::Line { .. })).count() > 10);
+
+        project.graphs[0].surface.as_mut().unwrap().mode = SurfaceMode::WireSurface;
+        let scene = render(&project, &project.graphs[0], &[], 500.0, 400.0, 1.0);
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Triangle { .. })));
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Line { .. })));
+
+        project.graphs[0].surface.as_mut().unwrap().mode = SurfaceMode::Scatter;
+        project.graphs[0].surface.as_mut().unwrap().point_style = SurfacePointStyle::Cross;
+        let scene = render(&project, &project.graphs[0], &[], 500.0, 400.0, 1.0);
+        assert!(scene.primitives.iter().filter(|prim| matches!(prim, Prim::Line { .. })).count() > 10);
+        assert!(!scene.primitives.iter().any(|prim| matches!(prim, Prim::Circle { .. })));
+    }
+
+    #[test]
+    fn imported_image_matrix_plots_as_a_surface() {
+        let mut project = Project::new("图");
+        let mut rgba = Vec::new();
+        for row in 0..6 {
+            for col in 0..6 {
+                let value = (row * 40 + col * 10) as u8;
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let matrix = project.matrix_from_rgba("照片", 6, 6, &rgba).unwrap();
+        project.plot_surface(SurfaceSource::Matrix(matrix), SurfaceMode::Surface, "强度");
+        let scene = render(&project, &project.graphs[0], &[], 480.0, 360.0, 1.0);
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Triangle { .. })));
     }
 
     #[test]

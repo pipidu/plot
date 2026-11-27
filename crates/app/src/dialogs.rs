@@ -1,11 +1,14 @@
-use sciplot_analysis::{FitModel, InterpMethod};
+use sciplot_analysis::{FitAlgorithm, FitModel, FitOptions, FftBand, FftShape, InterpMethod};
 use sciplot_core::{
     format_number, parse_initials, Annotation, AnnotationKind, AxisScale, ColumnMode, ColumnType,
     CurveAxes, CurveKind, CurveStyle, Dash, DataSource, ErrorSource, FillPattern, LegendPos, StepAnchor,
     SurfaceMode, SurfaceSource, Symbol, VectorMode, WhiskerMode, XAxisSide, YAxisSide,
 };
 
-use crate::app::{AxisEdge, Dialog, FitWhich, FunctionForm, LineChoice, PathAction, RangeOp, SciPlotApp};
+use crate::app::{
+    AxisEdge, Dialog, FilterKind, FitWhich, FunctionForm, LineChoice, PathAction, RangeOp, SciPlotApp, SignalKind,
+    WeightChoice,
+};
 use crate::i18n;
 use crate::ops;
 
@@ -123,6 +126,15 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::AddCurve { .. } => sciplot_core::t("添加到当前图").into(),
         Dialog::Prefs(_) => sciplot_core::t("默认样式与字体").into(),
         Dialog::ImportInstead { .. } => sciplot_core::t("这不是项目文件").into(),
+        Dialog::Fft { inverse, .. } => {
+            if *inverse {
+                sciplot_core::tr!("逆 FFT", "Inverse FFT").into()
+            } else {
+                sciplot_core::tr!("FFT", "FFT").into()
+            }
+        }
+        Dialog::Signal { .. } => sciplot_core::tr!("信号处理", "Signal").into(),
+        Dialog::SurfaceSettings { .. } => sciplot_core::tr!("三维设置", "3D settings").into(),
     }
 }
 
@@ -293,8 +305,18 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             initial,
             xmin,
             xmax,
+            weight,
+            weight_column,
+            algorithm,
+            tolerance,
+            max_iter,
+            peaks,
+            centers,
+            gaussian,
+            plugin,
         } => fit_dialog(
-            app, ui, *graph, *layer, curve, which, degree, expr, initial, xmin, xmax,
+            app, ui, *graph, *layer, curve, which, degree, expr, initial, xmin, xmax, weight, weight_column,
+            algorithm, tolerance, max_iter, peaks, centers, gaussian, plugin,
         ),
         Dialog::Range {
             graph,
@@ -308,10 +330,32 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             window,
             order,
             sg,
-            highpass,
+            filter,
         } => range_dialog(
-            app, ui, *graph, *layer, curve, *op, a, b, n, method, window, order, sg, highpass,
+            app, ui, *graph, *layer, curve, *op, a, b, n, method, window, order, sg, filter,
         ),
+        Dialog::Fft {
+            graph,
+            layer,
+            curve,
+            inverse,
+            normalize,
+            shift,
+            imag,
+            dt,
+        } => fft_dialog(app, ui, *graph, *layer, curve, inverse, normalize, shift, imag, dt),
+        Dialog::Signal {
+            table,
+            kind,
+            auto,
+            column_a,
+            column_b,
+        } => signal_dialog(app, ui, *table, *kind, auto, column_a, column_b),
+        Dialog::SurfaceSettings {
+            graph,
+            mode,
+            point_style,
+        } => surface_settings_dialog(app, ui, *graph, mode, point_style),
         Dialog::Function {
             graph,
             layer,
@@ -1970,6 +2014,15 @@ fn fit_dialog(
     initial: &mut String,
     xmin: &mut String,
     xmax: &mut String,
+    weight: &mut WeightChoice,
+    weight_column: &mut String,
+    algorithm: &mut FitAlgorithm,
+    tolerance: &mut String,
+    max_iter: &mut String,
+    peaks: &mut String,
+    centers: &mut String,
+    gaussian: &mut bool,
+    plugin: &mut usize,
 ) -> bool {
     let names = curve_names(app, graph, layer);
     if names.is_empty() {
@@ -1987,15 +2040,8 @@ fn fit_dialog(
     egui::ComboBox::from_id_salt("fit-model")
         .selected_text(which.label())
         .show_ui(ui, |ui| {
-            for item in [
-                FitWhich::Linear,
-                FitWhich::Poly,
-                FitWhich::Exp,
-                FitWhich::Gauss,
-                FitWhich::Lorentz,
-                FitWhich::Custom,
-            ] {
-                ui.selectable_value(which, item, item.label());
+            for item in FitWhich::all() {
+                ui.selectable_value(which, *item, item.label());
             }
         });
     if *which == FitWhich::Poly {
@@ -2004,6 +2050,50 @@ fn fit_dialog(
     if *which == FitWhich::Custom {
         labeled(ui, sciplot_core::t("表达式，例如 a*exp(-b*x)"), expr);
         labeled(ui, sciplot_core::t("初值，例如 a=1, b=0.5"), initial);
+    }
+    if *which == FitWhich::MultiPeak {
+        labeled(ui, sciplot_core::tr!("峰的个数（1–8）", "Number of peaks (1–8)"), peaks);
+        labeled(ui, sciplot_core::tr!("峰位，逗号分隔，可空", "Peak centers, comma separated, optional"), centers);
+        ui.checkbox(gaussian, sciplot_core::tr!("高斯峰（否则洛伦兹）", "Gaussian peaks (otherwise Lorentzian)"));
+    }
+    if *which == FitWhich::Plugin {
+        if app.fit_plugins.is_empty() {
+            ui.label(sciplot_core::tr!(
+                "把 name / expr / initial 写成文本，放进主目录或程序旁边的 fitPlugins。不是 SciDAVis 的 .fdf，也不是 Python。",
+                "Put a text file with name, expr, and initial into fitPlugins next to the program or in the home directory. This is not a SciDAVis .fdf or Python plugin."
+            ));
+        } else {
+            let names: Vec<String> = app.fit_plugins.iter().map(|plugin| plugin.name.clone()).collect();
+            *plugin = (*plugin).min(names.len() - 1);
+            egui::ComboBox::from_id_salt("fit-plugin")
+                .selected_text(&names[*plugin])
+                .show_ui(ui, |ui| {
+                    for (index, name) in names.iter().enumerate() {
+                        ui.selectable_value(plugin, index, name);
+                    }
+                });
+        }
+    }
+    egui::ComboBox::from_id_salt("fit-weight")
+        .selected_text(weight.label())
+        .show_ui(ui, |ui| {
+            for item in WeightChoice::all() {
+                ui.selectable_value(weight, *item, item.label());
+            }
+        });
+    if matches!(*weight, WeightChoice::Dataset | WeightChoice::Direct) {
+        labeled(ui, sciplot_core::tr!("权重列名", "Weight column"), weight_column);
+    }
+    if !matches!(*which, FitWhich::Linear | FitWhich::Poly) {
+        egui::ComboBox::from_id_salt("fit-algorithm")
+            .selected_text(algorithm.label())
+            .show_ui(ui, |ui| {
+                for item in [FitAlgorithm::ScaledLm, FitAlgorithm::UnscaledLm, FitAlgorithm::NelderMead] {
+                    ui.selectable_value(algorithm, item, item.label());
+                }
+            });
+        labeled(ui, sciplot_core::tr!("容差", "Tolerance"), tolerance);
+        labeled(ui, sciplot_core::tr!("最大迭代", "Max iterations"), max_iter);
     }
     ui.label(sciplot_core::t(
         "X 区间留空表示用全部点。图上 Shift 拖出的区间会填在这里。",
@@ -2020,7 +2110,12 @@ fn fit_dialog(
         xmax,
         sciplot_core::t("全部"),
     );
-    if action_button(ui, sciplot_core::t("拟合")) {
+    let pick_peaks = if *which == FitWhich::MultiPeak {
+        action_button(ui, sciplot_core::tr!("在图上点选峰位", "Click peaks on the graph"))
+    } else {
+        false
+    };
+    if action_button(ui, sciplot_core::t("拟合")) || pick_peaks {
         let model = match which {
             FitWhich::Linear => Ok(FitModel::Linear),
             FitWhich::Poly => degree
@@ -2028,18 +2123,94 @@ fn fit_dialog(
                 .map(|d| FitModel::Polynomial(d.clamp(1, 8)))
                 .map_err(|_| sciplot_core::t("次数无效").to_string()),
             FitWhich::Exp => Ok(FitModel::Exponential),
+            FitWhich::ExpDecay1 => Ok(FitModel::ExpDecay1),
+            FitWhich::ExpDecay2 => Ok(FitModel::ExpDecay2),
+            FitWhich::ExpDecay3 => Ok(FitModel::ExpDecay3),
+            FitWhich::ExpGrowth => Ok(FitModel::ExpGrowth),
+            FitWhich::Boltzmann => Ok(FitModel::Boltzmann),
             FitWhich::Gauss => Ok(FitModel::Gaussian),
             FitWhich::Lorentz => Ok(FitModel::Lorentzian),
+            FitWhich::MultiPeak => parse_centers(centers).map(|typed| FitModel::MultiPeak {
+                gaussian: *gaussian,
+                centers: typed,
+            }),
             FitWhich::Custom => parse_initials(initial).map(|initial| FitModel::Custom {
                 expr: expr.clone(),
                 initial,
             }),
+            FitWhich::Plugin => app.fit_plugins.get(*plugin).map(|item| FitModel::Custom {
+                expr: item.expr.clone(),
+                initial: item.initial.clone(),
+            }).ok_or_else(|| {
+                sciplot_core::tr!("还没有可用的拟合插件", "There is no fit plugin to use").to_string()
+            }),
         };
+        let mut options = FitOptions {
+            weighting: weight.to_weighting(),
+            algorithm: *algorithm,
+            tolerance: tolerance.parse().unwrap_or(1e-12),
+            max_iterations: max_iter.parse::<usize>().unwrap_or(80).max(1),
+            plugin_name: if *which == FitWhich::Plugin {
+                app.fit_plugins.get(*plugin).map(|item| item.name.clone())
+            } else {
+                None
+            },
+            ..FitOptions::default()
+        };
+        if matches!(*weight, WeightChoice::Dataset | WeightChoice::Direct) {
+            match ops::weight_column(&app.project, graph, layer, *curve, weight_column.trim()) {
+                Ok(column) => options.column = column,
+                Err(err) => {
+                    app.status = err;
+                    return true;
+                }
+            }
+        }
         match model {
             Ok(model) => {
                 let curve = *curve;
                 let x_min = parse_opt(xmin);
                 let x_max = parse_opt(xmax);
+                if pick_peaks {
+                    let need = peaks.parse::<usize>().unwrap_or(2).clamp(1, 8);
+                    let FitModel::MultiPeak { centers, .. } = &model else {
+                        return true;
+                    };
+                    if centers.len() >= need {
+                        app.status = sciplot_core::tr!(
+                            "手填的峰位已经够了，直接点拟合",
+                            "Enough centers are already typed. Use Fit."
+                        )
+                        .into();
+                        return true;
+                    }
+                    app.peak_pick = Some(crate::app::PeakPick {
+                        graph,
+                        layer,
+                        curve,
+                        gaussian: *gaussian,
+                        need,
+                        centers: centers.clone(),
+                        options,
+                        x_min,
+                        x_max,
+                    });
+                    app.status = sciplot_core::trf!(
+                        "在图上点选峰位（{got}/{need}）。Esc 取消。",
+                        "Click peak positions on the graph ({got}/{need}). Esc cancels.",
+                        got = centers.len(),
+                        need = need
+                    );
+                    return false;
+                }
+                if matches!(model, FitModel::MultiPeak { ref centers, .. } if centers.is_empty()) {
+                    app.status = sciplot_core::tr!(
+                        "请填写峰位，或在图上点选",
+                        "Type the peak centers, or click them on the graph"
+                    )
+                    .into();
+                    return true;
+                }
                 let title = sciplot_core::trf!("{}拟合结果", "{} fit", which.label());
                 let before = app
                     .project
@@ -2049,8 +2220,9 @@ fn fit_dialog(
                     .unwrap_or(0);
                 let prefs = app.prefs.clone();
                 if let Some(report) = app.edit(sciplot_core::t("拟合"), |project| {
-                    let report =
-                        ops::fit_on_graph(project, graph, layer, curve, &model, x_min, x_max)?;
+                    let report = ops::fit_on_graph(
+                        project, graph, layer, curve, &model, x_min, x_max, &options,
+                    )?;
                     prefs.apply_curves(project, graph, layer, before);
                     Ok(report)
                 }) {
@@ -2062,6 +2234,229 @@ fn fit_dialog(
                 }
             }
             Err(err) => app.status = err,
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn parse_centers(text: &str) -> Result<Vec<f64>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut centers = Vec::new();
+    for part in text.split(|ch: char| ch == ',' || ch == '，' || ch.is_whitespace()) {
+        if part.is_empty() {
+            continue;
+        }
+        let value = part.parse::<f64>().map_err(|_| {
+            sciplot_core::trf!("峰位无效：{part}", "Invalid peak center: {part}", part = part)
+        })?;
+        if !value.is_finite() {
+            return Err(sciplot_core::tr!("峰位必须是有限数值", "Peak centers must be finite").into());
+        }
+        centers.push(value);
+    }
+    if centers.len() > 8 {
+        return Err(sciplot_core::tr!("最多 8 个峰", "At most 8 peaks").into());
+    }
+    Ok(centers)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fft_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    graph: sciplot_core::GraphId,
+    layer: usize,
+    curve: &mut usize,
+    inverse: &mut bool,
+    normalize: &mut bool,
+    shift: &mut bool,
+    imag: &mut String,
+    dt: &mut String,
+) -> bool {
+    let names = curve_names(app, graph, layer);
+    if !names.is_empty() {
+        *curve = (*curve).min(names.len() - 1);
+        egui::ComboBox::from_id_salt("fft-curve")
+            .selected_text(&names[*curve])
+            .show_ui(ui, |ui| {
+                for (index, name) in names.iter().enumerate() {
+                    ui.selectable_value(curve, index, name);
+                }
+            });
+    }
+    ui.checkbox(inverse, sciplot_core::tr!("逆变换", "Inverse"));
+    ui.checkbox(normalize, sciplot_core::tr!("振幅归一化（除以点数）", "Normalize amplitude (divide by the length)"));
+    ui.checkbox(shift, sciplot_core::tr!("把零频移到中间", "Shift zero frequency to the center"));
+    labeled(ui, sciplot_core::tr!("虚部列名，可空", "Imaginary column, optional"), imag);
+    labeled_hint(
+        ui,
+        sciplot_core::tr!("采样间隔，可空", "Sample spacing, optional"),
+        dt,
+        sciplot_core::tr!("用 X 的间隔", "Use the spacing of X"),
+    );
+    ui.label(sciplot_core::tr!(
+        "正向结果写实部、虚部、振幅和相位。逆变换要读这对实部/虚部，原来的单边 FFT 表不能直接拿来逆变换。逆变换如果输入已经是频率，请填写原来的采样间隔。",
+        "Forward FFT writes real, imaginary, amplitude, and phase. Inverse FFT reads that pair. The older one-sided FFT table cannot be inverted directly. If the inverse input is already frequency, enter the original sample spacing."
+    ));
+    if action_button(ui, sciplot_core::t("计算")) {
+        let curve = *curve;
+        let inverse = *inverse;
+        let shape = FftShape {
+            normalize: *normalize,
+            shift: *shift,
+        };
+        let imag_name = imag.trim().to_string();
+        let dt = parse_opt(dt);
+        let prefs = app.prefs.clone();
+        if let Some(table) = app.edit(if inverse { sciplot_core::tr!("逆 FFT", "Inverse FFT") } else { "FFT" }, |project| {
+            ops::fft_complex_table(
+                project,
+                graph,
+                layer,
+                curve,
+                inverse,
+                shape,
+                Some(imag_name.as_str()).filter(|name| !name.is_empty()),
+                dt,
+            )
+        }) {
+            app.open_tab(crate::app::Tab::Table(table));
+            if let Some(gid) = app.edit(sciplot_core::t("绘制结果"), |project| {
+                let gid = project.plot_table(table, CurveKind::Line)?;
+                prefs.apply_new_graph(project, gid);
+                Ok(gid)
+            }) {
+                app.open_tab(crate::app::Tab::Graph(gid));
+            }
+            return false;
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn signal_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    table: sciplot_core::TableId,
+    kind: SignalKind,
+    auto: &mut bool,
+    column_a: &mut usize,
+    column_b: &mut usize,
+) -> bool {
+    let names = app
+        .project
+        .table(table)
+        .map(|item| item.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if names.len() < 2 && !(*auto && kind == SignalKind::Correlate) {
+        ui.label(sciplot_core::tr!("至少需要两列数值", "At least two numeric columns are needed"));
+    }
+    if !names.is_empty() {
+        *column_a = (*column_a).min(names.len() - 1);
+        egui::ComboBox::from_id_salt("signal-a")
+            .selected_text(&names[*column_a])
+            .show_ui(ui, |ui| {
+                for (index, name) in names.iter().enumerate() {
+                    ui.selectable_value(column_a, index, name);
+                }
+            });
+    }
+    if kind == SignalKind::Correlate {
+        ui.checkbox(auto, sciplot_core::tr!("自相关（只用第一列）", "Autocorrelation (first column only)"));
+    }
+    if (kind != SignalKind::Correlate || !*auto) && names.len() >= 2 {
+            *column_b = (*column_b).min(names.len() - 1);
+            egui::ComboBox::from_id_salt("signal-b")
+                .selected_text(&names[*column_b])
+                .show_ui(ui, |ui| {
+                    for (index, name) in names.iter().enumerate() {
+                        ui.selectable_value(column_b, index, name);
+                    }
+                });
+    }
+    ui.label(match kind {
+        SignalKind::Convolve => sciplot_core::tr!(
+            "线性卷积，结果长度是两列长度之和减 1。",
+            "Linear convolution. The result length is the sum of the lengths minus 1."
+        ),
+        SignalKind::Deconvolve => sciplot_core::tr!(
+            "用第二列做核做多项式除法。核的第一个点不能是 0。",
+            "Polynomial division, using the second column as the kernel. Its first sample cannot be 0."
+        ),
+        SignalKind::Correlate => sciplot_core::tr!(
+            "信号的协方差，横轴是滞后样本。这不是列与列的 Pearson 相关。",
+            "Covariance of the signals. The horizontal axis is the lag in samples. This is not the Pearson correlation of columns."
+        ),
+    });
+    if action_button(ui, sciplot_core::t("计算")) {
+        let kind_key = if kind == SignalKind::Correlate && *auto {
+            "autocorrelate"
+        } else {
+            kind.key()
+        };
+        let column_b = if kind_key == "autocorrelate" { None } else { Some(*column_b) };
+        let prefs = app.prefs.clone();
+        if let Some(created) = app.edit(kind.label(), |project| {
+            ops::signal_table(project, table, kind_key, *column_a, column_b)
+        }) {
+            app.open_tab(crate::app::Tab::Table(created));
+            if let Some(gid) = app.edit(sciplot_core::t("绘制结果"), |project| {
+                let gid = project.plot_table(created, CurveKind::Line)?;
+                prefs.apply_new_graph(project, gid);
+                Ok(gid)
+            }) {
+                app.open_tab(crate::app::Tab::Graph(gid));
+            }
+            return false;
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn surface_settings_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    graph: sciplot_core::GraphId,
+    mode: &mut SurfaceMode,
+    point_style: &mut sciplot_core::SurfacePointStyle,
+) -> bool {
+    egui::ComboBox::from_id_salt("surface-mode")
+        .selected_text(mode.label())
+        .show_ui(ui, |ui| {
+            for item in SurfaceMode::all() {
+                ui.selectable_value(mode, *item, item.label());
+            }
+        });
+    egui::ComboBox::from_id_salt("surface-point")
+        .selected_text(point_style.label())
+        .show_ui(ui, |ui| {
+            for item in sciplot_core::SurfacePointStyle::all() {
+                ui.selectable_value(point_style, *item, item.label());
+            }
+        });
+    ui.label(sciplot_core::tr!(
+        "隐藏线用画家算法挡住后面的线。十字、锥体和竖线画在屏幕上，不是带光照的三维实体。",
+        "Hidden lines use the painter's algorithm. Cross, cone, and bar markers are drawn in screen space, not as lit 3D solids."
+    ));
+    if action_button(ui, sciplot_core::t("应用")) {
+        let mode = *mode;
+        let point_style = *point_style;
+        if app
+            .edit(sciplot_core::tr!("三维设置", "3D settings"), |project| {
+                let spec = project
+                    .graph_mut(graph)
+                    .and_then(|item| item.surface.as_mut())
+                    .ok_or(sciplot_core::t("不是三维图"))?;
+                spec.mode = mode;
+                spec.point_style = point_style;
+                Ok(())
+            })
+            .is_some()
+        {
+            return false;
         }
     }
     !ui.button(sciplot_core::t("取消")).clicked()
@@ -2082,7 +2477,7 @@ fn range_dialog(
     window: &mut String,
     order: &mut String,
     sg: &mut bool,
-    highpass: &mut bool,
+    filter: &mut FilterKind,
 ) -> bool {
     let names = curve_names(app, graph, layer);
     if !names.is_empty() {
@@ -2120,8 +2515,26 @@ fn range_dialog(
             labeled(ui, sciplot_core::t("多项式次数"), order);
         }
         RangeOp::Filter => {
-            labeled(ui, sciplot_core::t("截止频率"), a);
-            ui.checkbox(highpass, sciplot_core::t("高通"));
+            egui::ComboBox::from_id_salt("fft-band")
+                .selected_text(filter.label())
+                .show_ui(ui, |ui| {
+                    for item in FilterKind::all() {
+                        ui.selectable_value(filter, *item, item.label());
+                    }
+                });
+            let band = matches!(*filter, FilterKind::BandPass | FilterKind::BandStop);
+            labeled(
+                ui,
+                if band {
+                    sciplot_core::tr!("下限频率", "Lower frequency")
+                } else {
+                    sciplot_core::t("截止频率")
+                },
+                a,
+            );
+            if band {
+                labeled(ui, sciplot_core::tr!("上限频率", "Upper frequency"), b);
+            }
         }
     }
     if action_button(ui, sciplot_core::t("计算")) {
@@ -2152,13 +2565,27 @@ fn range_dialog(
                 })
             }
             RangeOp::Filter => {
-                let Some(cutoff) = parse_opt(a) else {
+                let Some(low) = parse_opt(a) else {
                     app.status = sciplot_core::t("请输入截止频率").into();
                     return true;
                 };
-                let highpass = *highpass;
+                let band = match *filter {
+                    FilterKind::LowPass => FftBand::LowPass { cutoff: low },
+                    FilterKind::HighPass => FftBand::HighPass { cutoff: low },
+                    FilterKind::BandPass | FilterKind::BandStop => {
+                        let Some(high) = parse_opt(b) else {
+                            app.status = sciplot_core::tr!("请输入上限频率", "Enter the upper frequency").into();
+                            return true;
+                        };
+                        if *filter == FilterKind::BandPass {
+                            FftBand::BandPass { low, high }
+                        } else {
+                            FftBand::BandStop { low, high }
+                        }
+                    }
+                };
                 app.edit(sciplot_core::t("滤波"), |project| {
-                    ops::filter_table(project, graph, layer, curve, cutoff, highpass).map(|_| ())
+                    ops::filter_table(project, graph, layer, curve, band).map(|_| ())
                 })
             }
         };

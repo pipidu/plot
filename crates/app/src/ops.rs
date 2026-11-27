@@ -1,9 +1,10 @@
 use std::f64::consts::PI;
 
 use sciplot_analysis::{
-    cumulative_integral, definite_integral, derivative, fft_filter, fft_spectrum, fit_series,
-    interpolate, intersect, invert_matrix, moving_average, pearson, savitzky_golay, summarize,
-    CurveInput, FitModel, InterpMethod, IntersectMode, IntersectOptions,
+    autocorrelate, convolve, correlate, cumulative_integral, deconvolve, definite_integral, derivative, fft_filter_band,
+    fft_forward_complex, fft_inverse, fft_spectrum, fit_with, interpolate, intersect, invert_matrix, moving_average,
+    pearson, savitzky_golay, summarize, CurveInput, FftBand, FftShape, FitModel, FitOptions, InterpMethod, IntersectMode,
+    IntersectOptions, Weighting,
 };
 use sciplot_core::{
     format_number, resolve_curve, unique_name, Annotation, AnnotationKind, ColumnMode, Curve,
@@ -261,6 +262,7 @@ pub fn xy_of(
     Ok((name, x, y))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn fit_on_graph(
     project: &mut Project,
     graph: GraphId,
@@ -269,10 +271,46 @@ pub fn fit_on_graph(
     model: &FitModel,
     x_min: Option<f64>,
     x_max: Option<f64>,
+    options: &FitOptions,
 ) -> Result<String, String> {
-    let (name, x, y) = xy_of(project, graph, layer, curve)?;
-    let (x, y) = restrict_interval(&x, &y, x_min, x_max)?;
-    let result = fit_series(&x, &y, model)?;
+    let (name, x, y, y_err) = aligned_xy(project, graph, layer, curve)?;
+    let column = if options.column.is_empty() {
+        vec![f64::NAN; x.len()]
+    } else if options.column.len() == x.len() {
+        options.column.clone()
+    } else {
+        return Err(sciplot_core::tr!(
+            "权重列和曲线的行数对不上",
+            "The weight column does not line up with the curve"
+        )
+        .into());
+    };
+    let (x, y, y_err, column) = restrict_rows(&x, &y, &y_err, &column, x_min, x_max)?;
+    let mut options = options.clone();
+    match options.weighting {
+        Weighting::Instrumental => {
+            if y_err.iter().all(|value| !value.is_finite() || *value == 0.0) {
+                return Err(sciplot_core::tr!(
+                    "这条曲线没有 Y 误差，不能用仪器权重",
+                    "This curve has no Y errors, so instrumental weights cannot be used"
+                )
+                .into());
+            }
+            options.errors = y_err;
+        }
+        Weighting::Dataset | Weighting::Direct => {
+            if column.iter().all(|value| !value.is_finite()) {
+                return Err(sciplot_core::tr!(
+                    "请选择用来加权的数据列",
+                    "Choose a data column to use as weights"
+                )
+                .into());
+            }
+            options.column = column;
+        }
+        Weighting::None | Weighting::Statistical => {}
+    }
+    let result = fit_with(&x, &y, model, &options)?;
     let xmin = x.iter().copied().fold(f64::INFINITY, f64::min);
     let xmax = x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let report = sciplot_core::trf!(
@@ -321,25 +359,102 @@ pub fn fit_on_graph(
     Ok(report)
 }
 
-fn restrict_interval(
+#[allow(clippy::type_complexity)]
+fn aligned_xy(
+    project: &Project,
+    graph: GraphId,
+    layer: usize,
+    curve: usize,
+) -> Result<(String, Vec<f64>, Vec<f64>, Vec<f64>), String> {
+    let graph = project.graph(graph).ok_or(sciplot_core::t("找不到图形"))?;
+    let curve = graph
+        .layers
+        .get(layer)
+        .ok_or(sciplot_core::t("找不到图层"))?
+        .curves
+        .get(curve)
+        .ok_or(sciplot_core::t("找不到曲线"))?;
+    let name = curve.name.clone();
+    let series = resolve_curve(project, curve)?;
+    if series.x.len() < 2 {
+        return Err(sciplot_core::trf!(
+            "曲线「{name}」的有效点少于 2 个",
+            "Curve \"{name}\" has fewer than 2 finite points",
+            name = name
+        ));
+    }
+    let y_err = if series.y_err.len() == series.x.len() {
+        series.y_err
+    } else {
+        vec![f64::NAN; series.x.len()]
+    };
+    Ok((name, series.x, series.y, y_err))
+}
+
+/// 按曲线所在表格的行，取出和曲线对齐的一列。曲线不是表格列时不能用。
+pub fn weight_column(
+    project: &Project,
+    graph: GraphId,
+    layer: usize,
+    curve: usize,
+    column_name: &str,
+) -> Result<Vec<f64>, String> {
+    let graph = project.graph(graph).ok_or(sciplot_core::t("找不到图形"))?;
+    let curve = graph
+        .layers
+        .get(layer)
+        .ok_or(sciplot_core::t("找不到图层"))?
+        .curves
+        .get(curve)
+        .ok_or(sciplot_core::t("找不到曲线"))?;
+    let DataSource::Columns { table, .. } = &curve.source else {
+        return Err(sciplot_core::tr!(
+            "这条曲线不是表格列，不能用数据列做权重",
+            "This curve is not table columns, so a data column cannot weight it"
+        )
+        .into());
+    };
+    let table = project.table(*table).ok_or(sciplot_core::t("找不到表格"))?;
+    let column = table
+        .columns
+        .iter()
+        .find(|column| column.name == column_name)
+        .ok_or_else(|| {
+            sciplot_core::trf!(
+                "找不到权重列「{name}」",
+                "Weight column \"{name}\" was not found",
+                name = column_name
+            )
+        })?;
+    let series = resolve_curve(project, curve)?;
+    Ok((0..series.x.len()).map(|row| column.number_at(row)).collect())
+}
+
+#[allow(clippy::type_complexity)]
+fn restrict_rows(
     x: &[f64],
     y: &[f64],
+    y_err: &[f64],
+    column: &[f64],
     x_min: Option<f64>,
     x_max: Option<f64>,
-) -> Result<(Vec<f64>, Vec<f64>), String> {
-    if x_min.is_none() && x_max.is_none() {
-        return Ok((x.to_vec(), y.to_vec()));
-    }
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), String> {
     let lo = x_min.unwrap_or(f64::NEG_INFINITY);
     let hi = x_max.unwrap_or(f64::INFINITY);
     let (lo, hi) = (lo.min(hi), lo.max(hi));
     let mut xs = Vec::new();
     let mut ys = Vec::new();
-    for (x, y) in x.iter().zip(y) {
-        if *x >= lo && *x <= hi {
-            xs.push(*x);
-            ys.push(*y);
+    let mut errs = Vec::new();
+    let mut weights = Vec::new();
+    for index in 0..x.len() {
+        let x = x[index];
+        if (x_min.is_some() || x_max.is_some()) && !(x >= lo && x <= hi) {
+            continue;
         }
+        xs.push(x);
+        ys.push(y.get(index).copied().unwrap_or(f64::NAN));
+        errs.push(y_err.get(index).copied().unwrap_or(f64::NAN));
+        weights.push(column.get(index).copied().unwrap_or(f64::NAN));
     }
     if xs.len() < 2 {
         return Err(sciplot_core::trf!(
@@ -349,7 +464,7 @@ fn restrict_interval(
             format_number(hi)
         ));
     }
-    Ok((xs, ys))
+    Ok((xs, ys, errs, weights))
 }
 
 pub fn add_xy_table(
@@ -524,16 +639,11 @@ pub fn filter_table(
     graph: GraphId,
     layer: usize,
     curve: usize,
-    cutoff: f64,
-    highpass: bool,
+    band: FftBand,
 ) -> Result<sciplot_core::TableId, String> {
     let (name, x, y) = xy_of(project, graph, layer, curve)?;
-    let filtered = fft_filter(&x, &y, cutoff, highpass)?;
-    let label = if highpass {
-        sciplot_core::t("高通")
-    } else {
-        sciplot_core::t("低通")
-    };
+    let filtered = fft_filter_band(&x, &y, band)?;
+    let label = band.label();
     let id = add_xy_table(
         project,
         &format!("{name}-{label}"),
@@ -543,13 +653,202 @@ pub fn filter_table(
         &filtered,
     );
     project.log_line(sciplot_core::trf!(
-        "已对「{name}」做 FFT {label}，截止频率 {}。",
-        "FFT {label} on \"{name}\", cutoff {}.",
-        format_number(cutoff),
+        "已对「{name}」做 FFT {label}。",
+        "FFT {label} on \"{name}\".",
         name = name,
         label = label
     ));
     Ok(id)
+}
+
+/// 完整 FFT 或逆 FFT。正向结果含实部、虚部、振幅、相位。逆变换读实部和虚部，写回时间序列。
+/// 采样间隔留空时用 X 的中位正间隔；逆变换如果输入已经是频率轴，需要自己填原来的采样间隔。
+#[allow(clippy::too_many_arguments)]
+pub fn fft_complex_table(
+    project: &mut Project,
+    graph: GraphId,
+    layer: usize,
+    curve: usize,
+    inverse: bool,
+    shape: FftShape,
+    imag_name: Option<&str>,
+    dt: Option<f64>,
+) -> Result<sciplot_core::TableId, String> {
+    let (name, x, y, y_err) = aligned_xy(project, graph, layer, curve)?;
+    let imag = match imag_name.filter(|name| !name.is_empty()) {
+        Some(column) => weight_column(project, graph, layer, curve, column)?,
+        None => vec![0.0; x.len()],
+    };
+    let (x, y, _, imag) = restrict_rows(&x, &y, &y_err, &imag, None, None)?;
+    let mut x_kept = Vec::new();
+    let mut y_kept = Vec::new();
+    let mut imag_kept = Vec::new();
+    for index in 0..x.len() {
+        if x[index].is_finite() && y[index].is_finite() && imag[index].is_finite() {
+            x_kept.push(x[index]);
+            y_kept.push(y[index]);
+            imag_kept.push(imag[index]);
+        }
+    }
+    if y_kept.len() < 4 {
+        return Err(sciplot_core::tr!(
+            "FFT 至少需要 4 个有限点",
+            "FFT needs at least 4 finite points"
+        )
+        .into());
+    }
+    let dt = match dt {
+        Some(dt) if dt.is_finite() && dt > 0.0 => dt,
+        Some(_) => {
+            return Err(sciplot_core::tr!("采样间隔必须是正数", "The sample spacing must be positive").into());
+        }
+        None => median_step(&x_kept)?,
+    };
+    let y = y_kept;
+    let imag = imag_kept;
+    let series = if inverse {
+        fft_inverse(&y, &imag, dt, shape)?
+    } else {
+        fft_forward_complex(&y, &imag, dt, shape)?
+    };
+    let id = project.new_table(&format!("{name}-{}", if inverse { "IFFT" } else { "FFT" }));
+    {
+        let table = project.table_mut(id).unwrap();
+        table.columns.clear();
+        let axis = if inverse {
+            sciplot_core::t("时间")
+        } else {
+            sciplot_core::t("频率")
+        };
+        table.add_numeric_column(axis, ColumnMode::X, &series.axis);
+        table.add_numeric_column(sciplot_core::t("实部"), ColumnMode::Y, &series.real);
+        table.add_numeric_column(sciplot_core::t("虚部"), ColumnMode::Y, &series.imag);
+        if !inverse {
+            table.add_numeric_column(sciplot_core::t("振幅"), ColumnMode::Y, &series.amplitude);
+            table.add_numeric_column(sciplot_core::t("相位"), ColumnMode::Y, &series.phase);
+        }
+    }
+    project.log_line(if inverse {
+        sciplot_core::trf!(
+            "已计算「{name}」的逆 FFT。",
+            "Computed the inverse FFT of \"{name}\".",
+            name = name
+        )
+    } else {
+        sciplot_core::trf!("已计算「{name}」的 FFT。", "Computed the FFT of \"{name}\".", name = name)
+    });
+    Ok(id)
+}
+
+fn median_step(x: &[f64]) -> Result<f64, String> {
+    let mut steps: Vec<f64> = x
+        .windows(2)
+        .filter_map(|pair| {
+            let step = pair[1] - pair[0];
+            (step.is_finite() && step > 0.0).then_some(step)
+        })
+        .collect();
+    if steps.is_empty() {
+        return Err(sciplot_core::tr!(
+            "无法从 X 得到采样间隔，请填写一个正数",
+            "Could not read a sample spacing from X. Enter a positive number"
+        )
+        .into());
+    }
+    steps.sort_by(f64::total_cmp);
+    Ok(steps[steps.len() / 2])
+}
+
+/// 两列的线性卷积、反卷积，或信号的互相关 / 自相关。横轴是样本序号，不是 Pearson 相关。
+pub fn signal_table(
+    project: &mut Project,
+    table: sciplot_core::TableId,
+    kind: &str,
+    column_a: usize,
+    column_b: Option<usize>,
+) -> Result<sciplot_core::TableId, String> {
+    let (name_a, a) = signal_column(project, table, column_a)?;
+    let (name_b, b) = if kind == "autocorrelate" {
+        (name_a.clone(), a.clone())
+    } else {
+        signal_column(project, table, column_b.ok_or_else(|| {
+            sciplot_core::tr!("请再选择一列", "Choose a second column").to_string()
+        })?)?
+    };
+    let (x_name, x, y_name, y, title) = match kind {
+        "convolve" => {
+            let y = convolve(&a, &b)?;
+            (
+                sciplot_core::t("序号").to_string(),
+                (0..y.len()).map(|i| i as f64).collect(),
+                sciplot_core::t("卷积").to_string(),
+                y,
+                format!("{name_a}*{name_b}"),
+            )
+        }
+        "deconvolve" => {
+            let y = deconvolve(&a, &b)?;
+            (
+                sciplot_core::t("序号").to_string(),
+                (0..y.len()).map(|i| i as f64).collect(),
+                sciplot_core::t("反卷积").to_string(),
+                y,
+                format!("{name_a}/{name_b}"),
+            )
+        }
+        "correlate" | "autocorrelate" => {
+            let values = if kind == "autocorrelate" {
+                autocorrelate(&a)?
+            } else {
+                correlate(&a, &b)?
+            };
+            (
+                sciplot_core::t("滞后").to_string(),
+                values.lag,
+                sciplot_core::t("协方差").to_string(),
+                values.value,
+                if kind == "autocorrelate" {
+                    format!("{name_a}-auto")
+                } else {
+                    format!("{name_a}×{name_b}")
+                },
+            )
+        }
+        _ => {
+            return Err(sciplot_core::tr!("不认识的信号处理", "Unknown signal operation").into());
+        }
+    };
+    let id = add_xy_table(project, &title, &x_name, &x, &y_name, &y);
+    project.log_line(sciplot_core::trf!(
+        "已计算「{title}」。",
+        "Computed \"{title}\".",
+        title = title
+    ));
+    Ok(id)
+}
+
+fn signal_column(project: &Project, table: sciplot_core::TableId, column: usize) -> Result<(String, Vec<f64>), String> {
+    let table = project.table(table).ok_or(sciplot_core::t("找不到表格"))?;
+    let column = table
+        .columns
+        .get(column)
+        .ok_or_else(|| sciplot_core::tr!("找不到列", "Column not found").to_string())?;
+    let mut values = Vec::new();
+    for row in 0..column.len() {
+        let value = column.number_at(row);
+        if !value.is_finite() {
+            return Err(sciplot_core::trf!(
+                "列「{name}」里有空单元格或非数值，信号处理需要一整列有限数值",
+                "Column \"{name}\" has an empty or non-numeric cell. Signal processing needs a finite column",
+                name = column.name
+            ));
+        }
+        values.push(value);
+    }
+    if values.len() < 2 {
+        return Err(sciplot_core::tr!("这一列至少需要两个数值", "The column needs at least two numbers").into());
+    }
+    Ok((column.name.clone(), values))
 }
 
 fn stat_labels() -> Vec<String> {
@@ -854,7 +1153,17 @@ mod tests {
             .find(|graph| graph.name == sciplot_core::t("正弦与余弦"))
             .unwrap()
             .id;
-        let wide = fit_on_graph(&mut project, graph, 0, 0, &FitModel::Linear, None, None).unwrap();
+        let wide = fit_on_graph(
+            &mut project,
+            graph,
+            0,
+            0,
+            &FitModel::Linear,
+            None,
+            None,
+            &FitOptions::default(),
+        )
+        .unwrap();
         let curves_after_wide = project.graph(graph).unwrap().layers[0].curves.len();
         let narrow = fit_on_graph(
             &mut project,
@@ -864,6 +1173,7 @@ mod tests {
             &FitModel::Linear,
             Some(0.0),
             Some(1.0),
+            &FitOptions::default(),
         )
         .unwrap();
         assert!(
@@ -896,6 +1206,32 @@ mod tests {
             other => panic!("拟合线应是函数，实际 {other:?}"),
         }
         assert!(project.graph(graph).unwrap().layers[0].curves.len() > curves_after_wide);
+    }
+
+    #[test]
+    fn convolution_writes_the_linear_result_and_correlation_is_not_pearson() {
+        let mut project = Project::new("s");
+        let id = project.new_table("信号");
+        {
+            let table = project.table_mut(id).unwrap();
+            table.columns[0].set_numbers(&[1.0, 2.0, 3.0]);
+            table.columns[1].set_numbers(&[1.0, 1.0]);
+        }
+        let out = signal_table(&mut project, id, "convolve", 0, Some(1)).unwrap();
+        let values: Vec<f64> = project.table(out).unwrap().columns[1]
+            .numbers
+            .iter()
+            .map(|value| value.unwrap())
+            .collect();
+        assert_eq!(values, vec![1.0, 3.0, 5.0, 3.0]);
+        let corr = signal_table(&mut project, id, "autocorrelate", 0, None).unwrap();
+        let table = project.table(corr).unwrap();
+        let zero = table.columns[0]
+            .numbers
+            .iter()
+            .position(|value| *value == Some(0.0))
+            .unwrap();
+        assert!((table.columns[1].numbers[zero].unwrap() - 2.0 / 3.0).abs() < 1e-9);
     }
 
     #[test]

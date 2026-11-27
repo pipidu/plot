@@ -12,6 +12,7 @@ mod locale;
 mod matrix;
 mod project;
 mod resolve;
+mod surface_data;
 mod table;
 mod util;
 
@@ -21,8 +22,9 @@ pub use csv_io::{
 };
 pub use demo::demo_project;
 pub use formula::{
-    apply_formula, apply_formula_with, commit_cell, eval_column, eval_column_with, explain_error, parameter_names,
-    parse_initials, recalculate_table, substitute_params, CompiledExpr, EvalColumn, RecalcReport,
+    apply_formula, apply_formula_with, commit_cell, eval_column, eval_column_with, eval_note, explain_error,
+    parameter_names, parse_initials, recalculate_table, substitute_params, CompiledExpr, EvalColumn, NoteLine, NoteRun,
+    RecalcReport,
 };
 pub use graph::*;
 pub use history::History;
@@ -30,6 +32,7 @@ pub use locale::{language, set_language, t, translate, Language};
 pub use matrix::Matrix;
 pub use project::{Project, ProjectFile, FORMAT_VERSION};
 pub use resolve::{resolve_curve, sample_expr, GridData, SeriesData};
+pub use surface_data::{column_3d, Column3D};
 pub use table::{
     column_letter, Column, ColumnMode, ColumnType, NormalizeMode, NumericFormat, SortMode, Table, TableId,
 };
