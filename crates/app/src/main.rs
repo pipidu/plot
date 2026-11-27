@@ -3,6 +3,7 @@
 
 mod api;
 mod app;
+mod image_io;
 mod context;
 mod dialogs;
 mod fonts;

@@ -479,26 +479,61 @@ fn correlation(app: &mut SciPlotApp, table: TableId) {
 }
 
 fn plot_table_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, table: TableId) {
+    if clicked_menu(ui, sciplot_core::tr!("绘图向导…", "Plot wizard…")) {
+        app.dialog = Some(open_wizard(app, table));
+    }
     ui.menu_button(sciplot_core::t("绘制为"), |ui| {
-        for kind in [
-            CurveKind::Line,
-            CurveKind::Scatter,
-            CurveKind::LineSymbol,
-            CurveKind::Steps,
-            CurveKind::Bars,
-            CurveKind::HorizontalBars,
-            CurveKind::Histogram,
-            CurveKind::Area,
-            CurveKind::ErrorBars,
-            CurveKind::BoxPlot,
-            CurveKind::Pie,
-            CurveKind::Vector,
-        ] {
+        for kind in CurveKind::table_kinds() {
+            if *kind == CurveKind::Vector {
+                continue;
+            }
             if clicked_menu(ui, kind.label()) {
-                app.plot_table_as(table, kind);
+                app.plot_table_as(table, *kind);
             }
         }
+        if clicked_menu(ui, sciplot_core::tr!("向量 dx、dy", "Vector dx, dy")) {
+            app.plot_table_as_mode(table, CurveKind::Vector, sciplot_core::VectorMode::DxDy);
+        }
+        if clicked_menu(ui, sciplot_core::tr!("向量终点 XY", "Vector end XY")) {
+            app.plot_table_as_mode(table, CurveKind::Vector, sciplot_core::VectorMode::EndPoint);
+        }
+        if clicked_menu(ui, sciplot_core::tr!("向量角度和模长", "Vector angle and magnitude")) {
+            app.plot_table_as_mode(table, CurveKind::Vector, sciplot_core::VectorMode::AngleMagnitude);
+        }
     });
+}
+
+fn open_wizard(app: &SciPlotApp, table: TableId) -> Dialog {
+    let columns = app.project.table(table).map(|item| item.columns.clone()).unwrap_or_default();
+    let x = columns.iter().position(|column| column.mode == ColumnMode::X).unwrap_or(0);
+    let mut y = vec![false; columns.len()];
+    for (index, column) in columns.iter().enumerate() {
+        if index != x && (column.mode == ColumnMode::Y || column.mode == ColumnMode::Z) {
+            y[index] = true;
+        }
+    }
+    if !y.iter().any(|on| *on) {
+        if let Some(index) = columns.iter().enumerate().position(|(index, _)| index != x) {
+            y[index] = true;
+        }
+    }
+    let numeric: Vec<usize> = columns
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| *index != x && column.numbers.iter().any(|value| value.is_some()))
+        .map(|(index, _)| index)
+        .collect();
+    let third = numeric.first().copied().unwrap_or(0);
+    let fourth = numeric.get(1).copied().unwrap_or(third);
+    Dialog::Wizard {
+        table,
+        x,
+        y,
+        kind: CurveKind::Line,
+        vector_mode: sciplot_core::VectorMode::DxDy,
+        third,
+        fourth,
+    }
 }
 
 fn matrix_actions(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId) {
@@ -568,6 +603,9 @@ fn curve_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: us
     ui.separator();
     if clicked_menu(ui, sciplot_core::t("属性…")) {
         open_style(app, graph, layer, curve);
+    }
+    if clicked_menu(ui, sciplot_core::tr!("误差棒…", "Error bars…")) {
+        open_errors(app, graph, layer, curve);
     }
     if clicked_menu(
         ui,
@@ -781,10 +819,16 @@ fn curve_visibility_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId
 
 fn layer_format(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: usize) {
     if clicked_menu(ui, sciplot_core::t("横轴…")) {
-        open_axis(app, graph, layer, false);
+        open_axis(app, graph, layer, crate::app::AxisEdge::Bottom);
     }
     if clicked_menu(ui, sciplot_core::t("纵轴…")) {
-        open_axis(app, graph, layer, true);
+        open_axis(app, graph, layer, crate::app::AxisEdge::Left);
+    }
+    if clicked_menu(ui, sciplot_core::tr!("上轴…", "Top axis…")) {
+        open_axis(app, graph, layer, crate::app::AxisEdge::Top);
+    }
+    if clicked_menu(ui, sciplot_core::tr!("右轴…", "Right axis…")) {
+        open_axis(app, graph, layer, crate::app::AxisEdge::Right);
     }
     if clicked_menu(ui, sciplot_core::t("图例…")) {
         if let Some(legend) = app
@@ -861,6 +905,12 @@ fn layer_format(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: 
             y2: "1".into(),
             line_only: true,
         });
+    }
+    if clicked_menu(ui, sciplot_core::tr!("插入图像…", "Insert image…")) {
+        app.start_image_insert(graph, layer);
+    }
+    if clicked_menu(ui, sciplot_core::tr!("时间戳", "Time stamp")) {
+        app.add_timestamp(graph, layer);
     }
 }
 
@@ -981,29 +1031,63 @@ fn open_style(app: &mut SciPlotApp, graph: GraphId, layer: usize, curve: usize) 
             curve,
             style: item.style.clone(),
             name: item.name.clone(),
+            axes: item.axes,
+            vector_mode: item.vector_mode,
         });
     } else {
         app.status = sciplot_core::t("这一层没有曲线").into();
     }
 }
 
-fn open_axis(app: &mut SciPlotApp, graph: GraphId, layer: usize, y_axis: bool) {
+fn open_errors(app: &mut SciPlotApp, graph: GraphId, layer: usize, curve: usize) {
+    let Some(item) = app
+        .project
+        .graph(graph)
+        .and_then(|item| item.layers.get(layer))
+        .and_then(|item| item.curves.get(curve))
+    else {
+        return;
+    };
+    let (x_col, y_col) = match &item.source {
+        sciplot_core::DataSource::Columns { table, x_err, y_err, .. } => {
+            let names = app.project.table(*table).map(|table| {
+                table.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>()
+            });
+            let pick = |index: Option<usize>| {
+                index
+                    .and_then(|index| names.as_ref().and_then(|names| names.get(index)).cloned())
+                    .unwrap_or_default()
+            };
+            (pick(*x_err), pick(*y_err))
+        }
+        _ => (String::new(), String::new()),
+    };
+    app.dialog = Some(Dialog::Errors {
+        graph,
+        layer,
+        curve,
+        spec: item.error.clone(),
+        x_col,
+        y_col,
+    });
+}
+
+fn open_axis(app: &mut SciPlotApp, graph: GraphId, layer: usize, edge: crate::app::AxisEdge) {
     let axis = app
         .project
         .graph(graph)
         .and_then(|item| item.layers.get(layer))
-        .map(|item| {
-            if y_axis {
-                item.y_axis.clone()
-            } else {
-                item.x_axis.clone()
-            }
+        .map(|item| match edge {
+            crate::app::AxisEdge::Bottom => item.x_axis.clone(),
+            crate::app::AxisEdge::Left => item.y_axis.clone(),
+            crate::app::AxisEdge::Top => item.x_top.clone(),
+            crate::app::AxisEdge::Right => item.y_right.clone(),
         });
     if let Some(axis) = axis {
         app.dialog = Some(Dialog::Axis {
             graph,
             layer,
-            y_axis,
+            edge,
             min: crate::dialogs::number_text(axis.min),
             max: crate::dialogs::number_text(axis.max),
             step: crate::dialogs::number_text(axis.step),
@@ -1093,7 +1177,9 @@ fn function_dialog(graph: Option<GraphId>, layer: usize, surface: bool) -> Dialo
         Dialog::Function {
             graph: None,
             layer: 0,
+            form: crate::app::FunctionForm::Cartesian,
             expr: "sin(x)*cos(y)".into(),
+            y_expr: "cos(t)".into(),
             xmin: "-3.14".into(),
             xmax: "3.14".into(),
             ymin: "-3.14".into(),
@@ -1106,7 +1192,9 @@ fn function_dialog(graph: Option<GraphId>, layer: usize, surface: bool) -> Dialo
         Dialog::Function {
             graph,
             layer,
+            form: crate::app::FunctionForm::Cartesian,
             expr: "sin(x)".into(),
+            y_expr: "cos(t)".into(),
             xmin: "0".into(),
             xmax: "6.2832".into(),
             ymin: "-3.14".into(),

@@ -66,6 +66,17 @@ pub enum Prim {
         valign: VAlign,
         vertical: bool,
     },
+    /// 已解码的 RGBA8。`png_base64` 留给 SVG，避免再编码一次。
+    Image {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rgba: Vec<u8>,
+        cols: u32,
+        rows: u32,
+        png_base64: String,
+    },
 }
 
 /// 纵轴标题。汉字和单字符逐字竖排；一串英文转 90 度，避免每个字母占一行。
@@ -124,6 +135,17 @@ pub struct LayerFrame {
     pub y_scale: sciplot_core::AxisScale,
     pub x_inverted: bool,
     pub y_inverted: bool,
+    /// 上轴。平移和滚轮缩放只改下轴和左轴。
+    pub x2_min: f64,
+    pub x2_max: f64,
+    pub y2_min: f64,
+    pub y2_max: f64,
+    pub x2_scale: sciplot_core::AxisScale,
+    pub y2_scale: sciplot_core::AxisScale,
+    pub x2_inverted: bool,
+    pub y2_inverted: bool,
+    pub show_top: bool,
+    pub show_right: bool,
 }
 
 #[derive(Clone, Debug)]

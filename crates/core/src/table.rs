@@ -709,16 +709,25 @@ impl Table {
 }
 
 fn cmp_cells(column: &Column, a: usize, b: usize, ascending: bool) -> std::cmp::Ordering {
-    let cmp = cmp_optional(column.numbers.get(a).copied().flatten(), column.numbers.get(b).copied().flatten())
-        .then_with(|| {
-            let left = column.texts.get(a).map(String::as_str).unwrap_or("");
-            let right = column.texts.get(b).map(String::as_str).unwrap_or("");
-            left.cmp(right)
-        });
-    if ascending {
-        cmp
-    } else {
-        cmp.reverse()
+    let left_num = column.numbers.get(a).copied().flatten();
+    let right_num = column.numbers.get(b).copied().flatten();
+    let left_text = column.texts.get(a).map(String::as_str).unwrap_or("");
+    let right_text = column.texts.get(b).map(String::as_str).unwrap_or("");
+    let left_empty = left_num.is_none() && left_text.trim().is_empty();
+    let right_empty = right_num.is_none() && right_text.trim().is_empty();
+    // 空单元格在升序和降序里都留在最后。降序只翻转有值的比较，不再把空值翻到前面。
+    match (left_empty, right_empty) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => {
+            let cmp = cmp_optional(left_num, right_num).then_with(|| left_text.cmp(right_text));
+            if ascending {
+                cmp
+            } else {
+                cmp.reverse()
+            }
+        }
     }
 }
 
@@ -927,5 +936,31 @@ mod tests {
         assert_eq!(table.columns[1].number_at(1), 6.0);
         let copied = table.copy_tsv(0, 0, 2, 2);
         assert_eq!(copied, "9\t8\n7\t6");
+    }
+
+    #[test]
+    fn empty_cells_stay_last_when_sorting_descending() {
+        for mode in [SortMode::Whole, SortMode::Together, SortMode::Separate] {
+            let mut table = Table::new(TableId(1), "t");
+            table.columns.clear();
+            table.add_column("A", ColumnMode::X);
+            table.add_column("B", ColumnMode::Y);
+            table.ensure_rows(3);
+            table.columns[0].numbers = vec![Some(1.0), Some(2.0), None];
+            table.columns[0].texts = vec!["1".into(), "2".into(), String::new()];
+            table.columns[0].cell_formulas = vec![String::new(), "keep".into(), String::new()];
+            table.columns[1].set_numbers(&[10.0, 20.0, 30.0]);
+            let columns: &[usize] = if mode == SortMode::Whole { &[] } else { &[0, 1] };
+            table.sort_columns(columns, 0, false, mode);
+            assert_eq!(
+                table.columns[0].numbers,
+                vec![Some(2.0), Some(1.0), None],
+                "{mode:?}"
+            );
+            if mode != SortMode::Separate {
+                assert_eq!(table.columns[1].numbers, vec![Some(20.0), Some(10.0), Some(30.0)], "{mode:?}");
+                assert_eq!(table.columns[0].cell_formulas[0], "keep");
+            }
+        }
     }
 }

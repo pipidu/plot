@@ -40,7 +40,9 @@ const FORMULA_HELP_ZH: &str = "\
       exp ln log（以 10 为底）log10 log2 sqrt abs
       floor ceil round min max hypot pow cbrt sign
 
-常数：pi、e。函数曲线里自变量是 x，参数曲线里是 t，曲面公式里是 x 和 y。
+常数：pi、e。函数曲线里自变量是 x。参数曲线用 t，x(t) 和 y(t) 在「函数曲线」里分别填写。极坐标用 theta、t 或 x 表示弧度角。曲面公式里是 x 和 y。
+
+同一遍重算从左到右进行：右边的列公式能读到左边已经算完的单元格公式。它不会来回迭代。给整列套上公式时，这一列自己的单元格公式会被清掉。
 
 列公式还可以用：
   col(\"列名\")、col(\"A\")（按列名；没有同名列时才按字母列标）
@@ -64,7 +66,9 @@ Functions: sin cos tan asin acos atan atan2 sinh cosh tanh
            exp ln log (base 10) log10 log2 sqrt abs
            floor ceil round min max hypot pow cbrt sign
 
-Constants: pi and e. Function curves use x, parametric curves use t, and surfaces use x and y.
+Constants: pi and e. Function curves use x. A parametric curve uses t; enter x(t) and y(t) in the function dialog. A polar curve uses theta, t, or x for the angle in radians. Surfaces use x and y.
+
+One recalculation walks left to right: a column formula can read cell formulas in columns to its left that were just computed. It does not iterate. Applying a column formula still clears that column's own cell formulas.
 
 Column formulas can also use:
   col(\"name\"), col(\"A\") (the column of that name; a letter only when no column has it)

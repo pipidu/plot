@@ -102,7 +102,7 @@ pub fn list() -> Vec<ToolSpec> {
         ),
         spec(
             "plot_columns",
-            "用表格的列画图。kind 可以是 line、scatter、line_symbol、steps、bars、horizontal_bars、histogram、area、error_bars、box、pie。graph 省略时新建一张图。Plot columns. Omit graph to create one.",
+            "用表格的列画图。kind 可以是 line、scatter、line_symbol、steps、horizontal_steps、drop_lines、spline、bars、horizontal_bars、histogram、stacked_histogram、area、error_bars、box、pie、vector。向量可再给 vector_mode：dxdy、endpoint、angle。graph 省略时新建一张图。Plot columns. Omit graph to create one.",
             props(&[
                 ("table", id_prop("表格名称或 id。Table name or id.")),
                 ("x", id_prop("横轴列。默认是角色为 X 的列。X column. Defaults to the X-role column.")),
@@ -112,14 +112,17 @@ pub fn list() -> Vec<ToolSpec> {
                 ("title", string("图层标题。Layer title.")),
                 ("x_err", id_prop("x 误差列。可选。Optional x-error column.")),
                 ("y_err", id_prop("y 误差列。可选。Optional y-error column.")),
+                ("vector_mode", string("向量列的含义：dxdy、endpoint（终点 XY）或 angle（弧度角和模长）。Vector columns: dxdy, endpoint, or angle.")),
             ]),
             &["table", "y"],
         ),
         spec(
             "add_function_curve",
-            "添加 y = f(x) 的函数曲线。expr 用 x 做自变量，例如 sin(x)。Add a function curve y = f(x).",
+            "添加函数曲线。form 省略或 cartesian 时是 y=f(x)；parametric 时 expr 是 x(t)、y_expr 是 y(t)；polar 时 expr 是 r(θ)，θ 用弧度，可以用 theta、t 或 x。x_min/x_max 是 x、t 或 θ 的范围。Add a function curve: cartesian y=f(x), parametric, or polar.",
             props(&[
-                ("expr", string("表达式，自变量是 x。Expression in x.")),
+                ("expr", string("表达式。笛卡尔和极坐标用这一个；参数曲线把它当作 x(t)。Expression. For a parametric curve this is x(t).")),
+                ("y_expr", string("参数曲线的 y(t)。Parametric y(t).")),
+                ("form", string("cartesian、parametric 或 polar。默认 cartesian。")),
                 ("x_min", json!({"type": "number"})),
                 ("x_max", json!({"type": "number"})),
                 ("samples", json!({"type": "integer", "description": "采样点数，默认 200。Sample count, default 200."})),
@@ -482,7 +485,7 @@ fn plot_columns(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>)
             .get("y")
             .and_then(Value::as_array)
             .ok_or_else(|| sciplot_core::tr!("缺少参数 y", "Missing argument y").to_string())?;
-        if y_values.is_empty() {
+        if y_values.is_empty() && kind != CurveKind::Vector {
             return Err(sciplot_core::tr!("至少指定一列 Y", "Name at least one Y column").into());
         }
         let mut y_cols = Vec::new();
@@ -515,7 +518,23 @@ fn plot_columns(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>)
     };
     let title = args.get("title").and_then(Value::as_str).map(str::to_string);
     let before = project.graph(graph_id).and_then(|graph| graph.layers.first()).map(|layer| layer.curves.len()).unwrap_or(0);
-    {
+    if kind == CurveKind::Vector {
+        let mode = parse_vector_mode(args.get("vector_mode").and_then(Value::as_str).unwrap_or("dxdy"))?;
+        {
+            let graph = project.graph_mut(graph_id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
+            if graph.layers.is_empty() {
+                graph.layers.push(sciplot_core::Layer::default());
+            }
+            let graph_name = graph.name.clone();
+            let layer = &mut graph.layers[0];
+            if let Some(title) = &title {
+                layer.title = title.clone();
+            } else if created && layer.title.is_empty() {
+                layer.title = graph_name;
+            }
+        }
+        project.add_curves_with(graph_id, 0, table_id, kind, mode)?;
+    } else {
         let graph = project.graph_mut(graph_id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
         if graph.layers.is_empty() {
             graph.layers.push(sciplot_core::Layer::default());
@@ -539,7 +558,7 @@ fn plot_columns(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>)
         }
         for (y, name) in y_cols.into_iter().zip(y_names) {
             let style = CurveStyle::from_index(layer.curves.len());
-            layer.curves.push(Curve {
+            let mut curve = Curve {
                 name,
                 kind,
                 style,
@@ -553,7 +572,15 @@ fn plot_columns(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>)
                     dy: None,
                 },
                 visible: true,
-            });
+                ..Curve::default()
+            };
+            if x_err.is_some() {
+                curve.error.x = sciplot_core::ErrorSource::Column;
+            }
+            if y_err.is_some() {
+                curve.error.y = sciplot_core::ErrorSource::Column;
+            }
+            layer.curves.push(curve);
         }
     }
     if created {
@@ -588,6 +615,14 @@ fn optional_column(table: &Table, value: Option<&Value>) -> Result<Option<usize>
 fn add_function_curve(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>) -> Result<ToolOutput, String> {
     let expr = req_str(args, "expr")?;
     sciplot_core::CompiledExpr::compile(&expr)?;
+    let form = args.get("form").and_then(Value::as_str).unwrap_or("cartesian");
+    let y_expr = args.get("y_expr").and_then(Value::as_str).unwrap_or("").to_string();
+    if matches!(form, "parametric" | "参数" | "参数曲线") {
+        if y_expr.trim().is_empty() {
+            return Err(sciplot_core::tr!("参数曲线需要 y_expr", "A parametric curve needs y_expr").into());
+        }
+        sciplot_core::CompiledExpr::compile(&y_expr)?;
+    }
     let x_min = req_f64(args, "x_min")?;
     let x_max = req_f64(args, "x_max")?;
     if !x_min.is_finite() || !x_max.is_finite() || x_max <= x_min {
@@ -612,17 +647,45 @@ fn add_function_curve(project: &mut Project, prefs: &Prefs, args: &Map<String, V
             layer.title = curve_name.clone();
         }
         let style = CurveStyle::from_index(layer.curves.len());
+        let (kind, source) = if matches!(form, "parametric" | "参数" | "参数曲线") {
+            (
+                CurveKind::Parametric,
+                DataSource::Parametric {
+                    x_expr: expr.clone(),
+                    y_expr: y_expr.clone(),
+                    t_min: x_min,
+                    t_max: x_max,
+                    samples,
+                },
+            )
+        } else if matches!(form, "polar" | "极坐标") {
+            (
+                CurveKind::Polar,
+                DataSource::Polar {
+                    expr: expr.clone(),
+                    theta_min: x_min,
+                    theta_max: x_max,
+                    samples,
+                },
+            )
+        } else {
+            (
+                CurveKind::Function,
+                DataSource::Function {
+                    expr: expr.clone(),
+                    x_min,
+                    x_max,
+                    samples,
+                },
+            )
+        };
         layer.curves.push(Curve {
             name: curve_name.clone(),
-            kind: CurveKind::Function,
+            kind,
             style,
-            source: DataSource::Function {
-                expr: expr.clone(),
-                x_min,
-                x_max,
-                samples,
-            },
+            source,
             visible: true,
+            ..Curve::default()
         });
     }
     if created {
@@ -675,6 +738,40 @@ fn set_graph_options(project: &mut Project, args: &Map<String, Value>) -> Result
         }
         if let Some(flag) = args.get("y_inverted").and_then(Value::as_bool) {
             layer.y_axis.inverted = flag;
+        }
+        if let Some(label) = args.get("x_top_label").and_then(Value::as_str) {
+            layer.x_top.label = label.to_string();
+            layer.show_top = true;
+        }
+        if let Some(label) = args.get("y_right_label").and_then(Value::as_str) {
+            layer.y_right.label = label.to_string();
+            layer.show_right = true;
+        }
+        apply_bound(&mut layer.y_right.min, args.get("y_right_min"))?;
+        apply_bound(&mut layer.y_right.max, args.get("y_right_max"))?;
+        if let Some(side) = args.get("curve_y_side").and_then(Value::as_str) {
+            let index = args.get("curve").and_then(Value::as_u64).unwrap_or(1).saturating_sub(1) as usize;
+            let curve = layer.curves.get_mut(index).ok_or_else(|| sciplot_core::t("找不到曲线").to_string())?;
+            curve.axes.y = if matches!(side, "right" | "右" | "y_right") {
+                sciplot_core::YAxisSide::Right
+            } else {
+                sciplot_core::YAxisSide::Left
+            };
+            if curve.axes.y == sciplot_core::YAxisSide::Right {
+                layer.show_right = true;
+            }
+        }
+        if let Some(side) = args.get("curve_x_side").and_then(Value::as_str) {
+            let index = args.get("curve").and_then(Value::as_u64).unwrap_or(1).saturating_sub(1) as usize;
+            let curve = layer.curves.get_mut(index).ok_or_else(|| sciplot_core::t("找不到曲线").to_string())?;
+            curve.axes.x = if matches!(side, "top" | "上" | "x_top") {
+                sciplot_core::XAxisSide::Top
+            } else {
+                sciplot_core::XAxisSide::Bottom
+            };
+            if curve.axes.x == sciplot_core::XAxisSide::Top {
+                layer.show_top = true;
+            }
         }
         if let Some(flag) = args.get("legend").and_then(Value::as_bool) {
             layer.legend.visible = flag;
@@ -1014,6 +1111,19 @@ fn parse_mode(text: &str) -> Result<ColumnMode, String> {
     Ok(mode)
 }
 
+fn parse_vector_mode(text: &str) -> Result<sciplot_core::VectorMode, String> {
+    match text {
+        "dxdy" | "dx_dy" | "dx" | "向量场" => Ok(sciplot_core::VectorMode::DxDy),
+        "endpoint" | "end" | "xyxy" | "终点" => Ok(sciplot_core::VectorMode::EndPoint),
+        "angle" | "xyam" | "angle_magnitude" | "角度" => Ok(sciplot_core::VectorMode::AngleMagnitude),
+        other => Err(sciplot_core::trf!(
+            "不认识的向量形式：{other}",
+            "Unknown vector mode: {other}",
+            other = other
+        )),
+    }
+}
+
 fn parse_kind(text: &str) -> Result<CurveKind, String> {
     let folded = text.trim().to_ascii_lowercase().replace([' ', '-'], "_");
     let kind = match folded.as_str() {
@@ -1029,6 +1139,12 @@ fn parse_kind(text: &str) -> Result<CurveKind, String> {
         "box" | "boxplot" | "箱线" => CurveKind::BoxPlot,
         "pie" | "饼图" => CurveKind::Pie,
         "vector" | "向量场" => CurveKind::Vector,
+        "drop_lines" | "droplines" | "垂直落线" | "落线" => CurveKind::DropLines,
+        "spline" | "样条" => CurveKind::Spline,
+        "horizontal_steps" | "水平阶梯" => CurveKind::HorizontalSteps,
+        "stacked_histogram" | "stacked" | "堆积直方图" => CurveKind::StackedHistogram,
+        "polar" | "极坐标" => CurveKind::Polar,
+        "parametric" | "参数" => CurveKind::Parametric,
         "contour" | "等高线" => CurveKind::Contour,
         "heatmap" | "热力图" => CurveKind::Heatmap,
         "function" | "函数" => CurveKind::Function,
@@ -1109,6 +1225,11 @@ fn kind_key(kind: CurveKind) -> &'static str {
         CurveKind::BoxPlot => "box",
         CurveKind::Pie => "pie",
         CurveKind::Vector => "vector",
+        CurveKind::DropLines => "drop_lines",
+        CurveKind::Spline => "spline",
+        CurveKind::HorizontalSteps => "horizontal_steps",
+        CurveKind::StackedHistogram => "stacked_histogram",
+        CurveKind::Polar => "polar",
         CurveKind::Contour => "contour",
         CurveKind::Heatmap => "heatmap",
         CurveKind::Function => "function",

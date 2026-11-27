@@ -134,33 +134,29 @@ pub struct RecalcReport {
     pub first_error: Option<String>,
 }
 
-/// 先按从左到右重算列公式（已有单元格公式的格子跳过），再按行重算单元格公式。
-/// 后面的公式能看见前面刚写进去的数。`tablecol` 能读 `others`。
+/// 从左到右只走一轮。每一列先写列公式（已有单元格公式的格子跳过），再写这一列的单元格公式。
+/// 因此右边的列公式能读到左边在同一轮里刚算出来的单元格公式。不是迭代求解：左边看不到右边这一轮的新值。
+/// 套用列公式仍会清掉该列的单元格公式。`tablecol` 能读 `others`。
 pub fn recalculate_table(table: &mut Table, others: &[Table]) -> RecalcReport {
     let mut report = RecalcReport::default();
     let rows = table.nrows();
     publish(table, others);
     for index in 0..table.columns.len() {
         let formula = table.columns[index].formula.trim().to_string();
-        if formula.is_empty() {
-            continue;
-        }
-        let compiled = match CompiledExpr::compile(&formula) {
-            Ok(compiled) => compiled,
-            Err(err) => {
-                note_formula_error(&mut report, &err);
-                continue;
+        if !formula.is_empty() {
+            match CompiledExpr::compile(&formula) {
+                Ok(compiled) => {
+                    for row in 0..rows {
+                        if !table.columns[index].cell_formula(row).trim().is_empty() {
+                            continue;
+                        }
+                        write_evaluated(&mut table.columns[index], row, eval_at(&compiled, row), &mut report);
+                    }
+                    publish(table, others);
+                }
+                Err(err) => note_formula_error(&mut report, &err),
             }
-        };
-        for row in 0..rows {
-            if !table.columns[index].cell_formula(row).trim().is_empty() {
-                continue;
-            }
-            write_evaluated(&mut table.columns[index], row, eval_at(&compiled, row), &mut report);
         }
-        publish(table, others);
-    }
-    for index in 0..table.columns.len() {
         for row in 0..rows {
             let raw = table.columns[index].cell_formula(row).trim().to_string();
             if raw.is_empty() {
@@ -1048,5 +1044,34 @@ mod tests {
             rewrite_tablecol_table("tablecol(\"Table1\", \"t\")", "Table1", "数据"),
             "tablecol(\"数据\", \"t\")"
         );
+    }
+
+    #[test]
+    fn right_column_formula_sees_left_cell_formula_in_one_pass() {
+        let mut table = Table::new(TableId(1), "t");
+        table.columns.clear();
+        table.add_column("A", ColumnMode::X);
+        table.add_column("B", ColumnMode::Y);
+        table.ensure_rows(1);
+        table.columns[0].numbers[0] = None;
+        table.columns[0].texts[0].clear();
+        table.columns[0].set_cell_formula_raw(0, "5");
+        table.columns[1].formula = "col(\"A\")+1".into();
+        table.columns[1].numbers[0] = None;
+        let report = recalculate_table(&mut table, &[]);
+        assert!(report.first_error.is_none(), "{:?}", report.first_error);
+        assert_eq!(table.columns[0].numbers[0], Some(5.0));
+        assert_eq!(table.columns[1].numbers[0], Some(6.0));
+
+        // 仍只走一轮：左边的列公式看不到右边这一轮才写上的值。
+        table.columns[0].cell_formulas[0].clear();
+        table.columns[0].formula = "col(\"B\")+1".into();
+        table.columns[1].formula = "10".into();
+        table.columns[1].numbers[0] = Some(5.0);
+        table.columns[0].numbers[0] = Some(0.0);
+        let report = recalculate_table(&mut table, &[]);
+        assert!(report.first_error.is_none(), "{:?}", report.first_error);
+        assert_eq!(table.columns[1].numbers[0], Some(10.0));
+        assert_eq!(table.columns[0].numbers[0], Some(6.0));
     }
 }

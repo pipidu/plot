@@ -1,6 +1,6 @@
 use sciplot_core::{
-    format_axis_value, format_number, palette_color, resolve_curve, Axis, AxisScale, CurveKind, Dash, Graph, LegendPos,
-    Project, SeriesData, Symbol,
+    format_axis_value, format_number, palette_color, resolve_curve, Axis, AxisScale, CurveKind, Dash, FillPattern, Graph,
+    LegendPos, Project, SeriesData, StepAnchor, Symbol, WhiskerMode, XAxisSide, YAxisSide,
 };
 
 use crate::color::{viridis, with_alpha};
@@ -21,6 +21,17 @@ struct Item {
     kind: CurveKind,
     name: String,
     curve: usize,
+    x_top: bool,
+    y_right: bool,
+    step_anchor: StepAnchor,
+    show_symbols: bool,
+    pie_start: f32,
+    pie_size: f32,
+    pie_pattern: FillPattern,
+    whisker: WhiskerMode,
+    whisker_pct: f64,
+    box_mean: bool,
+    box_outliers: bool,
 }
 
 struct LegendEntry {
@@ -107,6 +118,17 @@ fn render_layer(
                 kind: curve.kind,
                 name: curve.name.clone(),
                 curve: index,
+                x_top: curve.axes.x == XAxisSide::Top,
+                y_right: curve.axes.y == YAxisSide::Right,
+                step_anchor: curve.style.step_anchor,
+                show_symbols: curve.style.show_symbols,
+                pie_start: curve.style.pie_start_deg,
+                pie_size: curve.style.pie_size,
+                pie_pattern: curve.style.pie_pattern,
+                whisker: curve.style.whisker,
+                whisker_pct: curve.style.whisker_percentile,
+                box_mean: curve.style.box_mean,
+                box_outliers: curve.style.box_outliers,
             }),
             Err(err) => scene.notes.push(format!("{}：{err}", curve.name)),
         }
@@ -117,9 +139,11 @@ fn render_layer(
     let fw = (layer.frame.w * scene.width).max(1.0);
     let fh = (layer.frame.h * scene.height).max(1.0);
     let wants_bar = items.iter().any(|item| matches!(item.kind, CurveKind::Heatmap | CurveKind::Contour));
+    let show_top = layer.show_top || items.iter().any(|item| item.x_top);
+    let show_right = layer.show_right || items.iter().any(|item| item.y_right);
     let left = 64.0 * scale;
-    let right = if wants_bar { 72.0 * scale } else { 16.0 * scale };
-    let top = 30.0 * scale;
+    let right = 16.0 * scale + if show_right { 56.0 * scale } else { 0.0 } + if wants_bar { 56.0 * scale } else { 0.0 };
+    let top = if show_top { 70.0 * scale } else { 30.0 * scale };
     let bottom = 46.0 * scale;
     let plot = PxRect {
         x: fx + left,
@@ -129,8 +153,10 @@ fn render_layer(
     };
 
     let only_pie = !items.is_empty() && items.iter().all(|item| item.kind == CurveKind::Pie);
-    let mut x_auto = Range::new(layer.x_axis.scale);
-    let mut y_auto = Range::new(layer.y_axis.scale);
+    let mut bottom = Range::new(layer.x_axis.scale);
+    let mut top_range = Range::new(layer.x_top.scale);
+    let mut left_range = Range::new(layer.y_axis.scale);
+    let mut right_range = Range::new(layer.y_right.scale);
     let mut category_x: Option<Vec<(f64, String)>> = None;
     let mut category_y: Option<Vec<(f64, String)>> = None;
     let mut z_span: Option<(f64, f64)> = None;
@@ -141,10 +167,10 @@ fn render_layer(
             CurveKind::Pie => {}
             CurveKind::Heatmap | CurveKind::Contour => {
                 if let Some(grid) = &item.series.grid {
-                    x_auto.add(grid.x0.min(grid.x1));
-                    x_auto.add(grid.x0.max(grid.x1));
-                    y_auto.add(grid.y0.min(grid.y1));
-                    y_auto.add(grid.y0.max(grid.y1));
+                    add_span(item.x_top, &mut bottom, &mut top_range, grid.x0.min(grid.x1));
+                    add_span(item.x_top, &mut bottom, &mut top_range, grid.x0.max(grid.x1));
+                    add_span(item.y_right, &mut left_range, &mut right_range, grid.y0.min(grid.y1));
+                    add_span(item.y_right, &mut left_range, &mut right_range, grid.y0.max(grid.y1));
                     let mut lo = f64::INFINITY;
                     let mut hi = f64::NEG_INFINITY;
                     for value in &grid.z {
@@ -161,49 +187,52 @@ fn render_layer(
                     }
                 }
             }
-            CurveKind::Histogram => {
+            CurveKind::Histogram | CurveKind::StackedHistogram => {
+                if item.kind == CurveKind::StackedHistogram {
+                    continue;
+                }
                 let values = finite_values(hist_source(item));
                 if let Some((edges, counts)) = histogram(&values, item.bins) {
-                    x_auto.add(edges[0]);
-                    x_auto.add(*edges.last().unwrap_or(&edges[0]));
-                    y_auto.add(0.0);
-                    y_auto.add(counts.iter().copied().fold(0.0, f64::max));
+                    add_span(item.x_top, &mut bottom, &mut top_range, edges[0]);
+                    add_span(item.x_top, &mut bottom, &mut top_range, *edges.last().unwrap_or(&edges[0]));
+                    add_span(item.y_right, &mut left_range, &mut right_range, 0.0);
+                    add_span(item.y_right, &mut left_range, &mut right_range, counts.iter().copied().fold(0.0, f64::max));
                 }
             }
             CurveKind::BoxPlot => {
                 box_slot += 1.0;
-                x_auto.add(box_slot);
+                add_span(item.x_top, &mut bottom, &mut top_range, box_slot);
                 for value in item.series.y.iter().copied().filter(|v| v.is_finite()) {
-                    y_auto.add(value);
+                    add_span(item.y_right, &mut left_range, &mut right_range, value);
                 }
             }
             CurveKind::HorizontalBars => {
                 for (index, value) in item.series.y.iter().enumerate() {
                     if value.is_finite() {
-                        x_auto.add(0.0);
-                        x_auto.add(*value);
+                        add_span(item.x_top, &mut bottom, &mut top_range, 0.0);
+                        add_span(item.x_top, &mut bottom, &mut top_range, *value);
                     }
                     if item.series.x.get(index).copied().unwrap_or(f64::NAN).is_finite() {
-                        y_auto.add(item.series.x[index]);
+                        add_span(item.y_right, &mut left_range, &mut right_range, item.series.x[index]);
                     }
                 }
                 // 条形沿 Y 方向占 half，中心取 series.x。只记中心会把两端切掉。
-                extend_bar_span(&mut y_auto, &item.series.x);
+                extend_bar_span(item.y_right, &mut left_range, &mut right_range, &item.series.x);
                 if !item.series.labels.is_empty() {
                     category_y = Some(labeled(&item.series));
                 }
             }
             CurveKind::Bars => {
-                y_auto.add(0.0);
+                add_span(item.y_right, &mut left_range, &mut right_range, 0.0);
                 for (index, value) in item.series.y.iter().enumerate() {
                     if value.is_finite() {
-                        y_auto.add(*value);
+                        add_span(item.y_right, &mut left_range, &mut right_range, *value);
                     }
                     if item.series.x.get(index).copied().unwrap_or(f64::NAN).is_finite() {
-                        x_auto.add(item.series.x[index]);
+                        add_span(item.x_top, &mut bottom, &mut top_range, item.series.x[index]);
                     }
                 }
-                extend_bar_span(&mut x_auto, &item.series.x);
+                extend_bar_span(item.x_top, &mut bottom, &mut top_range, &item.series.x);
                 if !item.series.labels.is_empty() {
                     category_x = Some(labeled(&item.series));
                 }
@@ -213,15 +242,15 @@ fn render_layer(
                 for i in 0..n {
                     let (x, y) = (item.series.x[i], item.series.y[i]);
                     if x.is_finite() && y.is_finite() {
-                        x_auto.add(x);
-                        y_auto.add(y);
+                        add_span(item.x_top, &mut bottom, &mut top_range, x);
+                        add_span(item.y_right, &mut left_range, &mut right_range, y);
                         let dx = item.series.dx.get(i).copied().unwrap_or(0.0);
                         let dy = item.series.dy.get(i).copied().unwrap_or(0.0);
                         if dx.is_finite() {
-                            x_auto.add(x + dx);
+                            add_span(item.x_top, &mut bottom, &mut top_range, x + dx);
                         }
                         if dy.is_finite() {
-                            y_auto.add(y + dy);
+                            add_span(item.y_right, &mut left_range, &mut right_range, y + dy);
                         }
                     }
                 }
@@ -233,25 +262,48 @@ fn render_layer(
                     if !x.is_finite() || !y.is_finite() {
                         continue;
                     }
-                    x_auto.add(x);
-                    y_auto.add(y);
+                    add_span(item.x_top, &mut bottom, &mut top_range, x);
+                    add_span(item.y_right, &mut left_range, &mut right_range, y);
                     if let Some(err) = item.series.x_err.get(i).copied().filter(|v| v.is_finite()) {
-                        x_auto.add(x - err);
-                        x_auto.add(x + err);
+                        add_span(item.x_top, &mut bottom, &mut top_range, x - err);
+                        add_span(item.x_top, &mut bottom, &mut top_range, x + err);
                     }
                     if let Some(err) = item.series.y_err.get(i).copied().filter(|v| v.is_finite()) {
-                        y_auto.add(y - err);
-                        y_auto.add(y + err);
+                        add_span(item.y_right, &mut left_range, &mut right_range, y - err);
+                        add_span(item.y_right, &mut left_range, &mut right_range, y + err);
+                    }
+                }
+                if item.kind == CurveKind::DropLines {
+                    let scale = if item.y_right { layer.y_right.scale } else { layer.y_axis.scale };
+                    if scale == AxisScale::Linear {
+                        add_span(item.y_right, &mut left_range, &mut right_range, 0.0);
                     }
                 }
             }
         }
     }
+    if let Some(stack) = stacked_bins(&items) {
+        let host = items.iter().find(|item| item.kind == CurveKind::StackedHistogram);
+        if let Some(host) = host {
+            add_span(host.x_top, &mut bottom, &mut top_range, stack.edges[0]);
+            add_span(host.x_top, &mut bottom, &mut top_range, *stack.edges.last().unwrap_or(&stack.edges[0]));
+            add_span(host.y_right, &mut left_range, &mut right_range, 0.0);
+            add_span(host.y_right, &mut left_range, &mut right_range, stack.total_max);
+        }
+    }
 
-    let (x_min, x_max, x_note) = finish_range(&x_auto, &layer.x_axis, view.x_min, view.x_max);
-    let (y_min, y_max, y_note) = finish_range(&y_auto, &layer.y_axis, view.y_min, view.y_max);
+    let (x_min, x_max, x_note) = finish_range(&bottom, &layer.x_axis, view.x_min, view.x_max);
+    let (y_min, y_max, y_note) = finish_range(&left_range, &layer.y_axis, view.y_min, view.y_max);
+    let (x2_min, x2_max, x2_note) = finish_range(&top_range, &layer.x_top, None, None);
+    let (y2_min, y2_max, y2_note) = finish_range(&right_range, &layer.y_right, None, None);
     push_note(scene, x_note);
     push_note(scene, y_note);
+    if show_top {
+        push_note(scene, x2_note);
+    }
+    if show_right {
+        push_note(scene, y2_note);
+    }
     let frame = LayerFrame {
         plot,
         x_min,
@@ -262,6 +314,16 @@ fn render_layer(
         y_scale: layer.y_axis.scale,
         x_inverted: layer.x_axis.inverted,
         y_inverted: layer.y_axis.inverted,
+        x2_min,
+        x2_max,
+        y2_min,
+        y2_max,
+        x2_scale: layer.x_top.scale,
+        y2_scale: layer.y_right.scale,
+        x2_inverted: layer.x_top.inverted,
+        y2_inverted: layer.y_right.inverted,
+        show_top,
+        show_right,
     };
 
     push_rect(scene, plot.x, plot.y, plot.w, plot.h, Some([252, 252, 252, 255]), None);
@@ -277,6 +339,7 @@ fn render_layer(
             CurveKind::Heatmap => draw_heatmap(scene, &frame, item),
             CurveKind::Contour => draw_contour(scene, &frame, item, z_span),
             CurveKind::Histogram => draw_histogram(scene, &frame, item),
+            CurveKind::StackedHistogram => {}
             CurveKind::BoxPlot => {
                 box_slot += 1.0;
                 draw_box(scene, &frame, item, box_slot);
@@ -284,7 +347,10 @@ fn render_layer(
             CurveKind::Bars => draw_bars(scene, &frame, item, false),
             CurveKind::HorizontalBars => draw_bars(scene, &frame, item, true),
             CurveKind::Area => draw_area(scene, &frame, item),
-            CurveKind::Steps => draw_steps(scene, &frame, item),
+            CurveKind::Steps => draw_steps(scene, &frame, item, false),
+            CurveKind::HorizontalSteps => draw_steps(scene, &frame, item, true),
+            CurveKind::DropLines => draw_drops(scene, &frame, item),
+            CurveKind::Spline => draw_spline(scene, &frame, item),
             CurveKind::Vector => draw_vectors(scene, &frame, item),
             CurveKind::Scatter => draw_markers(scene, &frame, item),
             CurveKind::ErrorBars => {
@@ -301,7 +367,13 @@ fn render_layer(
         if shows_point_labels(item.kind) {
             draw_point_labels(scene, &frame, item, scale);
         }
-        if item.kind != CurveKind::Pie {
+        if item.show_symbols && matches!(item.kind, CurveKind::Steps | CurveKind::HorizontalSteps | CurveKind::Spline) {
+            draw_markers(scene, &frame, item);
+        }
+        if item.kind != CurveKind::ErrorBars && overlay_errors(item.kind) && has_error(&item.series) {
+            draw_errors(scene, &frame, item);
+        }
+        if item.kind != CurveKind::Pie && item.kind != CurveKind::StackedHistogram {
             legend.push(LegendEntry {
                 name: item.name.clone(),
                 color: item.color,
@@ -310,6 +382,9 @@ fn render_layer(
                 curve: Some(item.curve),
             });
         }
+    }
+    if let Some(stack) = stacked_bins(&items) {
+        draw_stacked(scene, &frame, &items, &stack, &mut legend);
     }
     legend.extend(hidden_legend);
 
@@ -339,7 +414,7 @@ fn render_layer(
     }
     if let Some((z0, z1)) = z_span {
         if wants_bar {
-            draw_colorbar(scene, plot, z0, z1, scale);
+            draw_colorbar(scene, plot, z0, z1, scale, if frame.show_right { 52.0 * scale } else { 0.0 });
         }
     }
     if layer.legend.visible {
@@ -563,12 +638,27 @@ fn histogram(values: &[f64], bins: usize) -> Option<(Vec<f64>, Vec<f64>)> {
 }
 
 fn map_xy(frame: &LayerFrame, x: f64, y: f64) -> Option<(f32, f32)> {
-    let ux = unit(frame.x_scale, x, frame.x_min, frame.x_max, frame.x_inverted)?;
-    let uy = unit(frame.y_scale, y, frame.y_min, frame.y_max, frame.y_inverted)?;
-    Some((
-        frame.plot.x + ux * frame.plot.w,
-        frame.plot.y + frame.plot.h - uy * frame.plot.h,
-    ))
+    map_on(frame, x, y, false, false)
+}
+
+fn map_item(frame: &LayerFrame, item: &Item, x: f64, y: f64) -> Option<(f32, f32)> {
+    map_on(frame, x, y, item.x_top, item.y_right)
+}
+
+fn map_on(frame: &LayerFrame, x: f64, y: f64, x_top: bool, y_right: bool) -> Option<(f32, f32)> {
+    let (xmin, xmax, xscale, xinv) = if x_top {
+        (frame.x2_min, frame.x2_max, frame.x2_scale, frame.x2_inverted)
+    } else {
+        (frame.x_min, frame.x_max, frame.x_scale, frame.x_inverted)
+    };
+    let (ymin, ymax, yscale, yinv) = if y_right {
+        (frame.y2_min, frame.y2_max, frame.y2_scale, frame.y2_inverted)
+    } else {
+        (frame.y_min, frame.y_max, frame.y_scale, frame.y_inverted)
+    };
+    let ux = unit(xscale, x, xmin, xmax, xinv)?;
+    let uy = unit(yscale, y, ymin, ymax, yinv)?;
+    Some((frame.plot.x + ux * frame.plot.w, frame.plot.y + frame.plot.h - uy * frame.plot.h))
 }
 
 fn draw_grid(scene: &mut Scene, frame: &LayerFrame, x_axis: &Axis, y_axis: &Axis, cat_x: bool, cat_y: bool) {
@@ -725,10 +815,84 @@ fn draw_axis_decor(
             true,
         );
     }
+    if frame.show_top {
+        for tick_mark in axis_ticks(scene, &layer.x_top, frame.x2_min, frame.x2_max) {
+            if !tick_mark.major {
+                continue;
+            }
+            if let Some((px, _)) = map_on(frame, tick_mark.value, frame.y2_min, true, false) {
+                if px < frame.plot.x - 1.0 || px > frame.plot.right() + 1.0 {
+                    continue;
+                }
+                line(scene, px, frame.plot.y, px, frame.plot.y - tick, [40, 40, 40, 255], scale, Dash::Solid);
+                text(
+                    scene,
+                    px,
+                    frame.plot.y - tick - 2.0 * scale,
+                    &tick_label(&layer.x_top, tick_mark.value, frame.x2_min, frame.x2_max),
+                    layer.x_top.tick_size * scale,
+                    [30, 30, 30, 255],
+                    HAlign::Center,
+                    VAlign::Bottom,
+                    false,
+                );
+            }
+        }
+        if !layer.x_top.label.is_empty() {
+            text(
+                scene,
+                frame.plot.x + frame.plot.w * 0.5,
+                frame.plot.y - 36.0 * scale,
+                &layer.x_top.label,
+                layer.x_top.label_size * scale,
+                [20, 20, 20, 255],
+                HAlign::Center,
+                VAlign::Bottom,
+                false,
+            );
+        }
+    }
+    if frame.show_right {
+        for tick_mark in axis_ticks(scene, &layer.y_right, frame.y2_min, frame.y2_max) {
+            if !tick_mark.major {
+                continue;
+            }
+            if let Some((_, py)) = map_on(frame, frame.x2_min, tick_mark.value, false, true) {
+                if py < frame.plot.y - 1.0 || py > frame.plot.bottom() + 1.0 {
+                    continue;
+                }
+                line(scene, frame.plot.right(), py, frame.plot.right() + tick, py, [40, 40, 40, 255], scale, Dash::Solid);
+                text(
+                    scene,
+                    frame.plot.right() + tick + 3.0 * scale,
+                    py,
+                    &tick_label(&layer.y_right, tick_mark.value, frame.y2_min, frame.y2_max),
+                    layer.y_right.tick_size * scale,
+                    [30, 30, 30, 255],
+                    HAlign::Left,
+                    VAlign::Center,
+                    false,
+                );
+            }
+        }
+        if !layer.y_right.label.is_empty() {
+            text(
+                scene,
+                frame.plot.right() + 48.0 * scale,
+                frame.plot.y + frame.plot.h * 0.5,
+                &layer.y_right.label,
+                layer.y_right.label_size * scale,
+                [20, 20, 20, 255],
+                HAlign::Center,
+                VAlign::Center,
+                true,
+            );
+        }
+    }
 }
 
 fn draw_polyline(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
-    let pts = mapped_pairs(frame, &item.series);
+    let pts = mapped_pairs(frame, item);
     for part in clip_polyline(frame.plot, &pts) {
         if part.len() >= 2 {
             scene.primitives.push(Prim::Polyline {
@@ -752,9 +916,15 @@ fn shows_point_labels(kind: CurveKind) -> bool {
             | CurveKind::Scatter
             | CurveKind::LineSymbol
             | CurveKind::Steps
+            | CurveKind::HorizontalSteps
+            | CurveKind::DropLines
+            | CurveKind::Spline
             | CurveKind::Area
             | CurveKind::ErrorBars
             | CurveKind::Vector
+            | CurveKind::Polar
+            | CurveKind::Parametric
+            | CurveKind::Function
     )
 }
 
@@ -764,7 +934,7 @@ fn draw_point_labels(scene: &mut Scene, frame: &LayerFrame, item: &Item, scale: 
         let Some(label) = item.series.point_labels.get(i).map(String::as_str).filter(|text| !text.is_empty()) else {
             continue;
         };
-        let Some((px, py)) = map_xy(frame, item.series.x[i], item.series.y[i]) else {
+        let Some((px, py)) = map_item(frame, item, item.series.x[i], item.series.y[i]) else {
             continue;
         };
         if frame.plot.contains(px, py) {
@@ -784,13 +954,13 @@ fn draw_point_labels(scene: &mut Scene, frame: &LayerFrame, item: &Item, scale: 
 }
 
 fn draw_markers(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
-    if item.symbol == Symbol::None && item.kind != CurveKind::Scatter {
+    if item.symbol == Symbol::None && !matches!(item.kind, CurveKind::Scatter | CurveKind::DropLines) {
         return;
     }
     let symbol = if item.symbol == Symbol::None { Symbol::Circle } else { item.symbol };
     let n = item.series.x.len().min(item.series.y.len());
     for i in 0..n {
-        if let Some((px, py)) = map_xy(frame, item.series.x[i], item.series.y[i]) {
+        if let Some((px, py)) = map_item(frame, item, item.series.x[i], item.series.y[i]) {
             if frame.plot.contains(px, py) {
                 draw_symbol(scene, symbol, px, py, item.symbol_size, item.color);
             }
@@ -798,15 +968,93 @@ fn draw_markers(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
     }
 }
 
-fn draw_steps(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
+fn draw_steps(scene: &mut Scene, frame: &LayerFrame, item: &Item, horizontal: bool) {
     let n = item.series.x.len().min(item.series.y.len());
     let mut raw: Vec<(f32, f32)> = Vec::new();
+    let mut previous: Option<(f64, f64)> = None;
     for i in 0..n {
-        if let Some(p) = map_xy(frame, item.series.x[i], item.series.y[i]) {
-            if let Some(prev) = raw.last().copied() {
-                raw.push((p.0, prev.1));
+        let (x, y) = (item.series.x[i], item.series.y[i]);
+        if !x.is_finite() || !y.is_finite() {
+            previous = None;
+            if !raw.is_empty() {
+                raw.push((f32::NAN, f32::NAN));
             }
+            continue;
+        }
+        if let Some((x0, y0)) = previous {
+            for (cx, cy) in step_corners(x0, y0, x, y, horizontal, item.step_anchor) {
+                if let Some(p) = map_item(frame, item, cx, cy) {
+                    raw.push(p);
+                }
+            }
+        }
+        if let Some(p) = map_item(frame, item, x, y) {
             raw.push(p);
+        }
+        previous = Some((x, y));
+    }
+    for part in clip_polyline(frame.plot, &raw) {
+        if part.len() >= 2 {
+            scene.primitives.push(Prim::Polyline {
+                pts: part,
+                color: item.color,
+                width: item.width,
+                dash: item.dash,
+            });
+        }
+    }
+}
+
+/// `horizontal == false` 时拐角是竖直的（原来的阶梯）。为 true 时拐角是水平的。
+fn step_corners(x0: f64, y0: f64, x1: f64, y1: f64, horizontal: bool, anchor: StepAnchor) -> Vec<(f64, f64)> {
+    if !horizontal {
+        match anchor {
+            StepAnchor::Right => vec![(x1, y0)],
+            StepAnchor::Left => vec![(x0, y1)],
+            StepAnchor::Center => {
+                let mid = (x0 + x1) * 0.5;
+                vec![(mid, y0), (mid, y1)]
+            }
+        }
+    } else {
+        match anchor {
+            StepAnchor::Right => vec![(x0, y1)],
+            StepAnchor::Left => vec![(x1, y0)],
+            StepAnchor::Center => {
+                let mid = (y0 + y1) * 0.5;
+                vec![(x0, mid), (x1, mid)]
+            }
+        }
+    }
+}
+
+fn draw_drops(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
+    let yscale = if item.y_right { frame.y2_scale } else { frame.y_scale };
+    let ymin = if item.y_right { frame.y2_min } else { frame.y_min };
+    let baseline = if yscale == AxisScale::Linear { 0.0 } else { ymin };
+    let n = item.series.x.len().min(item.series.y.len());
+    for i in 0..n {
+        let (x, y) = (item.series.x[i], item.series.y[i]);
+        if let (Some(a), Some(b)) = (map_item(frame, item, x, baseline), map_item(frame, item, x, y)) {
+            for part in clip_polyline(frame.plot, &[a, b]) {
+                if part.len() == 2 {
+                    line(scene, part[0].0, part[0].1, part[1].0, part[1].1, item.color, item.width, item.dash);
+                }
+            }
+        }
+    }
+    draw_markers(scene, frame, item);
+}
+
+fn draw_spline(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
+    let pairs = item.series.pairs();
+    let samples = crate::spline::natural_spline(&pairs, 8);
+    let mut raw = Vec::new();
+    for (x, y) in samples {
+        if let Some(p) = map_item(frame, item, x, y) {
+            raw.push(p);
+        } else if !raw.is_empty() {
+            raw.push((f32::NAN, f32::NAN));
         }
     }
     for part in clip_polyline(frame.plot, &raw) {
@@ -821,10 +1069,237 @@ fn draw_steps(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
     }
 }
 
+struct StackedBins {
+    edges: Vec<f64>,
+    counts: Vec<Vec<f64>>,
+    total_max: f64,
+}
+
+fn stacked_bins(items: &[Item]) -> Option<StackedBins> {
+    let series: Vec<&Item> = items.iter().filter(|item| item.kind == CurveKind::StackedHistogram).collect();
+    if series.is_empty() {
+        return None;
+    }
+    let mut values = Vec::new();
+    for item in &series {
+        values.extend(finite_values(hist_source(item)));
+    }
+    let (edges, _) = histogram(&values, series[0].bins)?;
+    let counts: Vec<Vec<f64>> = series.iter().map(|item| counts_on(&edges, hist_source(item))).collect();
+    let bins = edges.len().saturating_sub(1);
+    let mut total_max: f64 = 0.0;
+    for bin in 0..bins {
+        let sum: f64 = counts.iter().map(|row| row.get(bin).copied().unwrap_or(0.0)).sum();
+        total_max = total_max.max(sum);
+    }
+    Some(StackedBins { edges, counts, total_max })
+}
+
+fn counts_on(edges: &[f64], values: &[f64]) -> Vec<f64> {
+    let bins = edges.len().saturating_sub(1).max(1);
+    let lo = edges.first().copied().unwrap_or(0.0);
+    let hi = edges.last().copied().unwrap_or(lo + 1.0);
+    let width = ((hi - lo) / bins as f64).max(1e-12);
+    let mut counts = vec![0.0; bins];
+    for value in values {
+        if !value.is_finite() {
+            continue;
+        }
+        let mut bin = ((*value - lo) / width).floor() as isize;
+        if bin < 0 {
+            bin = 0;
+        }
+        if bin >= bins as isize {
+            bin = bins as isize - 1;
+        }
+        counts[bin as usize] += 1.0;
+    }
+    counts
+}
+
+fn draw_stacked(scene: &mut Scene, frame: &LayerFrame, items: &[Item], stack: &StackedBins, legend: &mut Vec<LegendEntry>) {
+    let series: Vec<&Item> = items.iter().filter(|item| item.kind == CurveKind::StackedHistogram).collect();
+    let host = series.first().copied();
+    let Some(host) = host else {
+        return;
+    };
+    let mut baseline = vec![0.0; stack.edges.len().saturating_sub(1)];
+    for (index, item) in series.iter().enumerate() {
+        let counts = stack.counts.get(index);
+        let Some(counts) = counts else {
+            continue;
+        };
+        let fill = item.fill.unwrap_or(with_alpha(item.color, 150));
+        for (bin, count) in counts.iter().enumerate() {
+            let y0 = baseline.get(bin).copied().unwrap_or(0.0);
+            let y1 = y0 + *count;
+            if bin < baseline.len() {
+                baseline[bin] = y1;
+            }
+            let Some(a) = map_item(frame, host, stack.edges[bin], y0) else { continue };
+            let Some(b) = map_item(frame, host, stack.edges[bin + 1], y1) else { continue };
+            let rx = a.0.min(b.0);
+            let ry = a.1.min(b.1);
+            if let Some((cx, cy, cw, ch)) = clip_rect(frame.plot, rx, ry, (b.0 - a.0).abs(), (b.1 - a.1).abs()) {
+                push_rect(scene, cx, cy, cw, ch, Some(fill), Some((item.color, 1.0)));
+            }
+        }
+        legend.push(LegendEntry {
+            name: item.name.clone(),
+            color: item.color,
+            line: false,
+            hidden: false,
+            curve: Some(item.curve),
+        });
+    }
+}
+
+fn overlay_errors(kind: CurveKind) -> bool {
+    !matches!(
+        kind,
+        CurveKind::Pie
+            | CurveKind::Heatmap
+            | CurveKind::Contour
+            | CurveKind::BoxPlot
+            | CurveKind::Histogram
+            | CurveKind::StackedHistogram
+    )
+}
+
+fn has_error(series: &SeriesData) -> bool {
+    series.x_err.iter().any(|v| v.is_finite() && *v != 0.0) || series.y_err.iter().any(|v| v.is_finite() && *v != 0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hatch_sector(scene: &mut Scene, cx: f32, cy: f32, radius: f32, start: f32, sweep: f32, pattern: FillPattern, color: [u8; 4]) {
+    if pattern == FillPattern::Solid || sweep.abs() < 1e-3 {
+        return;
+    }
+    let ink = [color[0], color[1], color[2], 220];
+    let step = (radius * 0.08).clamp(4.0, 9.0);
+    if matches!(pattern, FillPattern::Horizontal | FillPattern::Cross) {
+        hatch_lines(scene, cx, cy, radius, start, sweep, step, true, ink);
+    }
+    if matches!(pattern, FillPattern::Vertical | FillPattern::Cross) {
+        hatch_lines(scene, cx, cy, radius, start, sweep, step, false, ink);
+    }
+    if pattern == FillPattern::Diagonal {
+        hatch_diag(scene, cx, cy, radius, start, sweep, step, ink);
+    }
+    if pattern == FillPattern::Dots {
+        let mut y = cy - radius;
+        while y <= cy + radius {
+            let mut x = cx - radius;
+            while x <= cx + radius {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy <= radius * radius && angle_in(dy.atan2(dx), start, sweep) {
+                    scene.primitives.push(Prim::Circle {
+                        x,
+                        y,
+                        r: 1.1,
+                        fill: Some(ink),
+                        stroke: None,
+                    });
+                }
+                x += step;
+            }
+            y += step;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hatch_lines(scene: &mut Scene, cx: f32, cy: f32, radius: f32, start: f32, sweep: f32, step: f32, horizontal: bool, color: [u8; 4]) {
+    let mut cursor = -radius;
+    while cursor <= radius {
+        let mut run: Option<(f32, f32)> = None;
+        let mut t = -radius;
+        while t <= radius {
+            let (x, y) = if horizontal { (cx + t, cy + cursor) } else { (cx + cursor, cy + t) };
+            let dx = x - cx;
+            let dy = y - cy;
+            let inside = dx * dx + dy * dy <= radius * radius && angle_in(dy.atan2(dx), start, sweep);
+            if inside {
+                run = Some(match run {
+                    Some((a, _)) => (a, t),
+                    None => (t, t),
+                });
+            } else if let Some((a, b)) = run.take() {
+                stroke_hatch(scene, cx, cy, cursor, a, b, horizontal, color);
+            }
+            t += 2.0;
+        }
+        if let Some((a, b)) = run {
+            stroke_hatch(scene, cx, cy, cursor, a, b, horizontal, color);
+        }
+        cursor += step;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hatch_diag(scene: &mut Scene, cx: f32, cy: f32, radius: f32, start: f32, sweep: f32, step: f32, color: [u8; 4]) {
+    let mut offset = -2.0 * radius;
+    while offset <= 2.0 * radius {
+        let mut run: Option<(f32, f32)> = None;
+        let mut t = -radius;
+        while t <= radius {
+            let x = cx + t;
+            let y = cy + t + offset;
+            let dx = x - cx;
+            let dy = y - cy;
+            let inside = dx * dx + dy * dy <= radius * radius && angle_in(dy.atan2(dx), start, sweep);
+            if inside {
+                run = Some(match run {
+                    Some((a, _)) => (a, t),
+                    None => (t, t),
+                });
+            } else if let Some((a, b)) = run.take() {
+                if (b - a).abs() >= 1.5 {
+                    line(scene, cx + a, cy + a + offset, cx + b, cy + b + offset, color, 1.0, Dash::Solid);
+                }
+            }
+            t += 2.0;
+        }
+        if let Some((a, b)) = run {
+            if (b - a).abs() >= 1.5 {
+                line(scene, cx + a, cy + a + offset, cx + b, cy + b + offset, color, 1.0, Dash::Solid);
+            }
+        }
+        offset += step;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stroke_hatch(scene: &mut Scene, cx: f32, cy: f32, cursor: f32, a: f32, b: f32, horizontal: bool, color: [u8; 4]) {
+    if (b - a).abs() < 1.5 {
+        return;
+    }
+    let (x1, y1, x2, y2) = if horizontal {
+        (cx + a, cy + cursor, cx + b, cy + cursor)
+    } else {
+        (cx + cursor, cy + a, cx + cursor, cy + b)
+    };
+    line(scene, x1, y1, x2, y2, color, 1.0, Dash::Solid);
+}
+
+fn angle_in(angle: f32, start: f32, sweep: f32) -> bool {
+    let tau = std::f32::consts::TAU;
+    let sweep = sweep.abs();
+    if sweep >= tau - 1e-3 {
+        return true;
+    }
+    let delta = (angle - start).rem_euclid(tau);
+    delta <= sweep + 0.02
+}
+
 fn draw_area(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
-    let pts = mapped_pairs(frame, &item.series);
-    let baseline = if frame.y_scale == AxisScale::Linear { 0.0 } else { frame.y_min };
-    let Some((_, base_y)) = map_xy(frame, frame.x_min, baseline) else {
+    let pts = mapped_pairs(frame, item);
+    let yscale = if item.y_right { frame.y2_scale } else { frame.y_scale };
+    let ymin = if item.y_right { frame.y2_min } else { frame.y_min };
+    let xmin = if item.x_top { frame.x2_min } else { frame.x_min };
+    let baseline = if yscale == AxisScale::Linear { 0.0 } else { ymin };
+    let Some((_, base_y)) = map_item(frame, item, xmin, baseline) else {
         draw_polyline(scene, frame, item);
         return;
     };
@@ -851,7 +1326,7 @@ fn draw_errors(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
     for i in 0..n {
         let (x, y) = (item.series.x[i], item.series.y[i]);
         if let Some(err) = item.series.y_err.get(i).copied().filter(|v| v.is_finite()) {
-            if let (Some(a), Some(b)) = (map_xy(frame, x, y - err), map_xy(frame, x, y + err)) {
+            if let (Some(a), Some(b)) = (map_item(frame, item, x, y - err), map_item(frame, item, x, y + err)) {
                 for part in clip_polyline(frame.plot, &[a, b]) {
                     if part.len() == 2 {
                         line(scene, part[0].0, part[0].1, part[1].0, part[1].1, item.color, item.width, Dash::Solid);
@@ -862,7 +1337,7 @@ fn draw_errors(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
             }
         }
         if let Some(err) = item.series.x_err.get(i).copied().filter(|v| v.is_finite()) {
-            if let (Some(a), Some(b)) = (map_xy(frame, x - err, y), map_xy(frame, x + err, y)) {
+            if let (Some(a), Some(b)) = (map_item(frame, item, x - err, y), map_item(frame, item, x + err, y)) {
                 for part in clip_polyline(frame.plot, &[a, b]) {
                     if part.len() == 2 {
                         line(scene, part[0].0, part[0].1, part[1].0, part[1].1, item.color, item.width, Dash::Solid);
@@ -888,7 +1363,15 @@ fn bar_half_width(centers: &[f64]) -> f64 {
     gap * 0.35
 }
 
-fn extend_bar_span(auto: &mut Range, centers: &[f64]) {
+fn add_span(secondary: bool, primary: &mut Range, extra: &mut Range, value: f64) {
+    if secondary {
+        extra.add(value);
+    } else {
+        primary.add(value);
+    }
+}
+
+fn extend_bar_span(secondary: bool, primary: &mut Range, extra: &mut Range, centers: &[f64]) {
     let half = bar_half_width(centers);
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
@@ -897,8 +1380,8 @@ fn extend_bar_span(auto: &mut Range, centers: &[f64]) {
         hi = hi.max(value);
     }
     if lo.is_finite() {
-        auto.add(lo - half);
-        auto.add(hi + half);
+        add_span(secondary, primary, extra, lo - half);
+        add_span(secondary, primary, extra, hi + half);
     }
 }
 
@@ -924,8 +1407,8 @@ fn draw_bars(scene: &mut Scene, frame: &LayerFrame, item: &Item, horizontal: boo
         } else {
             (x - half, baseline, x + half, y)
         };
-        let Some(a) = map_xy(frame, x0, y0) else { continue };
-        let Some(b) = map_xy(frame, x1, y1) else { continue };
+        let Some(a) = map_item(frame, item, x0, y0) else { continue };
+        let Some(b) = map_item(frame, item, x1, y1) else { continue };
         let rx = a.0.min(b.0);
         let ry = a.1.min(b.1);
         let rw = (a.0 - b.0).abs().max(1.0);
@@ -943,8 +1426,8 @@ fn draw_histogram(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
     };
     let fill = item.fill.unwrap_or(with_alpha(item.color, 150));
     for (index, count) in counts.iter().enumerate() {
-        let Some(a) = map_xy(frame, edges[index], 0.0) else { continue };
-        let Some(b) = map_xy(frame, edges[index + 1], *count) else { continue };
+        let Some(a) = map_item(frame, item, edges[index], 0.0) else { continue };
+        let Some(b) = map_item(frame, item, edges[index + 1], *count) else { continue };
         let rx = a.0.min(b.0);
         let ry = a.1.min(b.1);
         if let Some((cx, cy, cw, ch)) = clip_rect(frame.plot, rx, ry, (b.0 - a.0).abs(), (b.1 - a.1).abs()) {
@@ -963,33 +1446,50 @@ fn draw_box(scene: &mut Scene, frame: &LayerFrame, item: &Item, slot: f64) {
     let med = quantile(&values, 0.5);
     let q3 = quantile(&values, 0.75);
     let iqr = q3 - q1;
-    let low = values.iter().copied().filter(|v| *v >= q1 - 1.5 * iqr).fold(f64::INFINITY, f64::min);
-    let high = values.iter().copied().filter(|v| *v <= q3 + 1.5 * iqr).fold(f64::NEG_INFINITY, f64::max);
+    let (low, high) = match item.whisker {
+        WhiskerMode::MinMax => (values[0], *values.last().unwrap_or(&values[0])),
+        WhiskerMode::Percentile => {
+            let p = (item.whisker_pct / 100.0).clamp(0.0, 0.49);
+            (quantile(&values, p), quantile(&values, 1.0 - p))
+        }
+        WhiskerMode::Iqr15 => {
+            let low = values.iter().copied().filter(|v| *v >= q1 - 1.5 * iqr).fold(f64::INFINITY, f64::min);
+            let high = values.iter().copied().filter(|v| *v <= q3 + 1.5 * iqr).fold(f64::NEG_INFINITY, f64::max);
+            (low, high)
+        }
+    };
     let half = 0.28;
     let fill = item.fill.unwrap_or(with_alpha(item.color, 80));
-    if let (Some(a), Some(b)) = (map_xy(frame, slot - half, q1), map_xy(frame, slot + half, q3)) {
+    if let (Some(a), Some(b)) = (map_item(frame, item, slot - half, q1), map_item(frame, item, slot + half, q3)) {
         let rx = a.0.min(b.0);
         let ry = a.1.min(b.1);
         push_rect(scene, rx, ry, (b.0 - a.0).abs(), (b.1 - a.1).abs(), Some(fill), Some((item.color, item.width)));
     }
-    if let (Some(a), Some(b)) = (map_xy(frame, slot - half, med), map_xy(frame, slot + half, med)) {
+    if let (Some(a), Some(b)) = (map_item(frame, item, slot - half, med), map_item(frame, item, slot + half, med)) {
         line(scene, a.0, a.1, b.0, b.1, item.color, item.width + 0.6, Dash::Solid);
     }
-    if let (Some(a), Some(b)) = (map_xy(frame, slot, low), map_xy(frame, slot, q1)) {
+    if let (Some(a), Some(b)) = (map_item(frame, item, slot, low), map_item(frame, item, slot, q1)) {
         line(scene, a.0, a.1, b.0, b.1, item.color, item.width, Dash::Solid);
     }
-    if let (Some(a), Some(b)) = (map_xy(frame, slot, q3), map_xy(frame, slot, high)) {
+    if let (Some(a), Some(b)) = (map_item(frame, item, slot, q3), map_item(frame, item, slot, high)) {
         line(scene, a.0, a.1, b.0, b.1, item.color, item.width, Dash::Solid);
     }
-    if let (Some(a), Some(b)) = (map_xy(frame, slot - half * 0.6, low), map_xy(frame, slot + half * 0.6, low)) {
+    if let (Some(a), Some(b)) = (map_item(frame, item, slot - half * 0.6, low), map_item(frame, item, slot + half * 0.6, low)) {
         line(scene, a.0, a.1, b.0, b.1, item.color, item.width, Dash::Solid);
     }
-    if let (Some(a), Some(b)) = (map_xy(frame, slot - half * 0.6, high), map_xy(frame, slot + half * 0.6, high)) {
+    if let (Some(a), Some(b)) = (map_item(frame, item, slot - half * 0.6, high), map_item(frame, item, slot + half * 0.6, high)) {
         line(scene, a.0, a.1, b.0, b.1, item.color, item.width, Dash::Solid);
     }
+    if item.box_mean {
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        if let Some((px, py)) = map_item(frame, item, slot, mean) {
+            draw_symbol(scene, Symbol::Plus, px, py, 8.0, item.color);
+        }
+    }
+    if item.box_outliers {
     for value in &values {
-        if *value < low || *value > high {
-            if let Some((px, py)) = map_xy(frame, slot, *value) {
+        if *value < low - 1e-9 || *value > high + 1e-9 {
+            if let Some((px, py)) = map_item(frame, item, slot, *value) {
                 scene.primitives.push(Prim::Circle {
                     x: px,
                     y: py,
@@ -999,6 +1499,7 @@ fn draw_box(scene: &mut Scene, frame: &LayerFrame, item: &Item, slot: f64) {
                 });
             }
         }
+    }
     }
 }
 
@@ -1020,8 +1521,8 @@ fn draw_pie(scene: &mut Scene, plot: PxRect, item: &Item, legend: &mut Vec<Legen
     }
     let cx = plot.x + plot.w * 0.5;
     let cy = plot.y + plot.h * 0.5;
-    let radius = plot.w.min(plot.h) * 0.34;
-    let mut angle = -std::f32::consts::FRAC_PI_2;
+    let radius = plot.w.min(plot.h) * 0.5 * item.pie_size.clamp(0.15, 1.0);
+    let mut angle = item.pie_start.to_radians();
     for (index, (value, label)) in values.iter().enumerate() {
         let sweep = (*value / total) as f32 * std::f32::consts::TAU;
         let color = palette_color(index);
@@ -1032,6 +1533,7 @@ fn draw_pie(scene: &mut Scene, plot: PxRect, item: &Item, legend: &mut Vec<Legen
             poly.push((cx + t.cos() * radius, cy + t.sin() * radius));
         }
         scene.primitives.push(Prim::Polygon { pts: poly, fill: color });
+        hatch_sector(scene, cx, cy, radius, angle, sweep, item.pie_pattern, color);
         let mid = angle + sweep * 0.5;
         text(
             scene,
@@ -1082,8 +1584,8 @@ fn draw_heatmap(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
             let x1 = cell_edge(grid.x0, grid.x1, col, grid.cols, true);
             let y0 = cell_edge(grid.y0, grid.y1, row, grid.rows, false);
             let y1 = cell_edge(grid.y0, grid.y1, row, grid.rows, true);
-            let Some(a) = map_xy(frame, x0, y0) else { continue };
-            let Some(b) = map_xy(frame, x1, y1) else { continue };
+            let Some(a) = map_item(frame, item, x0, y0) else { continue };
+            let Some(b) = map_item(frame, item, x1, y1) else { continue };
             let t = ((z - lo) / span) as f32;
             if let Some((x, y, w, h)) = clip_rect(frame.plot, a.0.min(b.0), a.1.min(b.1), (a.0 - b.0).abs().max(1.0), (a.1 - b.1).abs().max(1.0)) {
                 push_rect(scene, x, y, w, h, Some(viridis(t)), None);
@@ -1103,7 +1605,7 @@ fn draw_contour(scene: &mut Scene, frame: &LayerFrame, item: &Item, z_span: Opti
         let level = lo + (hi - lo) * level_index as f64 / (levels as f64 + 1.0);
         let color = palette_color(level_index);
         for (a, b) in contour_segments(grid, level) {
-            if let (Some(p), Some(q)) = (map_xy(frame, a.0, a.1), map_xy(frame, b.0, b.1)) {
+            if let (Some(p), Some(q)) = (map_item(frame, item, a.0, a.1), map_item(frame, item, b.0, b.1)) {
                 for part in clip_polyline(frame.plot, &[p, q]) {
                     if part.len() == 2 {
                         line(scene, part[0].0, part[0].1, part[1].0, part[1].1, color, item.width, Dash::Solid);
@@ -1120,7 +1622,7 @@ fn draw_vectors(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
         let (x, y) = (item.series.x[i], item.series.y[i]);
         let dx = item.series.dx.get(i).copied().unwrap_or(0.0);
         let dy = item.series.dy.get(i).copied().unwrap_or(0.0);
-        if let (Some(a), Some(b)) = (map_xy(frame, x, y), map_xy(frame, x + dx, y + dy)) {
+        if let (Some(a), Some(b)) = (map_item(frame, item, x, y), map_item(frame, item, x + dx, y + dy)) {
             for part in clip_polyline(frame.plot, &[a, b]) {
                 if part.len() == 2 {
                     line(scene, part[0].0, part[0].1, part[1].0, part[1].1, item.color, item.width, Dash::Solid);
@@ -1148,6 +1650,33 @@ fn draw_annotation(scene: &mut Scene, frame: &LayerFrame, annotation: &sciplot_c
         AnnotationKind::Line { x1, y1, x2, y2, color } => {
             if let (Some(a), Some(b)) = (map_xy(frame, *x1, *y1), map_xy(frame, *x2, *y2)) {
                 line(scene, a.0, a.1, b.0, b.1, *color, 1.4 * scale, Dash::Solid);
+            }
+        }
+        AnnotationKind::TimeStamp { x, y, text: label, size, color } => {
+            if let Some((px, py)) = map_xy(frame, *x, *y) {
+                text(scene, px, py, label, *size * scale, *color, HAlign::Left, VAlign::Bottom, false);
+            }
+        }
+        AnnotationKind::Image { x, y, w, h, png_base64 } => {
+            if let (Some(a), Some(b)) = (map_xy(frame, *x, *y + *h), map_xy(frame, *x + *w, *y)) {
+                let rx = a.0.min(b.0);
+                let ry = a.1.min(b.1);
+                let rw = (a.0 - b.0).abs().max(1.0);
+                let rh = (a.1 - b.1).abs().max(1.0);
+                if let Some(image) = crate::png_image::decode_png_base64(png_base64) {
+                    scene.primitives.push(Prim::Image {
+                        x: rx,
+                        y: ry,
+                        w: rw,
+                        h: rh,
+                        rgba: image.rgba,
+                        cols: image.cols,
+                        rows: image.rows,
+                        png_base64: png_base64.clone(),
+                    });
+                } else {
+                    push_rect(scene, rx, ry, rw, rh, Some([220, 220, 220, 255]), Some(([80, 80, 80, 255], 1.0)));
+                }
             }
         }
         AnnotationKind::Marker { x, y, label, color } => {
@@ -1228,12 +1757,21 @@ fn draw_legend(scene: &mut Scene, plot: PxRect, layer_index: usize, entries: &[L
 fn legend_has_line(kind: CurveKind) -> bool {
     matches!(
         kind,
-        CurveKind::Line | CurveKind::LineSymbol | CurveKind::Steps | CurveKind::Function | CurveKind::Area | CurveKind::ErrorBars
+        CurveKind::Line
+            | CurveKind::LineSymbol
+            | CurveKind::Steps
+            | CurveKind::HorizontalSteps
+            | CurveKind::Spline
+            | CurveKind::Function
+            | CurveKind::Parametric
+            | CurveKind::Polar
+            | CurveKind::Area
+            | CurveKind::ErrorBars
     )
 }
 
-fn draw_colorbar(scene: &mut Scene, plot: PxRect, z0: f64, z1: f64, scale: f32) {
-    let x = plot.right() + 12.0 * scale;
+fn draw_colorbar(scene: &mut Scene, plot: PxRect, z0: f64, z1: f64, scale: f32, extra: f32) {
+    let x = plot.right() + 12.0 * scale + extra;
     let y = plot.y;
     let w = 12.0 * scale;
     let h = plot.h;
@@ -1256,11 +1794,11 @@ fn draw_colorbar(scene: &mut Scene, plot: PxRect, z0: f64, z1: f64, scale: f32) 
     }
 }
 
-fn mapped_pairs(frame: &LayerFrame, series: &SeriesData) -> Vec<(f32, f32)> {
-    let n = series.x.len().min(series.y.len());
+fn mapped_pairs(frame: &LayerFrame, item: &Item) -> Vec<(f32, f32)> {
+    let n = item.series.x.len().min(item.series.y.len());
     let mut pts = Vec::new();
     for i in 0..n {
-        if let Some(p) = map_xy(frame, series.x[i], series.y[i]) {
+        if let Some(p) = map_item(frame, item, item.series.x[i], item.series.y[i]) {
             pts.push(p);
         } else if !pts.is_empty() {
             pts.push((f32::NAN, f32::NAN));

@@ -51,6 +51,15 @@ pub fn paint(painter: &egui::Painter, origin: Pos2, scene: &Scene) {
                     Stroke::NONE,
                 ));
             }
+            Prim::Image { x, y, w, h, .. } => {
+                let rect = egui::Rect::from_min_size(p(*x, *y), Vec2::new(*w, *h));
+                painter.add(Shape::rect_stroke(
+                    rect,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0_f32, Color32::from_rgb(120, 120, 120)),
+                    StrokeKind::Inside,
+                ));
+            }
             Prim::Text { x, y, text, size, color, halign, valign, vertical } => {
                 let font = plot_font(*size);
                 if *vertical && stack_vertical(text) {

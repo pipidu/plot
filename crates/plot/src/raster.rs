@@ -226,6 +226,9 @@ fn draw_pixmap(scene: &Scene, font: Option<&GlyphFont>) -> Result<Pixmap, String
                     fill_path(&mut pixmap, &path, *fill);
                 }
             }
+            Prim::Image { x, y, w, h, rgba, cols, rows, .. } => {
+                blit_image(&mut pixmap, *x, *y, *w, *h, rgba, *cols, *rows);
+            }
             Prim::Text { x, y, text, size, color, halign, valign, vertical } => {
                 if let Some(font) = font {
                     font.draw(&mut pixmap, text, *x, *y, *size, *color, *halign, *valign, *vertical);
@@ -234,6 +237,36 @@ fn draw_pixmap(scene: &Scene, font: Option<&GlyphFont>) -> Result<Pixmap, String
         }
     }
     Ok(pixmap)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_image(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, rgba: &[u8], cols: u32, rows: u32) {
+    if cols == 0 || rows == 0 || w < 1.0 || h < 1.0 {
+        return;
+    }
+    let Some(size) = tiny_skia::IntSize::from_wh(cols, rows) else {
+        return;
+    };
+    let mut premul = Vec::with_capacity(rgba.len());
+    for px in rgba.chunks_exact(4) {
+        let alpha = px[3] as u16;
+        premul.push(((px[0] as u16 * alpha) / 255) as u8);
+        premul.push(((px[1] as u16 * alpha) / 255) as u8);
+        premul.push(((px[2] as u16 * alpha) / 255) as u8);
+        premul.push(px[3]);
+    }
+    let Some(source) = Pixmap::from_vec(premul, size) else {
+        return;
+    };
+    let transform = Transform::from_scale(w / cols as f32, h / rows as f32).post_translate(x, y);
+    pixmap.draw_pixmap(
+        0,
+        0,
+        source.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        transform,
+        None,
+    );
 }
 
 fn fill_path(pixmap: &mut Pixmap, path: &tiny_skia::Path, color: [u8; 4]) {

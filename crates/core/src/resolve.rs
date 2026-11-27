@@ -1,5 +1,5 @@
 use crate::formula::CompiledExpr;
-use crate::graph::{Curve, CurveKind, DataSource};
+use crate::graph::{Curve, CurveKind, DataSource, ErrorSource, VectorMode};
 use crate::matrix::Matrix;
 use crate::table::{Column, ColumnMode};
 use crate::Project;
@@ -147,13 +147,112 @@ pub fn resolve_curve(project: &Project, curve: &Curve) -> Result<SeriesData, Str
                 series.y.push(y);
             }
         }
+        DataSource::Polar {
+            expr,
+            theta_min,
+            theta_max,
+            samples,
+        } => {
+            let compiled = CompiledExpr::compile(expr)?;
+            let n = (*samples).max(2);
+            for i in 0..n {
+                let theta = if (theta_max - theta_min).abs() < f64::EPSILON {
+                    *theta_min
+                } else {
+                    *theta_min + (*theta_max - *theta_min) * (i as f64) / (n as f64 - 1.0)
+                };
+                let r = compiled
+                    .eval(&[("theta", theta), ("t", theta), ("x", theta)])
+                    .unwrap_or(f64::NAN);
+                if r.is_finite() && theta.is_finite() {
+                    series.x.push(r * theta.cos());
+                    series.y.push(r * theta.sin());
+                } else {
+                    series.x.push(f64::NAN);
+                    series.y.push(f64::NAN);
+                }
+            }
+        }
         DataSource::Points { x, y } => {
             let n = x.len().max(y.len());
             series.x = pad(x.clone(), n);
             series.y = pad(y.clone(), n);
         }
     }
+    apply_vector(&mut series, curve.vector_mode);
+    apply_error(&mut series, curve);
     Ok(series)
+}
+
+fn apply_vector(series: &mut SeriesData, mode: VectorMode) {
+    let n = series.x.len().min(series.y.len()).min(series.dx.len()).min(series.dy.len());
+    match mode {
+        VectorMode::DxDy => {}
+        VectorMode::EndPoint => {
+            for i in 0..n {
+                if series.x[i].is_finite() && series.dx[i].is_finite() {
+                    series.dx[i] -= series.x[i];
+                }
+                if series.y[i].is_finite() && series.dy[i].is_finite() {
+                    series.dy[i] -= series.y[i];
+                }
+            }
+        }
+        VectorMode::AngleMagnitude => {
+            for i in 0..n {
+                let angle = series.dx[i];
+                let magnitude = series.dy[i];
+                if angle.is_finite() && magnitude.is_finite() {
+                    series.dx[i] = magnitude * angle.cos();
+                    series.dy[i] = magnitude * angle.sin();
+                }
+            }
+        }
+    }
+}
+
+fn apply_error(series: &mut SeriesData, curve: &Curve) {
+    series.x_err = expand_error(&series.x, &series.x_err, curve.error.x, curve.error.x_percent);
+    series.y_err = expand_error(&series.y, &series.y_err, curve.error.y, curve.error.y_percent);
+}
+
+fn expand_error(values: &[f64], column: &[f64], source: ErrorSource, percent: f64) -> Vec<f64> {
+    match source {
+        ErrorSource::None | ErrorSource::Column => {
+            if column.is_empty() {
+                Vec::new()
+            } else {
+                column.to_vec()
+            }
+        }
+        ErrorSource::Percent => {
+            let scale = percent / 100.0;
+            values
+                .iter()
+                .map(|value| if value.is_finite() { scale * value.abs() } else { f64::NAN })
+                .collect()
+        }
+        ErrorSource::StandardDeviation | ErrorSource::StandardError => {
+            let finite: Vec<f64> = values.iter().copied().filter(|value| value.is_finite()).collect();
+            let mut err = sample_std(&finite);
+            if source == ErrorSource::StandardError && finite.len() > 1 {
+                err /= (finite.len() as f64).sqrt();
+            }
+            values
+                .iter()
+                .map(|value| if value.is_finite() { err } else { f64::NAN })
+                .collect()
+        }
+    }
+}
+
+fn sample_std(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let var = values.iter().map(|value| (value - mean) * (value - mean)).sum::<f64>() / (values.len() - 1) as f64;
+    var.sqrt()
 }
 
 pub fn sample_expr(expr: &str, min: f64, max: f64, samples: usize, var: &str) -> Result<(Vec<f64>, Vec<f64>), String> {
@@ -255,10 +354,99 @@ mod tests {
                 samples: 3,
             },
             visible: true,
+            ..Curve::default()
         };
         let series = resolve_curve(&project, &curve).unwrap();
         assert!((series.y[0]).abs() < 1e-9);
         assert!((series.y[1] - 1.0).abs() < 1e-6);
         assert!(series.y[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn polar_parametric_vectors_and_percent_errors() {
+        let project = Project::new("p");
+        let polar = Curve {
+            name: "r".into(),
+            kind: CurveKind::Polar,
+            source: DataSource::Polar {
+                expr: "1".into(),
+                theta_min: 0.0,
+                theta_max: std::f64::consts::FRAC_PI_2,
+                samples: 2,
+            },
+            ..Curve::default()
+        };
+        let series = resolve_curve(&project, &polar).unwrap();
+        assert!((series.x[0] - 1.0).abs() < 1e-9, "{}", series.x[0]);
+        assert!(series.y[0].abs() < 1e-9);
+        assert!(series.x[1].abs() < 1e-6);
+        assert!((series.y[1] - 1.0).abs() < 1e-6);
+
+        let parametric = Curve {
+            name: "p".into(),
+            kind: CurveKind::Parametric,
+            source: DataSource::Parametric {
+                x_expr: "cos(t)".into(),
+                y_expr: "sin(t)".into(),
+                t_min: 0.0,
+                t_max: std::f64::consts::FRAC_PI_2,
+                samples: 2,
+            },
+            ..Curve::default()
+        };
+        let series = resolve_curve(&project, &parametric).unwrap();
+        assert!((series.x[0] - 1.0).abs() < 1e-9);
+        assert!(series.y[0].abs() < 1e-9);
+        assert!(series.x[1].abs() < 1e-6);
+        assert!((series.y[1] - 1.0).abs() < 1e-6);
+
+        let mut project = Project::new("p");
+        let table_id = project.new_table("t");
+        {
+            let table = project.table_mut(table_id).unwrap();
+            table.columns.clear();
+            table.add_numeric_column("X", crate::table::ColumnMode::X, &[0.0, 1.0]);
+            table.add_numeric_column("Y", crate::table::ColumnMode::Y, &[0.0, 0.0]);
+            table.add_numeric_column("x2", crate::table::ColumnMode::None, &[1.0, 3.0]);
+            table.add_numeric_column("y2", crate::table::ColumnMode::None, &[2.0, 4.0]);
+        }
+        let graph_id = project.plot_table_mode(table_id, CurveKind::Vector, crate::graph::VectorMode::EndPoint).unwrap();
+        let curve = project.graph(graph_id).unwrap().layers[0].curves[0].clone();
+        let series = resolve_curve(&project, &curve).unwrap();
+        assert!((series.dx[0] - 1.0).abs() < 1e-9 && (series.dy[0] - 2.0).abs() < 1e-9);
+
+        let mut curve = curve.clone();
+        curve.vector_mode = crate::graph::VectorMode::AngleMagnitude;
+        if let DataSource::Columns { dx, dy, .. } = &mut curve.source {
+            // 角度 0、模长 2，以及 π/2、模长 3。
+            let table = project.table_mut(table_id).unwrap();
+            table.columns[2].set_numbers(&[0.0, std::f64::consts::FRAC_PI_2]);
+            table.columns[3].set_numbers(&[2.0, 3.0]);
+            let _ = (dx, dy);
+        }
+        let series = resolve_curve(&project, &curve).unwrap();
+        assert!((series.dx[0] - 2.0).abs() < 1e-9, "{}", series.dx[0]);
+        assert!(series.dy[0].abs() < 1e-6, "{}", series.dy[0]);
+        assert!(series.dx[1].abs() < 1e-6, "{}", series.dx[1]);
+        assert!((series.dy[1] - 3.0).abs() < 1e-6, "{}", series.dy[1]);
+
+        let mut curve = Curve {
+            name: "e".into(),
+            kind: CurveKind::Line,
+            source: DataSource::Points {
+                x: vec![0.0, 1.0],
+                y: vec![10.0, -20.0],
+            },
+            ..Curve::default()
+        };
+        curve.error.y = ErrorSource::Percent;
+        curve.error.y_percent = 10.0;
+        let series = resolve_curve(&project, &curve).unwrap();
+        assert!((series.y_err[0] - 1.0).abs() < 1e-9);
+        assert!((series.y_err[1] - 2.0).abs() < 1e-9);
+        curve.error.y = ErrorSource::StandardDeviation;
+        let series = resolve_curve(&project, &curve).unwrap();
+        let expected = sample_std(&[10.0, -20.0]);
+        assert!((series.y_err[0] - expected).abs() < 1e-9);
     }
 }

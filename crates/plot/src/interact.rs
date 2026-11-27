@@ -74,7 +74,13 @@ pub fn nearest_point(project: &Project, graph: &sciplot_core::Graph, layer: usiz
         };
         let n = series.x.len().min(series.y.len());
         for index in 0..n {
-            let Some((sx, sy)) = data_to_screen(frame, series.x[index], series.y[index]) else {
+            let Some((sx, sy)) = data_to_screen_on(
+                frame,
+                series.x[index],
+                series.y[index],
+                curve.axes.x == sciplot_core::XAxisSide::Top,
+                curve.axes.y == sciplot_core::YAxisSide::Right,
+            ) else {
                 continue;
             };
             let dist = (sx - px).hypot(sy - py);
@@ -117,7 +123,13 @@ pub fn nearest_curve(project: &Project, graph: &sciplot_core::Graph, frames: &[L
             let n = series.x.len().min(series.y.len());
             let mut prev: Option<(f32, f32)> = None;
             for index in 0..n {
-                let Some(point) = data_to_screen(frame, series.x[index], series.y[index]) else {
+                let Some(point) = data_to_screen_on(
+                    frame,
+                    series.x[index],
+                    series.y[index],
+                    curve.axes.x == sciplot_core::XAxisSide::Top,
+                    curve.axes.y == sciplot_core::YAxisSide::Right,
+                ) else {
                     prev = None;
                     continue;
                 };
@@ -139,8 +151,22 @@ fn consider(best: &mut Option<(CurveHit, f32)>, layer: usize, curve: usize, dist
 }
 
 pub fn data_to_screen(frame: &LayerFrame, x: f64, y: f64) -> Option<(f32, f32)> {
-    let ux = crate::scale::unit(frame.x_scale, x, frame.x_min, frame.x_max, frame.x_inverted)?;
-    let uy = crate::scale::unit(frame.y_scale, y, frame.y_min, frame.y_max, frame.y_inverted)?;
+    data_to_screen_on(frame, x, y, false, false)
+}
+
+pub fn data_to_screen_on(frame: &LayerFrame, x: f64, y: f64, x_top: bool, y_right: bool) -> Option<(f32, f32)> {
+    let (xmin, xmax, xscale, xinv) = if x_top {
+        (frame.x2_min, frame.x2_max, frame.x2_scale, frame.x2_inverted)
+    } else {
+        (frame.x_min, frame.x_max, frame.x_scale, frame.x_inverted)
+    };
+    let (ymin, ymax, yscale, yinv) = if y_right {
+        (frame.y2_min, frame.y2_max, frame.y2_scale, frame.y2_inverted)
+    } else {
+        (frame.y_min, frame.y_max, frame.y_scale, frame.y_inverted)
+    };
+    let ux = crate::scale::unit(xscale, x, xmin, xmax, xinv)?;
+    let uy = crate::scale::unit(yscale, y, ymin, ymax, yinv)?;
     Some((frame.plot.x + ux * frame.plot.w, frame.plot.y + frame.plot.h - uy * frame.plot.h))
 }
 

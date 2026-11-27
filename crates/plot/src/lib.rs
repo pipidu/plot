@@ -4,10 +4,12 @@ mod color;
 mod contour;
 mod interact;
 mod paint;
+mod png_image;
 mod raster;
 mod render;
 mod scale;
 mod scene;
+mod spline;
 mod surface;
 mod svg;
 
@@ -246,5 +248,132 @@ mod tests {
         let scene = render(&project, &graph, &[], 400.0, 300.0, 1.0);
         assert_eq!(scene.layers.len(), 1);
         assert!(scene.layers[0].plot.w > 10.0);
+    }
+
+    fn plot_xy(kind: CurveKind) -> (Project, sciplot_core::GraphId) {
+        let mut project = Project::new("p");
+        let table = project.new_table("数据");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns.clear();
+            table.add_numeric_column("X", sciplot_core::ColumnMode::X, &[0.0, 1.0, 2.0, 3.0]);
+            table.add_numeric_column("Y", sciplot_core::ColumnMode::Y, &[0.0, 1.0, 0.0, 2.0]);
+            table.add_numeric_column("Z", sciplot_core::ColumnMode::Y, &[1.0, 2.0, 0.0, 3.0]);
+        }
+        let graph = project.plot_table(table, kind).unwrap();
+        (project, graph)
+    }
+
+    #[test]
+    fn new_styles_leave_a_trace_in_svg() {
+        for kind in [CurveKind::DropLines, CurveKind::Spline, CurveKind::HorizontalSteps, CurveKind::Steps] {
+            let (project, graph) = plot_xy(kind);
+            let graph = project.graph(graph).unwrap();
+            let scene = render(&project, graph, &[], 640.0, 480.0, 1.0);
+            let svg = to_svg(&scene);
+            assert!(svg.contains("<polyline") || svg.contains("<line"), "{kind:?}\n{svg}");
+        }
+        let (project, id) = plot_xy(CurveKind::Spline);
+        let graph = project.graph(id).unwrap();
+        let scene = render(&project, graph, &[], 640.0, 480.0, 1.0);
+        let points = to_svg(&scene).matches("<polyline").count();
+        assert!(points >= 1);
+        let spline_pts = scene.primitives.iter().filter_map(|prim| match prim {
+            Prim::Polyline { pts, .. } => Some(pts.len()),
+            _ => None,
+        }).max().unwrap_or(0);
+        assert!(spline_pts > 8, "spline should sample between knots, got {spline_pts}");
+
+        let (project, id) = plot_xy(CurveKind::HorizontalSteps);
+        let graph = project.graph(id).unwrap();
+        let scene = render(&project, graph, &[], 640.0, 480.0, 1.0);
+        let steps = scene.primitives.iter().filter_map(|prim| match prim {
+            Prim::Polyline { pts, .. } => Some(pts.len()),
+            _ => None,
+        }).max().unwrap_or(0);
+        assert!(steps >= 6, "horizontal steps need the corner points, got {steps}");
+    }
+
+    #[test]
+    fn stacked_histogram_uses_one_shared_height() {
+        let (project, id) = plot_xy(CurveKind::StackedHistogram);
+        let graph = project.graph(id).unwrap();
+        assert_eq!(graph.layers[0].curves.len(), 2);
+        let scene = render(&project, graph, &[], 640.0, 480.0, 1.0);
+        let svg = to_svg(&scene);
+        assert!(svg.contains("<rect"), "{svg}");
+        assert!(scene.layers[0].y_max >= 2.0, "{}", scene.layers[0].y_max);
+    }
+
+    #[test]
+    fn polar_and_right_axis_and_timestamp_and_image() {
+        let mut project = Project::new("p");
+        let graph_id = project.new_graph("极坐标");
+        {
+            let layer = &mut project.graph_mut(graph_id).unwrap().layers[0];
+            layer.curves.push(sciplot_core::Curve {
+                name: "圆".into(),
+                kind: CurveKind::Polar,
+                source: sciplot_core::DataSource::Polar {
+                    expr: "1".into(),
+                    theta_min: 0.0,
+                    theta_max: std::f64::consts::FRAC_PI_2,
+                    samples: 5,
+                },
+                ..sciplot_core::Curve::default()
+            });
+            layer.curves.push(sciplot_core::Curve {
+                name: "右轴".into(),
+                kind: CurveKind::Line,
+                axes: sciplot_core::CurveAxes {
+                    x: sciplot_core::XAxisSide::Bottom,
+                    y: sciplot_core::YAxisSide::Right,
+                },
+                source: sciplot_core::DataSource::Points {
+                    x: vec![0.0, 1.0],
+                    y: vec![0.0, 100.0],
+                },
+                ..sciplot_core::Curve::default()
+            });
+            layer.show_right = true;
+            layer.y_right.label = "right".into();
+            layer.annotations.push(sciplot_core::Annotation {
+                id: 1,
+                kind: sciplot_core::AnnotationKind::TimeStamp {
+                    x: 0.2,
+                    y: 0.2,
+                    text: "2026-11-27 08:00:00".into(),
+                    size: 12.0,
+                    color: [0, 0, 0, 255],
+                },
+            });
+            let png = {
+                let mut buf = Vec::new();
+                let mut encoder = png::Encoder::new(&mut buf, 1, 1);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&[255, 0, 0, 255]).unwrap();
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf)
+            };
+            layer.annotations.push(sciplot_core::Annotation {
+                id: 2,
+                kind: sciplot_core::AnnotationKind::Image {
+                    x: 0.1,
+                    y: 0.1,
+                    w: 0.3,
+                    h: 0.3,
+                    png_base64: png,
+                },
+            });
+        }
+        let graph = project.graph(graph_id).unwrap();
+        let scene = render(&project, graph, &[], 640.0, 480.0, 1.0);
+        assert!(scene.layers[0].show_right);
+        assert!(scene.layers[0].y2_max > 50.0, "{}", scene.layers[0].y2_max);
+        let svg = to_svg(&scene);
+        assert!(svg.contains("2026-11-27 08:00:00"), "{svg}");
+        assert!(svg.contains("data:image/png;base64,"), "{svg}");
+        assert!(svg.contains("right"), "{svg}");
+        assert!(svg.contains("<polyline"), "{svg}");
     }
 }

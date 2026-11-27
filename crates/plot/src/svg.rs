@@ -57,6 +57,14 @@ pub fn to_svg(scene: &Scene) -> String {
                     a.0, a.1, b.0, b.1, c.0, c.1, hex(*fill)
                 ));
             }
+            Prim::Image { x, y, w, h, png_base64, .. } => {
+                if png_base64.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "<image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" href=\"data:image/png;base64,{png_base64}\"/>\n"
+                ));
+            }
             Prim::Text { x, y, text, size, color, halign, valign, vertical } => {
                 if *vertical && !crate::scene::stack_vertical(text) {
                     out.push_str(&format!(

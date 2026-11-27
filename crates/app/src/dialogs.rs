@@ -1,10 +1,11 @@
 use sciplot_analysis::{FitModel, InterpMethod};
 use sciplot_core::{
     format_number, parse_initials, Annotation, AnnotationKind, AxisScale, ColumnMode, ColumnType,
-    CurveKind, CurveStyle, Dash, DataSource, LegendPos, SurfaceMode, SurfaceSource, Symbol,
+    CurveAxes, CurveKind, CurveStyle, Dash, DataSource, ErrorSource, FillPattern, LegendPos, StepAnchor,
+    SurfaceMode, SurfaceSource, Symbol, VectorMode, WhiskerMode, XAxisSide, YAxisSide,
 };
 
-use crate::app::{Dialog, FitWhich, LineChoice, PathAction, RangeOp, SciPlotApp};
+use crate::app::{AxisEdge, Dialog, FitWhich, FunctionForm, LineChoice, PathAction, RangeOp, SciPlotApp};
 use crate::i18n;
 use crate::ops;
 
@@ -90,6 +91,7 @@ fn title_of(dialog: &Dialog) -> String {
             PathAction::Open => sciplot_core::t("打开项目").into(),
             PathAction::SaveAs => sciplot_core::t("另存为").into(),
             PathAction::ImportCsv => sciplot_core::t("导入 CSV").into(),
+            PathAction::ImportImage => sciplot_core::tr!("导入图像", "Import image").into(),
             PathAction::ExportCsv => sciplot_core::t("导出 CSV").into(),
             PathAction::ExportPng => sciplot_core::t("导出 PNG").into(),
             PathAction::ExportSvg => sciplot_core::t("导出 SVG").into(),
@@ -105,6 +107,8 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::CellFormula { .. } => sciplot_core::t("单元格公式").into(),
         Dialog::ImportAscii { .. } => sciplot_core::t("导入 ASCII").into(),
         Dialog::Axis { .. } => sciplot_core::t("坐标轴").into(),
+        Dialog::Wizard { .. } => sciplot_core::tr!("绘图向导", "Plot wizard").into(),
+        Dialog::Errors { .. } => sciplot_core::tr!("误差棒", "Error bars").into(),
         Dialog::ConfirmDelete { .. } => sciplot_core::t("确认删除").into(),
         Dialog::Legend { .. } => sciplot_core::t("图例").into(),
         Dialog::Title { .. } => sciplot_core::t("标题").into(),
@@ -190,7 +194,7 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         Dialog::Axis {
             graph,
             layer,
-            y_axis,
+            edge,
             axis,
             min,
             max,
@@ -198,7 +202,7 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             minor,
             error,
         } => axis_dialog(
-            app, ui, *graph, *layer, *y_axis, axis, min, max, step, minor, error,
+            app, ui, *graph, *layer, *edge, axis, min, max, step, minor, error,
         ),
         Dialog::ConfirmDelete { target, detail } => confirm_delete(app, ui, target, detail),
         Dialog::Legend {
@@ -218,7 +222,26 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             curve,
             style,
             name,
-        } => style_dialog(app, ui, *graph, *layer, *curve, style, name),
+            axes,
+            vector_mode,
+        } => style_dialog(app, ui, *graph, *layer, *curve, style, name, axes, vector_mode),
+        Dialog::Wizard {
+            table,
+            x,
+            y,
+            kind,
+            vector_mode,
+            third,
+            fourth,
+        } => wizard_dialog(app, ui, *table, x, y, kind, vector_mode, third, fourth),
+        Dialog::Errors {
+            graph,
+            layer,
+            curve,
+            spec,
+            x_col,
+            y_col,
+        } => errors_dialog(app, ui, *graph, *layer, *curve, spec, x_col, y_col),
         Dialog::Frame {
             graph,
             layer,
@@ -292,7 +315,9 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         Dialog::Function {
             graph,
             layer,
+            form,
             expr,
+            y_expr,
             xmin,
             xmax,
             ymin,
@@ -301,7 +326,7 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             surface,
             mode,
         } => function_dialog(
-            app, ui, *graph, *layer, expr, xmin, xmax, ymin, ymax, samples, surface, mode,
+            app, ui, *graph, *layer, form, expr, y_expr, xmin, xmax, ymin, ymax, samples, surface, mode,
         ),
         Dialog::AddCurve { graph, table, kind } => add_curve(app, ui, *graph, table, kind),
         Dialog::Prefs(prefs) => prefs_dialog(app, ui, prefs),
@@ -673,6 +698,12 @@ fn path_dialog(
             *path = picked.display().to_string();
         }
     }
+    if matches!(action, PathAction::ImportImage) {
+        ui.label(sciplot_core::tr!(
+            "支持 PNG、JPEG、GIF、BMP。从文件菜单导入时写成强度矩阵；从图上插入时嵌在当前图里。",
+            "PNG, JPEG, GIF, and BMP. The File menu stores an intensity matrix. Inserting on a graph embeds the picture."
+        ));
+    }
     if matches!(action, PathAction::ImportCsv | PathAction::ExportCsv) {
         ui.label(if matches!(action, PathAction::ImportCsv) {
             sciplot_core::t("编码。自动识别 UTF-8、带 BOM 或含空字节的 UTF-16，以及 GBK。")
@@ -690,7 +721,7 @@ fn path_dialog(
         ui.text_edit_singleline(extra);
     }
     let target = crate::app::resolve_user_path(app, path);
-    let verb = if matches!(action, PathAction::Open | PathAction::ImportCsv) {
+    let verb = if matches!(action, PathAction::Open | PathAction::ImportCsv | PathAction::ImportImage) {
         sciplot_core::t("将读取")
     } else {
         sciplot_core::t("将写入")
@@ -1164,7 +1195,7 @@ fn axis_dialog(
     ui: &mut egui::Ui,
     graph: sciplot_core::GraphId,
     layer: usize,
-    y_axis: bool,
+    edge: AxisEdge,
     axis: &mut sciplot_core::Axis,
     min: &mut String,
     max: &mut String,
@@ -1172,11 +1203,13 @@ fn axis_dialog(
     minor: &mut String,
     error: &mut String,
 ) -> bool {
-    ui.label(if y_axis {
-        sciplot_core::t("纵轴")
-    } else {
-        sciplot_core::t("横轴")
-    });
+    ui.label(edge.label());
+    if matches!(edge, AxisEdge::Top | AxisEdge::Right) {
+        ui.label(sciplot_core::tr!(
+            "上轴和右轴不跟随鼠标平移和滚轮缩放，范围用这里的最小、最大值或自动范围。",
+            "The top and right axes do not follow mouse pan or wheel zoom. Set their range here, or leave it automatic."
+        ));
+    }
     ui.label(sciplot_core::t("标题"));
     ui.text_edit_singleline(&mut axis.label);
     egui::ComboBox::from_id_salt("axis-scale")
@@ -1243,14 +1276,21 @@ fn axis_dialog(
                             .layers
                             .get_mut(layer)
                             .ok_or(sciplot_core::t("找不到图层"))?;
-                        if y_axis {
-                            layer.y_axis = stored.clone();
-                        } else {
-                            layer.x_axis = stored.clone();
+                        match edge {
+                            AxisEdge::Bottom => layer.x_axis = stored.clone(),
+                            AxisEdge::Left => layer.y_axis = stored.clone(),
+                            AxisEdge::Top => {
+                                layer.x_top = stored.clone();
+                                layer.show_top = true;
+                            }
+                            AxisEdge::Right => {
+                                layer.y_right = stored.clone();
+                                layer.show_right = true;
+                            }
                         }
                         Ok(())
                     });
-                    clear_axis_view(app, graph, layer, y_axis);
+                    clear_axis_view(app, graph, layer, edge);
                     app.status = sciplot_core::t("已更新坐标轴").into();
                 }
                 Err(message) => *error = message,
@@ -1344,19 +1384,23 @@ fn parse_minor(text: &str) -> Result<Option<u8>, String> {
     Ok(Some(value as u8))
 }
 
-fn clear_axis_view(app: &mut SciPlotApp, graph: sciplot_core::GraphId, layer: usize, y_axis: bool) {
+fn clear_axis_view(app: &mut SciPlotApp, graph: sciplot_core::GraphId, layer: usize, edge: AxisEdge) {
     let Some(views) = app.views.get_mut(&graph) else {
         return;
     };
     let Some(view) = views.get_mut(layer) else {
         return;
     };
-    if y_axis {
-        view.y_min = None;
-        view.y_max = None;
-    } else {
-        view.x_min = None;
-        view.x_max = None;
+    match edge {
+        AxisEdge::Left => {
+            view.y_min = None;
+            view.y_max = None;
+        }
+        AxisEdge::Bottom => {
+            view.x_min = None;
+            view.x_max = None;
+        }
+        AxisEdge::Top | AxisEdge::Right => {}
     }
 }
 
@@ -1445,6 +1489,7 @@ fn title_dialog(
     !ui.button(sciplot_core::t("取消")).clicked()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn style_dialog(
     app: &mut SciPlotApp,
     ui: &mut egui::Ui,
@@ -1453,6 +1498,8 @@ fn style_dialog(
     curve: usize,
     style: &mut CurveStyle,
     name: &mut String,
+    axes: &mut CurveAxes,
+    vector_mode: &mut VectorMode,
 ) -> bool {
     ui.label(sciplot_core::t("名称"));
     ui.text_edit_singleline(name);
@@ -1478,28 +1525,103 @@ fn style_dialog(
         .and_then(|item| item.layers.get(layer))
         .and_then(|item| item.curves.get(curve))
         .map(|item| item.kind);
-    if kind == Some(CurveKind::Histogram) {
+    if matches!(kind, Some(CurveKind::Histogram | CurveKind::StackedHistogram)) {
         ui.add(
             egui::Slider::new(&mut style.histogram_bins, 2..=80)
                 .text(sciplot_core::t("直方图箱数")),
         );
     }
+    if matches!(kind, Some(CurveKind::Steps | CurveKind::HorizontalSteps)) {
+        ui.label(sciplot_core::tr!("阶梯拐角", "Step corner"));
+        egui::ComboBox::from_id_salt("step-anchor")
+            .selected_text(style.step_anchor.label())
+            .show_ui(ui, |ui| {
+                for item in StepAnchor::all() {
+                    ui.selectable_value(&mut style.step_anchor, *item, item.label());
+                }
+            });
+        ui.checkbox(&mut style.show_symbols, sciplot_core::tr!("在数据点上画符号", "Show symbols on the points"));
+    }
+    if kind == Some(CurveKind::Spline) {
+        ui.checkbox(&mut style.show_symbols, sciplot_core::tr!("在数据点上画符号", "Show symbols on the points"));
+    }
+    if kind == Some(CurveKind::Pie) {
+        ui.add(egui::Slider::new(&mut style.pie_start_deg, -180.0..=180.0).text(sciplot_core::tr!("起始角", "Start angle")));
+        ui.add(egui::Slider::new(&mut style.pie_size, 0.2..=1.0).text(sciplot_core::tr!("半径", "Radius")));
+        egui::ComboBox::from_id_salt("pie-pattern")
+            .selected_text(style.pie_pattern.label())
+            .show_ui(ui, |ui| {
+                for item in FillPattern::all() {
+                    ui.selectable_value(&mut style.pie_pattern, *item, item.label());
+                }
+            });
+    }
+    if kind == Some(CurveKind::BoxPlot) {
+        egui::ComboBox::from_id_salt("whisker")
+            .selected_text(style.whisker.label())
+            .show_ui(ui, |ui| {
+                for item in WhiskerMode::all() {
+                    ui.selectable_value(&mut style.whisker, *item, item.label());
+                }
+            });
+        if style.whisker == WhiskerMode::Percentile {
+            ui.add(
+                egui::Slider::new(&mut style.whisker_percentile, 0.0..=49.0)
+                    .text(sciplot_core::tr!("下百分位", "Lower percentile")),
+            );
+        }
+        ui.checkbox(&mut style.box_mean, sciplot_core::tr!("画出均值", "Show the mean"));
+        ui.checkbox(&mut style.box_outliers, sciplot_core::tr!("画出离群点", "Show outliers"));
+    }
+    if kind == Some(CurveKind::Vector) {
+        egui::ComboBox::from_id_salt("vector-mode")
+            .selected_text(vector_mode.label())
+            .show_ui(ui, |ui| {
+                for item in VectorMode::all() {
+                    ui.selectable_value(vector_mode, *item, item.label());
+                }
+            });
+    }
+    ui.label(sciplot_core::tr!("横轴", "X axis"));
+    egui::ComboBox::from_id_salt("curve-x-side")
+        .selected_text(axes.x.label())
+        .show_ui(ui, |ui| {
+            for item in XAxisSide::all() {
+                ui.selectable_value(&mut axes.x, *item, item.label());
+            }
+        });
+    ui.label(sciplot_core::tr!("纵轴", "Y axis"));
+    egui::ComboBox::from_id_salt("curve-y-side")
+        .selected_text(axes.y.label())
+        .show_ui(ui, |ui| {
+            for item in YAxisSide::all() {
+                ui.selectable_value(&mut axes.y, *item, item.label());
+            }
+        });
     color_sliders(ui, &mut style.color);
     if action_button(ui, sciplot_core::t("应用")) {
         let style = style.clone();
         let name = name.clone();
+        let axes = *axes;
+        let vector_mode = *vector_mode;
         app.edit(sciplot_core::t("曲线样式"), |project| {
-            let curve = project
+            let layer = project
                 .graph_mut(graph)
                 .ok_or(sciplot_core::t("找不到图形"))?
                 .layers
                 .get_mut(layer)
-                .ok_or(sciplot_core::t("找不到图层"))?
-                .curves
-                .get_mut(curve)
-                .ok_or(sciplot_core::t("找不到曲线"))?;
+                .ok_or(sciplot_core::t("找不到图层"))?;
+            if axes.x == XAxisSide::Top {
+                layer.show_top = true;
+            }
+            if axes.y == YAxisSide::Right {
+                layer.show_right = true;
+            }
+            let curve = layer.curves.get_mut(curve).ok_or(sciplot_core::t("找不到曲线"))?;
             curve.style = style.clone();
             curve.name = name.clone();
+            curve.axes = axes;
+            curve.vector_mode = vector_mode;
             Ok(())
         });
         app.status = sciplot_core::t("已更新曲线样式").into();
@@ -2060,12 +2182,235 @@ fn range_dialog(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn wizard_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    table: sciplot_core::TableId,
+    x: &mut usize,
+    y: &mut Vec<bool>,
+    kind: &mut CurveKind,
+    vector_mode: &mut VectorMode,
+    third: &mut usize,
+    fourth: &mut usize,
+) -> bool {
+    let columns: Vec<String> = app
+        .project
+        .table(table)
+        .map(|item| item.columns.iter().map(|column| column.name.clone()).collect())
+        .unwrap_or_default();
+    if columns.is_empty() {
+        ui.label(sciplot_core::t("表格没有列"));
+        return button_closes(ui, sciplot_core::t("关闭"));
+    }
+    while y.len() < columns.len() {
+        y.push(false);
+    }
+    *x = (*x).min(columns.len() - 1);
+    *third = (*third).min(columns.len() - 1);
+    *fourth = (*fourth).min(columns.len() - 1);
+    egui::ComboBox::from_id_salt("wizard-kind")
+        .selected_text(kind.label())
+        .show_ui(ui, |ui| {
+            for item in CurveKind::table_kinds() {
+                ui.selectable_value(kind, *item, item.label());
+            }
+        });
+    column_combo(ui, "wizard-x", sciplot_core::tr!("X 列", "X column"), x, &columns);
+    if *kind == CurveKind::Vector {
+        egui::ComboBox::from_id_salt("wizard-vector")
+            .selected_text(vector_mode.label())
+            .show_ui(ui, |ui| {
+                for item in VectorMode::all() {
+                    ui.selectable_value(vector_mode, *item, item.label());
+                }
+            });
+        let mut y_index = y.iter().position(|on| *on).unwrap_or(0).min(columns.len() - 1);
+        column_combo(ui, "wizard-y", sciplot_core::tr!("起点 Y", "Start Y"), &mut y_index, &columns);
+        y.fill(false);
+        y[y_index] = true;
+        let (third_label, fourth_label) = match *vector_mode {
+            VectorMode::EndPoint => (
+                sciplot_core::tr!("终点 X", "End X"),
+                sciplot_core::tr!("终点 Y", "End Y"),
+            ),
+            VectorMode::AngleMagnitude => (
+                sciplot_core::tr!("角度（弧度）", "Angle (radians)"),
+                sciplot_core::tr!("模长", "Magnitude"),
+            ),
+            VectorMode::DxDy => (sciplot_core::tr!("dx", "dx"), sciplot_core::tr!("dy", "dy")),
+        };
+        column_combo(ui, "wizard-3", third_label, third, &columns);
+        column_combo(ui, "wizard-4", fourth_label, fourth, &columns);
+    } else {
+        ui.label(sciplot_core::tr!("Y 列", "Y columns"));
+        for (index, name) in columns.iter().enumerate() {
+            if index == *x {
+                continue;
+            }
+            ui.checkbox(&mut y[index], name);
+        }
+    }
+    if action_button(ui, sciplot_core::t("绘制")) {
+        let picked: Vec<usize> = if *kind == CurveKind::Vector {
+            let y_index = y.iter().position(|on| *on).unwrap_or(0);
+            vec![y_index, *third, *fourth]
+        } else {
+            y.iter().enumerate().filter(|(_, on)| **on).map(|(index, _)| index).collect()
+        };
+        let kind = *kind;
+        let mode = *vector_mode;
+        let x = *x;
+        let prefs = app.prefs.clone();
+        if let Some(id) = app.edit(sciplot_core::tr!("绘图向导", "Plot wizard"), |project| {
+            let id = project.plot_picked(table, kind, mode, x, &picked)?;
+            prefs.apply_new_graph(project, id);
+            Ok(id)
+        }) {
+            app.open_tab(crate::app::Tab::Graph(id));
+            app.status = sciplot_core::tr!("已按向导绘图", "Plotted from the wizard").into();
+            return false;
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn column_combo(ui: &mut egui::Ui, salt: &str, label: &str, index: &mut usize, columns: &[String]) {
+    let selected = columns.get(*index).cloned().unwrap_or_default();
+    ui.label(label);
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for (item, name) in columns.iter().enumerate() {
+                ui.selectable_value(index, item, name);
+            }
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn errors_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    graph: sciplot_core::GraphId,
+    layer: usize,
+    curve: usize,
+    spec: &mut sciplot_core::ErrorSpec,
+    x_col: &mut String,
+    y_col: &mut String,
+) -> bool {
+    ui.label(sciplot_core::tr!(
+        "加到当前曲线上。百分比按数值的绝对值。标准差和标准误用这一列里有限的点。",
+        "Drawn on the current curve. Percent uses the absolute value. Standard deviation and standard error use the finite points in that column."
+    ));
+    error_source_row(ui, "err-x", sciplot_core::tr!("X 误差", "X error"), &mut spec.x, &mut spec.x_percent, x_col);
+    error_source_row(ui, "err-y", sciplot_core::tr!("Y 误差", "Y error"), &mut spec.y, &mut spec.y_percent, y_col);
+    if action_button(ui, sciplot_core::t("应用")) {
+        let spec = spec.clone();
+        let x_col = x_col.clone();
+        let y_col = y_col.clone();
+        if app
+            .edit(sciplot_core::tr!("误差棒", "Error bars"), |project| {
+                let names = {
+                    let source = project
+                        .graph(graph)
+                        .and_then(|item| item.layers.get(layer))
+                        .and_then(|item| item.curves.get(curve))
+                        .map(|item| item.source.clone())
+                        .ok_or(sciplot_core::t("找不到曲线"))?;
+                    match source {
+                        DataSource::Columns { table, .. } => project
+                            .table(table)
+                            .map(|item| item.columns.iter().map(|column| column.name.clone()).collect())
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    }
+                };
+                let from_table = project
+                    .graph(graph)
+                    .and_then(|item| item.layers.get(layer))
+                    .and_then(|item| item.curves.get(curve))
+                    .is_some_and(|item| matches!(item.source, DataSource::Columns { .. }));
+                if !from_table && (spec.x == ErrorSource::Column || spec.y == ErrorSource::Column) {
+                    return Err(sciplot_core::tr!(
+                        "这条曲线没有数据列，不能从列读取误差",
+                        "This curve has no table columns to read errors from"
+                    )
+                    .into());
+                }
+                let x_index = if spec.x == ErrorSource::Column {
+                    Some(find_named(&names, &x_col)?)
+                } else {
+                    None
+                };
+                let y_index = if spec.y == ErrorSource::Column {
+                    Some(find_named(&names, &y_col)?)
+                } else {
+                    None
+                };
+                let curve = project
+                    .graph_mut(graph)
+                    .ok_or(sciplot_core::t("找不到图形"))?
+                    .layers
+                    .get_mut(layer)
+                    .ok_or(sciplot_core::t("找不到图层"))?
+                    .curves
+                    .get_mut(curve)
+                    .ok_or(sciplot_core::t("找不到曲线"))?;
+                curve.error = spec.clone();
+                if let DataSource::Columns { x_err, y_err, .. } = &mut curve.source {
+                    if spec.x == ErrorSource::Column || spec.x == ErrorSource::None {
+                        *x_err = x_index;
+                    }
+                    if spec.y == ErrorSource::Column || spec.y == ErrorSource::None {
+                        *y_err = y_index;
+                    }
+                }
+                Ok(())
+            })
+            .is_some()
+        {
+            app.status = sciplot_core::tr!("已更新误差棒", "Updated the error bars").into();
+            return false;
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn error_source_row(ui: &mut egui::Ui, salt: &str, label: &str, source: &mut ErrorSource, percent: &mut f64, column: &mut String) {
+    ui.label(label);
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(source.label())
+        .show_ui(ui, |ui| {
+            for item in ErrorSource::all() {
+                ui.selectable_value(source, *item, item.label());
+            }
+        });
+    if *source == ErrorSource::Percent {
+        ui.add(egui::Slider::new(percent, 0.0..=100.0).text(sciplot_core::tr!("百分比", "Percent")));
+    }
+    if *source == ErrorSource::Column {
+        ui.text_edit_singleline(column);
+    }
+}
+
+fn find_named(names: &[String], wanted: &str) -> Result<usize, String> {
+    let wanted = wanted.trim();
+    names
+        .iter()
+        .position(|name| name == wanted)
+        .ok_or_else(|| {
+            sciplot_core::trf!("找不到列「{wanted}」", "No column named \"{wanted}\"", wanted = wanted)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn function_dialog(
     app: &mut SciPlotApp,
     ui: &mut egui::Ui,
     graph: Option<sciplot_core::GraphId>,
     layer: usize,
+    form: &mut FunctionForm,
     expr: &mut String,
+    y_expr: &mut String,
     xmin: &mut String,
     xmax: &mut String,
     ymin: &mut String,
@@ -2074,10 +2419,41 @@ fn function_dialog(
     surface: &mut bool,
     mode: &mut SurfaceMode,
 ) -> bool {
-    ui.checkbox(surface, sciplot_core::t("画成三维曲面（否则是 y=f(x)）"));
-    labeled(ui, sciplot_core::t("表达式"), expr);
-    labeled(ui, sciplot_core::t("x 最小"), xmin);
-    labeled(ui, sciplot_core::t("x 最大"), xmax);
+    ui.checkbox(surface, sciplot_core::tr!("画成三维曲面", "Draw a 3D surface"));
+    if !*surface {
+        egui::ComboBox::from_id_salt("fn-form")
+            .selected_text(form.label())
+            .show_ui(ui, |ui| {
+                for item in FunctionForm::all() {
+                    ui.selectable_value(form, *item, item.label());
+                }
+            });
+    }
+    let expr_label = if *surface {
+        sciplot_core::t("表达式")
+    } else {
+        match *form {
+            FunctionForm::Cartesian => sciplot_core::tr!("y = f(x)", "y = f(x)"),
+            FunctionForm::Parametric => sciplot_core::tr!("x(t)", "x(t)"),
+            FunctionForm::Polar => sciplot_core::tr!("r(θ)，θ 用弧度", "r(theta), theta in radians"),
+        }
+    };
+    labeled(ui, expr_label, expr);
+    if !*surface && *form == FunctionForm::Parametric {
+        labeled(ui, sciplot_core::tr!("y(t)", "y(t)"), y_expr);
+    }
+    let (min_label, max_label) = if *surface || *form == FunctionForm::Cartesian {
+        (sciplot_core::t("x 最小"), sciplot_core::t("x 最大"))
+    } else if *form == FunctionForm::Polar {
+        (
+            sciplot_core::tr!("θ 最小", "theta min"),
+            sciplot_core::tr!("θ 最大", "theta max"),
+        )
+    } else {
+        (sciplot_core::tr!("t 最小", "t min"), sciplot_core::tr!("t 最大", "t max"))
+    };
+    labeled(ui, min_label, xmin);
+    labeled(ui, max_label, xmax);
     if *surface {
         labeled(ui, sciplot_core::t("y 最小"), ymin);
         labeled(ui, sciplot_core::t("y 最大"), ymax);
@@ -2122,7 +2498,8 @@ fn function_dialog(
             }
         } else {
             let samples = samples.parse::<usize>().unwrap_or(200).clamp(8, 2000);
-            let kind = CurveKind::Function;
+            let form = *form;
+            let y_expr = y_expr.clone();
             let prefs = app.prefs.clone();
             let before = graph.and_then(|id| {
                 app.project
@@ -2142,17 +2519,54 @@ fn function_dialog(
                     .get_mut(layer)
                     .ok_or(sciplot_core::t("找不到图层"))?;
                 let style = CurveStyle::from_index(layer_ref.curves.len());
+                let (name, kind, source) = match form {
+                    FunctionForm::Parametric => {
+                        sciplot_core::CompiledExpr::compile(&y_expr)?;
+                        (
+                            format!("({expr}, {y_expr})"),
+                            CurveKind::Parametric,
+                            DataSource::Parametric {
+                                x_expr: expr.clone(),
+                                y_expr: y_expr.clone(),
+                                t_min: x0,
+                                t_max: x1,
+                                samples,
+                            },
+                        )
+                    }
+                    FunctionForm::Polar => (
+                        expr.clone(),
+                        CurveKind::Polar,
+                        DataSource::Polar {
+                            expr: expr.clone(),
+                            theta_min: x0,
+                            theta_max: x1,
+                            samples,
+                        },
+                    ),
+                    FunctionForm::Cartesian => (
+                        expr.clone(),
+                        CurveKind::Function,
+                        DataSource::Function {
+                            expr: expr.clone(),
+                            x_min: x0,
+                            x_max: x1,
+                            samples,
+                        },
+                    ),
+                };
+                sciplot_core::CompiledExpr::compile(match &source {
+                    DataSource::Parametric { x_expr, .. } => x_expr,
+                    DataSource::Polar { expr, .. } | DataSource::Function { expr, .. } => expr,
+                    _ => &expr,
+                })?;
                 layer_ref.curves.push(sciplot_core::Curve {
-                    name: expr.clone(),
+                    name,
                     kind,
                     style,
-                    source: DataSource::Function {
-                        expr: expr.clone(),
-                        x_min: x0,
-                        x_max: x1,
-                        samples,
-                    },
+                    source,
                     visible: true,
+                    ..sciplot_core::Curve::default()
                 });
                 if let Some(start) = before {
                     prefs.apply_curves(project, graph_id, layer, start);
@@ -2235,20 +2649,7 @@ fn add_curve(
 }
 
 fn plot_kinds() -> &'static [CurveKind] {
-    &[
-        CurveKind::Line,
-        CurveKind::Scatter,
-        CurveKind::LineSymbol,
-        CurveKind::Steps,
-        CurveKind::Bars,
-        CurveKind::HorizontalBars,
-        CurveKind::Histogram,
-        CurveKind::Area,
-        CurveKind::ErrorBars,
-        CurveKind::BoxPlot,
-        CurveKind::Pie,
-        CurveKind::Vector,
-    ]
+    CurveKind::table_kinds()
 }
 
 fn curve_names(app: &SciPlotApp, graph: sciplot_core::GraphId, layer: usize) -> Vec<String> {
@@ -2286,7 +2687,7 @@ fn build_input(
     }
 }
 
-fn push_annotation(
+pub(crate) fn push_annotation(
     project: &mut sciplot_core::Project,
     graph: sciplot_core::GraphId,
     layer: usize,

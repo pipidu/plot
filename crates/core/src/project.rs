@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSpec, SurfaceSource, TickKind};
+use crate::graph::{
+    Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSource, SurfaceSpec, TickKind, VectorMode,
+};
 use crate::matrix::Matrix;
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
 use crate::util::unique_name;
@@ -376,6 +378,11 @@ impl Project {
     /// 用表的 X 列和全部 Y 列新建一张图。直方图、箱线图、饼图按 Y 列的数值作图。
     /// 只有一条 Y 时，图名和标题用「Y-X」，坐标轴标题用列名。
     pub fn plot_table(&mut self, table_id: TableId, kind: CurveKind) -> Result<GraphId, String> {
+        self.plot_table_mode(table_id, kind, VectorMode::DxDy)
+    }
+
+    /// 和 `plot_table` 一样。向量图可以指定 dx/dy、终点或角度模长。
+    pub fn plot_table_mode(&mut self, table_id: TableId, kind: CurveKind, vector_mode: VectorMode) -> Result<GraphId, String> {
         let (table_name, x_label, y_labels) = {
             let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
             let x_label = table
@@ -400,7 +407,7 @@ impl Project {
             format!("{table_name}-{}", kind.label())
         };
         let graph_id = self.new_graph(&graph_name);
-        self.add_curves(graph_id, 0, table_id, kind)?;
+        self.add_curves_with(graph_id, 0, table_id, kind, vector_mode)?;
         if let Some(graph) = self.graph_mut(graph_id) {
             if let Some(layer) = graph.layers.first_mut() {
                 layer.title = if y_labels.len() == 1 {
@@ -419,11 +426,119 @@ impl Project {
         Ok(graph_id)
     }
 
+    /// 绘图向导：用指定的 X 和 Y 列新建一张图。
+    /// 向量图时 `columns` 依次是起点 Y、第三列、第四列。
+    pub fn plot_picked(
+        &mut self,
+        table_id: TableId,
+        kind: CurveKind,
+        vector_mode: VectorMode,
+        x: usize,
+        columns: &[usize],
+    ) -> Result<GraphId, String> {
+        let (curves, x_label, graph_name) = {
+            let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
+            if x >= table.columns.len() {
+                return Err(crate::tr!("找不到这一列", "That column does not exist").into());
+            }
+            let curves = if kind == CurveKind::Vector {
+                if columns.len() < 3 {
+                    return Err(crate::tr!(
+                        "向量图需要起点 Y、第三列和第四列",
+                        "A vector plot needs a start Y, a third column, and a fourth column"
+                    )
+                    .into());
+                }
+                let (y, dx, dy) = (columns[0], columns[1], columns[2]);
+                if y >= table.columns.len() || dx >= table.columns.len() || dy >= table.columns.len() {
+                    return Err(crate::tr!("找不到这一列", "That column does not exist").into());
+                }
+                vec![Curve {
+                    name: crate::locale::t("向量").into(),
+                    kind: CurveKind::Vector,
+                    style: CurveStyle::default(),
+                    source: DataSource::Columns {
+                        table: table_id,
+                        x,
+                        y,
+                        x_err: None,
+                        y_err: None,
+                        dx: Some(dx),
+                        dy: Some(dy),
+                    },
+                    visible: true,
+                    vector_mode,
+                    ..Curve::default()
+                }]
+            } else {
+                if columns.is_empty() {
+                    return Err(crate::locale::t("没有可绘制的 Y 列。请把一列设为 Y，或填入数值。").into());
+                }
+                let mut curves = Vec::new();
+                for &y in columns {
+                    if y >= table.columns.len() {
+                        return Err(crate::tr!("找不到这一列", "That column does not exist").into());
+                    }
+                    curves.push(Curve {
+                        name: table.columns[y].name.clone(),
+                        kind,
+                        style: CurveStyle::default(),
+                        source: DataSource::Columns {
+                            table: table_id,
+                            x,
+                            y,
+                            x_err: None,
+                            y_err: None,
+                            dx: None,
+                            dy: None,
+                        },
+                        visible: true,
+                        ..Curve::default()
+                    });
+                }
+                curves
+            };
+            let y_name = curves.first().map(|curve| curve.name.clone()).unwrap_or_else(|| kind.label().into());
+            let x_label = table.columns[x].name.clone();
+            (curves, x_label, format!("{y_name}-{}", table.columns[x].name))
+        };
+        let graph_id = self.new_graph(&graph_name);
+        let graph = self.graph_mut(graph_id).ok_or(crate::locale::t("找不到图形"))?;
+        if graph.layers.is_empty() {
+            graph.layers.push(Layer::default());
+        }
+        let layer = graph.layers.first_mut().ok_or(crate::locale::t("找不到图层"))?;
+        layer.title = graph_name.clone();
+        if layer.x_axis.label.is_empty() || layer.x_axis.label == "x" {
+            layer.x_axis.label = x_label;
+        }
+        if curves.len() == 1 && (layer.y_axis.label.is_empty() || layer.y_axis.label == "y") {
+            layer.y_axis.label = curves[0].name.clone();
+        }
+        for (offset, mut curve) in curves.into_iter().enumerate() {
+            curve.style = CurveStyle::from_index(offset);
+            layer.curves.push(curve);
+        }
+        self.adopt_axis_ticks(graph_id, 0, table_id);
+        Ok(graph_id)
+    }
+
     pub fn add_curves(&mut self, graph_id: GraphId, layer: usize, table_id: TableId, kind: CurveKind) -> Result<(), String> {
+        self.add_curves_with(graph_id, layer, table_id, kind, VectorMode::DxDy)
+    }
+
+    pub fn add_curves_with(
+        &mut self,
+        graph_id: GraphId,
+        layer: usize,
+        table_id: TableId,
+        kind: CurveKind,
+        vector_mode: VectorMode,
+    ) -> Result<(), String> {
         let layer_index = layer;
         let curves = {
             let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
-            curves_from_table(table, kind)?
+            curves_from_table(table, kind, vector_mode)?
         };
         let graph = self.graph_mut(graph_id).ok_or(crate::locale::t("找不到图形"))?;
         if graph.layers.is_empty() {
@@ -487,6 +602,7 @@ impl Project {
                 style,
                 source: DataSource::Matrix { matrix: matrix_id },
                 visible: true,
+                ..Curve::default()
             });
         }
         Ok(graph_id)
@@ -554,6 +670,35 @@ impl Project {
         let source = matrix.name.clone();
         self.log_line(crate::trf!("已把矩阵「{source}」转为表格「{shown}」。", "Converted matrix \"{source}\" to table \"{shown}\".", source = source, shown = shown));
         Ok(table_id)
+    }
+
+    /// 用 RGBA8 像素建一张强度矩阵。`width * height * 4` 个字节，行优先，第一行是图像顶部。
+    pub fn matrix_from_rgba(&mut self, name: &str, width: usize, height: usize, rgba: &[u8]) -> Result<MatrixId, String> {
+        if width == 0 || height == 0 || rgba.len() < width.saturating_mul(height).saturating_mul(4) {
+            return Err(crate::tr!("图像没有可用的像素", "The image has no usable pixels").into());
+        }
+        if width.saturating_mul(height) > 4_000_000 {
+            return Err(crate::tr!("图像太大，超过 400 万像素", "The image is larger than 4 million pixels").into());
+        }
+        let id = self.new_matrix(name, height, width);
+        let matrix = self.matrix_mut(id).unwrap();
+        matrix.x_min = 0.0;
+        matrix.x_max = width.saturating_sub(1) as f64;
+        matrix.y_min = height.saturating_sub(1) as f64;
+        matrix.y_max = 0.0;
+        for row in 0..height {
+            for col in 0..width {
+                let i = (row * width + col) * 4;
+                let alpha = rgba[i + 3];
+                let value = if alpha == 0 {
+                    None
+                } else {
+                    Some(luminance(rgba[i] as f64, rgba[i + 1] as f64, rgba[i + 2] as f64))
+                };
+                matrix.set(row, col, value);
+            }
+        }
+        Ok(id)
     }
 
     pub fn alloc_annotation_id(&mut self) -> u64 {
@@ -649,12 +794,12 @@ fn shift_optional(slot: &mut Option<usize>, at: usize, inserted: bool) {
     }
 }
 
-fn curves_from_table(table: &Table, kind: CurveKind) -> Result<Vec<Curve>, String> {
+fn curves_from_table(table: &Table, kind: CurveKind, vector_mode: VectorMode) -> Result<Vec<Curve>, String> {
     if table.columns.is_empty() {
         return Err(crate::locale::t("表格没有列").into());
     }
     if kind == CurveKind::Vector {
-        return Ok(vec![vector_curve(table)?]);
+        return Ok(vec![vector_curve(table, vector_mode)?]);
     }
     let x = table
         .columns
@@ -711,12 +856,19 @@ fn curves_from_table(table: &Table, kind: CurveKind) -> Result<Vec<Curve>, Strin
                 dy: None,
             },
             visible: true,
+            ..Curve::default()
         });
     }
     Ok(curves)
 }
 
-fn vector_curve(table: &Table) -> Result<Curve, String> {
+fn named_column(table: &Table, names: &[&str]) -> Option<usize> {
+    table.columns.iter().position(|column| {
+        names.iter().any(|name| column.name.eq_ignore_ascii_case(name))
+    })
+}
+
+fn vector_curve(table: &Table, mode: VectorMode) -> Result<Curve, String> {
     let x = table
         .columns
         .iter()
@@ -727,14 +879,17 @@ fn vector_curve(table: &Table) -> Result<Curve, String> {
         .iter()
         .position(|column| column.mode == ColumnMode::Y)
         .unwrap_or(1);
-    let find = |names: &[&str]| {
-        table.columns.iter().position(|column| {
-            names.iter().any(|name| column.name.eq_ignore_ascii_case(name))
-        })
+    if y >= table.columns.len() {
+        return Err(crate::locale::t("向量场需要 Y 列").into());
+    }
+    let (dx_names, dy_names) = match mode {
+        VectorMode::DxDy => (["dx", "vx"].as_slice(), ["dy", "vy"].as_slice()),
+        VectorMode::EndPoint => (["x2", "xend", "x_end"].as_slice(), ["y2", "yend", "y_end"].as_slice()),
+        VectorMode::AngleMagnitude => (["angle", "theta", "ang"].as_slice(), ["mag", "magnitude", "r", "amp"].as_slice()),
     };
-    let mut dx = find(&["dx", "dX", "vx"]);
-    let mut dy = find(&["dy", "dY", "vy"]);
-    if dx.is_none() || dy.is_none() {
+    let mut dx = named_column(table, dx_names);
+    let mut dy = named_column(table, dy_names);
+    if dx.is_none() || dy.is_none() || dx == Some(x) || dy == Some(y) || dx == dy {
         let extra: Vec<usize> = table
             .columns
             .iter()
@@ -750,11 +905,14 @@ fn vector_curve(table: &Table) -> Result<Curve, String> {
         }
     }
     let (Some(dx), Some(dy)) = (dx, dy) else {
-        return Err(crate::locale::t("向量场需要 X、Y、dx、dy 四列（后两列可命名为 dx、dy）").into());
+        return Err(match mode {
+            VectorMode::DxDy => crate::locale::t("向量场需要 X、Y、dx、dy 四列（后两列可命名为 dx、dy）").into(),
+            VectorMode::EndPoint => crate::tr!("向量 XYXY 需要起点 X、Y 和终点 X、Y 四列", "An XYXY vector needs start X, Y and end X, Y").into(),
+            VectorMode::AngleMagnitude => {
+                crate::tr!("向量 XYAM 需要起点 X、Y，以及角度（弧度）和模长", "An XYAM vector needs start X, Y, an angle in radians, and a magnitude").into()
+            }
+        });
     };
-    if y >= table.columns.len() {
-        return Err(crate::locale::t("向量场需要 Y 列").into());
-    }
     Ok(Curve {
         name: crate::locale::t("向量").to_string(),
         kind: CurveKind::Vector,
@@ -769,7 +927,14 @@ fn vector_curve(table: &Table) -> Result<Curve, String> {
             dy: Some(dy),
         },
         visible: true,
+        vector_mode: mode,
+        ..Curve::default()
     })
+}
+
+/// 把一张图的像素写成强度矩阵。行 0 是图像顶部。强度是 0.299R+0.587G+0.114B，透明像素留空。
+pub fn luminance(r: f64, g: f64, b: f64) -> f64 {
+    0.299 * r + 0.587 * g + 0.114 * b
 }
 
 #[cfg(test)]
@@ -873,5 +1038,23 @@ mod tests {
         assert!(axis.step.is_none());
         assert!(axis.minor_count.is_none());
         assert_eq!(axis.label, "x");
+    }
+
+    #[test]
+    fn image_intensity_keeps_the_top_row_first() {
+        let mut project = Project::new("图");
+        let rgba = [
+            255, 0, 0, 255, 0, 255, 0, 255, //
+            0, 0, 0, 0, 0, 0, 255, 255,
+        ];
+        let id = project.matrix_from_rgba("照片", 2, 2, &rgba).unwrap();
+        let matrix = project.matrix(id).unwrap();
+        assert_eq!(matrix.rows, 2);
+        assert_eq!(matrix.cols, 2);
+        assert!(matrix.y_min > matrix.y_max);
+        let red = luminance(255.0, 0.0, 0.0);
+        assert!((matrix.get(0, 0).unwrap() - red).abs() < 1e-9);
+        assert!(matrix.get(1, 0).is_none());
+        assert!(matrix.get(1, 1).unwrap() > 0.0);
     }
 }

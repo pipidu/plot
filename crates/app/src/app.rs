@@ -91,9 +91,52 @@ pub enum PathAction {
     Open,
     SaveAs,
     ImportCsv,
+    ImportImage,
     ExportCsv,
     ExportPng,
     ExportSvg,
+}
+
+/// 坐标轴对话框打开的是哪一条边。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AxisEdge {
+    Bottom,
+    Left,
+    Top,
+    Right,
+}
+
+impl AxisEdge {
+    pub fn label(self) -> &'static str {
+        match self {
+            AxisEdge::Bottom => sciplot_core::tr!("横轴", "Bottom axis"),
+            AxisEdge::Left => sciplot_core::tr!("纵轴", "Left axis"),
+            AxisEdge::Top => sciplot_core::tr!("上轴", "Top axis"),
+            AxisEdge::Right => sciplot_core::tr!("右轴", "Right axis"),
+        }
+    }
+}
+
+/// 函数对话框画哪一种曲线。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FunctionForm {
+    Cartesian,
+    Parametric,
+    Polar,
+}
+
+impl FunctionForm {
+    pub fn label(self) -> &'static str {
+        match self {
+            FunctionForm::Cartesian => sciplot_core::tr!("y = f(x)", "y = f(x)"),
+            FunctionForm::Parametric => sciplot_core::tr!("参数曲线", "Parametric"),
+            FunctionForm::Polar => sciplot_core::tr!("极坐标", "Polar"),
+        }
+    }
+
+    pub fn all() -> &'static [FunctionForm] {
+        &[FunctionForm::Cartesian, FunctionForm::Parametric, FunctionForm::Polar]
+    }
 }
 
 #[derive(Clone)]
@@ -186,7 +229,7 @@ pub enum Dialog {
     Axis {
         graph: GraphId,
         layer: usize,
-        y_axis: bool,
+        edge: AxisEdge,
         axis: sciplot_core::Axis,
         min: String,
         max: String,
@@ -215,6 +258,25 @@ pub enum Dialog {
         curve: usize,
         style: sciplot_core::CurveStyle,
         name: String,
+        axes: sciplot_core::CurveAxes,
+        vector_mode: sciplot_core::VectorMode,
+    },
+    Wizard {
+        table: TableId,
+        x: usize,
+        y: Vec<bool>,
+        kind: CurveKind,
+        vector_mode: sciplot_core::VectorMode,
+        third: usize,
+        fourth: usize,
+    },
+    Errors {
+        graph: GraphId,
+        layer: usize,
+        curve: usize,
+        spec: sciplot_core::ErrorSpec,
+        x_col: String,
+        y_col: String,
     },
     Frame {
         graph: GraphId,
@@ -282,7 +344,9 @@ pub enum Dialog {
     Function {
         graph: Option<GraphId>,
         layer: usize,
+        form: FunctionForm,
         expr: String,
+        y_expr: String,
         xmin: String,
         xmax: String,
         ymin: String,
@@ -387,6 +451,8 @@ pub struct SciPlotApp {
     narrow_collapsed: bool,
     pub(crate) update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateView>>,
     api: Option<crate::api::ApiServer>,
+    /// 插入图像时记住目标图和图层。空着表示导入成强度矩阵。
+    image_target: Option<(GraphId, usize)>,
     api_failed: Option<u16>,
 }
 
@@ -478,6 +544,7 @@ impl SciPlotApp {
             update_rx: None,
             api: None,
             api_failed: None,
+            image_target: None,
         };
         app.reload_font_silent();
         app
@@ -667,6 +734,7 @@ impl SciPlotApp {
             PathAction::SaveAs => {
                 self.write_path(&path);
             }
+            PathAction::ImportImage => self.import_image(&path),
             PathAction::ImportCsv => {
                 let encoding = self.prefs.csv_encoding;
                 match std::fs::read(&path)
@@ -1129,14 +1197,126 @@ impl SciPlotApp {
     }
 
     pub(crate) fn plot_table_as(&mut self, table: TableId, kind: CurveKind) {
+        self.plot_table_as_mode(table, kind, sciplot_core::VectorMode::DxDy);
+    }
+
+    pub(crate) fn plot_table_as_mode(&mut self, table: TableId, kind: CurveKind, mode: sciplot_core::VectorMode) {
         let prefs = self.prefs.clone();
         if let Some(id) = self.edit(sciplot_core::t("绘图"), |project| {
-            let id = project.plot_table(table, kind)?;
+            let id = project.plot_table_mode(table, kind, mode)?;
             prefs.apply_new_graph(project, id);
             Ok(id)
         }) {
             self.open_tab(Tab::Graph(id));
             self.status = sciplot_core::trf!("已新建{}", "Created {}", kind.label());
+        }
+    }
+
+    fn import_image(&mut self, path: &std::path::Path) {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = err.to_string();
+                return;
+            }
+        };
+        let decoded = match crate::image_io::decode_rgba(&bytes) {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                self.status = err;
+                return;
+            }
+        };
+        if let Some((graph, layer)) = self.image_target.take() {
+            self.insert_graph_image(graph, layer, &decoded);
+            return;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .map(|stem| stem.to_string())
+            .unwrap_or_else(|| sciplot_core::tr!("图像", "Image").into());
+        let width = decoded.width as usize;
+        let height = decoded.height as usize;
+        let rgba = decoded.rgba;
+        if let Some(id) = self.edit(sciplot_core::tr!("导入图像", "Import image"), move |project| {
+            project.matrix_from_rgba(&name, width, height, &rgba)
+        }) {
+            self.open_tab(Tab::Matrix(id));
+            self.note_dir(path);
+            self.status = sciplot_core::trf!(
+                "已把图像导入为强度矩阵（{}×{}）",
+                "Imported the image as an intensity matrix ({}×{})",
+                width,
+                height
+            );
+        }
+    }
+
+    fn insert_graph_image(&mut self, graph: GraphId, layer: usize, image: &crate::image_io::DecodedRgba) {
+        let fitted = match crate::image_io::fit_side(image, 800) {
+            Ok(fitted) => fitted,
+            Err(err) => {
+                self.status = err;
+                return;
+            }
+        };
+        let png = match crate::image_io::png_base64(fitted.width, fitted.height, &fitted.rgba) {
+            Ok(png) => png,
+            Err(err) => {
+                self.status = err;
+                return;
+            }
+        };
+        let (x, y, w, h) = annotation_box(self, graph, fitted.width, fitted.height);
+        if self
+            .edit(sciplot_core::tr!("插入图像", "Insert image"), |project| {
+                crate::dialogs::push_annotation(
+                    project,
+                    graph,
+                    layer,
+                    sciplot_core::AnnotationKind::Image {
+                        x,
+                        y,
+                        w,
+                        h,
+                        png_base64: png.clone(),
+                    },
+                )
+            })
+            .is_some()
+        {
+            self.status = sciplot_core::tr!("已插入图像", "Inserted the image").into();
+        }
+    }
+
+    pub(crate) fn start_image_insert(&mut self, graph: GraphId, layer: usize) {
+        self.image_target = Some((graph, layer));
+        start_file(self, PathAction::ImportImage, "");
+    }
+
+    pub(crate) fn add_timestamp(&mut self, graph: GraphId, layer: usize) {
+        let text = clock_text();
+        let (x, y, _, _) = annotation_box(self, graph, 1, 1);
+        if self
+            .edit(sciplot_core::tr!("时间戳", "Time stamp"), |project| {
+                crate::dialogs::push_annotation(
+                    project,
+                    graph,
+                    layer,
+                    sciplot_core::AnnotationKind::TimeStamp {
+                        x,
+                        y,
+                        text: text.clone(),
+                        size: 13.0,
+                        color: [20, 20, 20, 255],
+                    },
+                )
+            })
+            .is_some()
+        {
+            self.status = sciplot_core::tr!("已添加时间戳", "Added a time stamp").into();
         }
     }
 
@@ -1379,6 +1559,42 @@ fn clicked(ui: &mut egui::Ui, label: &str, shortcut: &str) -> bool {
     hit
 }
 
+fn clock_text() -> String {
+    match std::panic::catch_unwind(chrono::Local::now) {
+        Ok(time) => time.format("%Y-%m-%d %H:%M:%S").to_string(),
+        Err(_) => chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    }
+}
+
+/// 图像左下角、宽、高，用当前图层的数据范围估算。时间戳只用前两个数。
+fn annotation_box(app: &SciPlotApp, graph: GraphId, cols: u32, rows: u32) -> (f64, f64, f64, f64) {
+    let Some(item) = app.project.graph(graph) else {
+        return (0.0, 0.0, 1.0, 1.0);
+    };
+    let views = app.views.get(&graph).cloned().unwrap_or_default();
+    let scene = sciplot_plot::render(&app.project, item, &views, 640.0, 480.0, 1.0);
+    let Some(frame) = scene.layers.first() else {
+        return (0.0, 0.0, 1.0, 1.0);
+    };
+    let x0 = frame.x_min.min(frame.x_max);
+    let x1 = frame.x_min.max(frame.x_max);
+    let y0 = frame.y_min.min(frame.y_max);
+    let y1 = frame.y_min.max(frame.y_max);
+    let dx = (x1 - x0).max(1e-6);
+    let dy = (y1 - y0).max(1e-6);
+    let w = dx * 0.28;
+    let pixel_aspect = if cols == 0 { 1.0 } else { rows as f64 / cols.max(1) as f64 };
+    let plot_aspect = if frame.plot.h > 1.0 {
+        frame.plot.w as f64 / frame.plot.h as f64
+    } else {
+        1.0
+    };
+    let h = (w * pixel_aspect * (dy / dx) * plot_aspect).clamp(dy * 0.08, dy * 0.55);
+    let x = x0 + dx * 0.06;
+    let y = y1 - dy * 0.08 - h;
+    (x, y, w, h)
+}
+
 fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     relax_menu(ui);
     if clicked(ui, sciplot_core::t("新建项目"), "Ctrl+N") {
@@ -1395,6 +1611,10 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     }
     if clicked(ui, sciplot_core::t("导入 CSV…"), "") {
         open_import(app);
+    }
+    if clicked(ui, sciplot_core::tr!("导入图像…", "Import image…"), "") {
+        app.image_target = None;
+        start_file(app, PathAction::ImportImage, "");
     }
     if clicked(ui, sciplot_core::t("导出当前图形 PNG…"), "") {
         start_file(app, PathAction::ExportPng, "144");
@@ -2515,7 +2735,8 @@ fn paint_scene(
     scene: &Scene,
     surface: bool,
 ) {
-    if surface {
+    let has_image = scene.primitives.iter().any(|prim| matches!(prim, sciplot_plot::Prim::Image { .. }));
+    if surface || has_image {
         if app.glyphs.is_none() {
             app.glyphs = crate::fonts::plot_glyphs(&app.fonts);
         }
@@ -2642,6 +2863,20 @@ fn hit_annotation(
     let mut best = None;
     let mut best_d = 14.0_f32;
     for annotation in &layer.annotations {
+        if let AnnotationKind::Image { x: ix, y: iy, w, h, .. } = &annotation.kind {
+            if let (Some(a), Some(b)) = (
+                data_to_screen(frame, *ix, *iy),
+                data_to_screen(frame, *ix + *w, *iy + *h),
+            ) {
+                let min_x = a.0.min(b.0);
+                let max_x = a.0.max(b.0);
+                let min_y = a.1.min(b.1);
+                let max_y = a.1.max(b.1);
+                if x >= min_x && x <= max_x && y >= min_y && y <= max_y {
+                    return Some((annotation.id, annotation.kind.clone(), *ix, *iy));
+                }
+            }
+        }
         let (ax, ay) = anchor(&annotation.kind);
         let Some((px, py)) = data_to_screen(frame, ax, ay) else {
             continue;
@@ -2657,7 +2892,10 @@ fn hit_annotation(
 
 fn anchor(kind: &AnnotationKind) -> (f64, f64) {
     match kind {
-        AnnotationKind::Text { x, y, .. } | AnnotationKind::Marker { x, y, .. } => (*x, *y),
+        AnnotationKind::Text { x, y, .. }
+        | AnnotationKind::Marker { x, y, .. }
+        | AnnotationKind::TimeStamp { x, y, .. }
+        | AnnotationKind::Image { x, y, .. } => (*x, *y),
         AnnotationKind::Arrow { x2, y2, .. } | AnnotationKind::Line { x2, y2, .. } => (*x2, *y2),
     }
 }
@@ -2682,6 +2920,20 @@ fn shift_kind(kind: &AnnotationKind, dx: f64, dy: f64) -> AnnotationKind {
             y: y + dy,
             label,
             color,
+        },
+        AnnotationKind::TimeStamp { x, y, text, size, color } => AnnotationKind::TimeStamp {
+            x: x + dx,
+            y: y + dy,
+            text,
+            size,
+            color,
+        },
+        AnnotationKind::Image { x, y, w, h, png_base64 } => AnnotationKind::Image {
+            x: x + dx,
+            y: y + dy,
+            w,
+            h,
+            png_base64,
         },
         AnnotationKind::Arrow {
             x1,
@@ -2949,7 +3201,7 @@ pub(crate) fn native_dialog(
         return None;
     }
     let mut dialog = rfd::FileDialog::new().set_directory(default_dir(app));
-    if !file_name.is_empty() && !matches!(action, PathAction::Open | PathAction::ImportCsv) {
+    if !file_name.is_empty() && !matches!(action, PathAction::Open | PathAction::ImportCsv | PathAction::ImportImage) {
         dialog = dialog.set_file_name(file_name);
     }
     dialog = match action {
@@ -2961,9 +3213,13 @@ pub(crate) fn native_dialog(
         }
         PathAction::ExportPng => dialog.add_filter("PNG", &["png"]),
         PathAction::ExportSvg => dialog.add_filter("SVG", &["svg"]),
+        PathAction::ImportImage => dialog.add_filter(
+            sciplot_core::tr!("图像", "Image"),
+            &["png", "jpg", "jpeg", "gif", "bmp"],
+        ),
     };
     match action {
-        PathAction::Open | PathAction::ImportCsv => dialog.pick_file(),
+        PathAction::Open | PathAction::ImportCsv | PathAction::ImportImage => dialog.pick_file(),
         PathAction::SaveAs
         | PathAction::ExportCsv
         | PathAction::ExportPng
@@ -2976,6 +3232,7 @@ fn default_file_name(app: &SciPlotApp, action: PathAction) -> String {
         PathAction::Open => String::new(),
         PathAction::SaveAs => safe_file_name(&app.project.name, "splot"),
         PathAction::ImportCsv => sciplot_core::t("数据.csv").into(),
+        PathAction::ImportImage => String::new(),
         PathAction::ExportCsv => {
             let name = app
                 .active_table()

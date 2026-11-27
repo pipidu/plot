@@ -314,6 +314,7 @@ pub fn fit_on_graph(
                 samples: 240,
             },
             visible: true,
+            ..Curve::default()
         });
     }
     project.log_line(&report);
