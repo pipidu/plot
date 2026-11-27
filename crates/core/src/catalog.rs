@@ -631,6 +631,14 @@ pub fn en(zh: &str) -> Option<&'static str> {
         "自动范围" => "Automatic range",
         "设计矩阵病态，系数不可靠" => "The design matrix is ill-conditioned, so the coefficients are unreliable",
         "阶数较高，系数可能不稳定" => "The degree is high, so the coefficients may be unstable",
+        "当前项目" => "Current project",
+        "AI 接入" => "Connect an AI",
+        "AI 接入…" => "Connect an AI…",
+        "API 调用" => "API call",
+        "本机 API" => "Local API",
+        "允许本机程序通过 API 画图" => "Let local programs plot through the API",
+        "端口" => "Port",
+        "只监听 127.0.0.1。令牌写在主目录的 .sciplot_api.json，退出程序时删除。" => "Listens only on 127.0.0.1. The token is written to .sciplot_api.json in the home directory and removed on exit.",
         _ => return None,
     })
 }

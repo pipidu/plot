@@ -102,3 +102,55 @@ Releases include a Windows program and a Linux program that needs a graphical se
 pub fn about() -> &'static str {
     sciplot_core::translate(ABOUT_ZH, ABOUT_EN)
 }
+
+const AI_HELP_ZH: &str = "\
+让 AI 在 SciPlot 里画图有两种用法。
+
+1. 窗口开着时，本机会在 127.0.0.1 上开一个 API，只接受带令牌的请求。令牌和端口写在主目录的 .sciplot_api.json，退出时删除。可以在「设置 → 默认样式与字体」里关掉，或改端口。AI 的改动记在撤销里。
+
+2. 不打开窗口时，用命令行：
+   sciplot --mcp
+   sciplot --mcp --project 实验.splot
+   窗口开着时，--mcp 会把调用转给窗口；没开时就在这个进程里改项目。带了 --project 才会在每次改动后写回文件。
+
+Claude Desktop 或 Cursor 的配置：
+
+{
+  \"mcpServers\": {
+    \"sciplot\": {
+      \"command\": \"sciplot\",
+      \"args\": [\"--mcp\"]
+    }
+  }
+}
+
+Windows 上把 command 写成 sciplot.exe 的完整路径。标准输出只写 MCP 协议，不要把日志重定向到标准输出。
+";
+
+const AI_HELP_EN: &str = "\
+There are two ways for an AI to plot in SciPlot.
+
+1. While the window is open, SciPlot listens on 127.0.0.1 and accepts only requests that carry the token. The token and port are written to .sciplot_api.json in your home directory and removed on exit. Turn it off, or change the port, under Settings → Default style and fonts. Changes from the AI can be undone.
+
+2. Without a window:
+   sciplot --mcp
+   sciplot --mcp --project experiment.splot
+   If a window is open, --mcp forwards calls to it. Otherwise it edits a project in this process. A --project file is written back after each change.
+
+Claude Desktop or Cursor configuration:
+
+{
+  \"mcpServers\": {
+    \"sciplot\": {
+      \"command\": \"sciplot\",
+      \"args\": [\"--mcp\"]
+    }
+  }
+}
+
+On Windows, set command to the full path of sciplot.exe. Standard output is reserved for the MCP protocol; do not redirect logs there.
+";
+
+pub fn ai_help() -> String {
+    sciplot_core::translate(AI_HELP_ZH, AI_HELP_EN).to_string()
+}

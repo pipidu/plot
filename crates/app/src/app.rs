@@ -350,6 +350,8 @@ pub struct SciPlotApp {
     pub(crate) confirm_style: bool,
     narrow_collapsed: bool,
     pub(crate) update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateView>>,
+    api: Option<crate::api::ApiServer>,
+    api_failed: Option<u16>,
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -421,6 +423,8 @@ impl SciPlotApp {
             confirm_style: false,
             narrow_collapsed: false,
             update_rx: None,
+            api: None,
+            api_failed: None,
         };
         app.reload_font_silent();
         app
@@ -809,6 +813,105 @@ impl SciPlotApp {
         }
     }
 
+    fn ensure_api(&mut self, ctx: &egui::Context) {
+        if !self.prefs.api_enabled {
+            self.api = None;
+            self.api_failed = None;
+            return;
+        }
+        let requested = self.prefs.api_port;
+        if self.api.as_ref().is_some_and(|api| api.requested_port() == requested) {
+            return;
+        }
+        if self.api_failed == Some(requested) {
+            return;
+        }
+        let ctx = ctx.clone();
+        match crate::api::start(requested, crate::prefs::home_dir(), move || ctx.request_repaint()) {
+            Ok(server) => {
+                self.api_failed = None;
+                self.api = Some(server);
+            }
+            Err(err) => {
+                self.api = None;
+                self.api_failed = Some(requested);
+                self.status = err;
+            }
+        }
+    }
+
+    fn poll_api(&mut self) {
+        let jobs = self.api.as_ref().map(|api| api.poll()).unwrap_or_default();
+        for job in jobs {
+            let result = self.run_api(&job.name, &job.arguments);
+            let _ = job.reply.send(result);
+        }
+    }
+
+    fn run_api(&mut self, name: &str, args: &serde_json::Value) -> Result<crate::api::ToolOutput, String> {
+        let mut args = args.clone();
+        let path_missing = args
+            .get("path")
+            .map(|value| value.is_null() || value.as_str().unwrap_or("").trim().is_empty())
+            .unwrap_or(true);
+        if name == "save_project" && path_missing {
+            if let Some(path) = &self.path {
+                let text = path.display().to_string();
+                if let Some(object) = args.as_object_mut() {
+                    object.insert("path".into(), serde_json::Value::String(text));
+                } else {
+                    args = serde_json::json!({"path": text});
+                }
+            }
+        }
+        let font = fonts::plot_glyphs(&self.fonts);
+        let prefs = self.prefs.clone();
+        // 打开文件和菜单里的「打开」一样：换掉整个项目并清空撤销，避免撤销后路径仍指向新文件。
+        let output = if name == "open_project" {
+            let output = crate::api::dispatch(&mut self.project, font.as_ref(), &prefs, name, &args)?;
+            self.history = History::new();
+            self.path = output.project_path.as_ref().map(PathBuf::from);
+            self.dirty = false;
+            self.views.clear();
+            self.rebuild_dock(false);
+            output
+        } else if crate::api::readonly(name) {
+            let output = crate::api::dispatch(&mut self.project, font.as_ref(), &prefs, name, &args)?;
+            if name == "save_project" {
+                if let Some(path) = output.project_path.as_ref() {
+                    self.path = Some(PathBuf::from(path));
+                    self.dirty = false;
+                }
+            }
+            output
+        } else {
+            let tool = name.to_string();
+            self.edit(sciplot_core::t("API 调用"), |project| {
+                crate::api::dispatch(project, font.as_ref(), &prefs, &tool, &args)
+            })
+            .ok_or_else(|| self.status.clone())?
+        };
+        if name != "get_project" {
+            if let Some(line) = output.text.lines().next() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    self.status = line.to_string();
+                }
+            }
+        }
+        if output.open_graph {
+            if let Some(id) = output.graph {
+                self.open_tab(Tab::Graph(id));
+            }
+        }
+        if output.open_table {
+            if let Some(id) = output.table {
+                self.open_tab(Tab::Table(id));
+            }
+        }
+        Ok(output)
+    }
+
     fn undo(&mut self) {
         if let Some((label, project)) = self.history.undo(&self.project) {
             self.project = project;
@@ -909,6 +1012,8 @@ impl SciPlotApp {
 
 impl eframe::App for SciPlotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ensure_api(ctx);
+        self.poll_api();
         self.visible_now.clear();
         chinese_dock(&mut self.dock);
         self.frames += 1;
@@ -1023,6 +1128,12 @@ fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         ui.menu_button(i18n::help(), |ui| {
             if clicked(ui, sciplot_core::t("公式说明"), "") {
                 app.dialog = Some(Dialog::Help);
+            }
+            if clicked(ui, sciplot_core::t("AI 接入…"), "") {
+                app.dialog = Some(Dialog::Message {
+                    title: sciplot_core::t("AI 接入").into(),
+                    text: i18n::ai_help(),
+                });
             }
             if clicked(ui, sciplot_core::t("检查更新"), "") {
                 crate::update::start(app);

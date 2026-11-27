@@ -70,6 +70,34 @@ cargo build -p sciplot --release --target x86_64-pc-windows-gnu
 
 列公式和拟合表达式用 evalexpr。`sin(col("X"))*2`、`col("A")`、`cell("A", 行号)`、`i`（从 1 开始的行号）都可以。整数除法会截断，需要小数时写成 `1.0/2`。帮助菜单里有完整说明。
 
+## 让 AI 画图
+
+窗口开着时，SciPlot 在 `127.0.0.1` 上提供本机 API，只接受带令牌的请求。令牌和端口写在主目录的 `.sciplot_api.json`，退出时删除。开关和端口在「设置 → 默认样式与字体」里。AI 的改动可以撤销。
+
+不打开窗口时：
+
+```bash
+sciplot --mcp
+sciplot --mcp --project 实验.splot
+```
+
+窗口开着时，`--mcp` 把调用转给窗口；没开时在这个进程里改项目。带了 `--project` 才会在每次改动后写回文件。标准输出只写 MCP 协议。
+
+Claude Desktop 或 Cursor：
+
+```json
+{
+  "mcpServers": {
+    "sciplot": {
+      "command": "sciplot",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+Windows 上把 `command` 写成 `sciplot.exe` 的完整路径。帮助菜单里的「AI 接入…」也有这段说明。
+
 ## 快捷键
 
 | 按键 | 作用 |

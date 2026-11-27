@@ -1,7 +1,7 @@
 //! 本机界面设置，不写进 `.splot`。存在用户主目录的 `.sciplot_prefs.json`。
 
 use serde::{Deserialize, Serialize};
-use sciplot_core::{palette_color, CurveStyle, Dash, GraphId, Language, Project, Symbol};
+use sciplot_core::{default_true, palette_color, CurveStyle, Dash, GraphId, Language, Project, Symbol};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -28,6 +28,16 @@ pub struct Prefs {
     /// 界面语言。缺省是简体中文。
     #[serde(default)]
     pub language: Language,
+    /// 窗口打开时在 127.0.0.1 上提供给本机 AI 的 API。
+    #[serde(default = "default_true")]
+    pub api_enabled: bool,
+    /// 本机 API 端口。被占用时会顺延尝试后面的端口。
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
+}
+
+fn default_api_port() -> u16 {
+    8765
 }
 
 impl Default for Prefs {
@@ -47,6 +57,8 @@ impl Default for Prefs {
             last_dir: String::new(),
             csv_encoding: sciplot_core::CsvEncoding::Auto,
             language: Language::Zh,
+            api_enabled: true,
+            api_port: default_api_port(),
         }
     }
 }
@@ -60,6 +72,9 @@ impl Prefs {
         self.line_width = self.line_width.clamp(0.4, 12.0);
         self.symbol_size = self.symbol_size.clamp(1.0, 24.0);
         self.histogram_bins = self.histogram_bins.clamp(2, 200);
+        if self.api_port < 1024 {
+            self.api_port = default_api_port();
+        }
     }
 
     pub fn font_request(&self) -> Option<&str> {
@@ -124,12 +139,18 @@ pub fn save(prefs: &Prefs) -> bool {
     std::fs::write(path(), text).is_ok()
 }
 
-fn path() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME")
+pub fn home_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("SCIPLOT_HOME").filter(|dir| !dir.is_empty()) {
+        return std::path::PathBuf::from(dir);
+    }
+    std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    home.join(".sciplot_prefs.json")
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn path() -> std::path::PathBuf {
+    home_dir().join(".sciplot_prefs.json")
 }
 
 #[cfg(test)]

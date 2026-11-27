@@ -498,6 +498,19 @@ fn prefs_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, prefs: &mut crate::pref
             ui.color_edit_button_srgba_unmultiplied(&mut prefs.color);
         });
     }
+    ui.separator();
+    ui.strong(sciplot_core::t("本机 API"));
+    ui.checkbox(
+        &mut prefs.api_enabled,
+        sciplot_core::t("允许本机程序通过 API 画图"),
+    );
+    ui.horizontal(|ui| {
+        ui.label(sciplot_core::t("端口"));
+        ui.add(egui::DragValue::new(&mut prefs.api_port).range(1024..=65535));
+    });
+    ui.label(sciplot_core::t(
+        "只监听 127.0.0.1。令牌写在主目录的 .sciplot_api.json，退出程序时删除。",
+    ));
     ui.label(sciplot_core::t(
         "「用到当前图」会改掉正在看的这张图，和「保存」是两件事。",
     ));

@@ -102,7 +102,13 @@ Savitzky-Golay 按窗口内每个偏移单独算系数，这样边缘也能保�
 
 `egui` / `eframe` / `egui_extras` 停在 0.31.1。这个版本里 `ViewportInfo::close_requested` 是方法，`Shape::rect_stroke` 需要 `StrokeKind`，`Stroke` 可以实现成 `PathStroke`。浮点字面量传给 `f32` 参数时写成 `1.0_f32`。
 
-表格表头只显示列名。列角色不是「无」、而且和列名不同时，才在后面加上角色，例如 `sin (Y)`。
+表格表头只显示列名。列角色不是「无」、而且和列名不同时，才在后面加上角色，例如 `sin (Y)`。列名从列的右键菜单「重命名此列…」或双击表头来改。改名会改写本表公式里的 `col("旧名")` 和 `cell("旧名", …)`，曲线仍按列序号引用。
+
+## AI 接入
+
+`crates/app/src/api/tools.rs` 是建表、画图、拟合、求交点和渲染的共用入口。窗口开着时，`api/http.rs` 在 `127.0.0.1` 上提供这些工具，默认端口 8765，被占用就顺延。令牌和端口写在用户主目录的 `.sciplot_api.json`（测试可设 `SCIPLOT_HOME`），退出时按 pid 删掉。请求要带 `Authorization: Bearer <token>`。HTTP 线程把调用送进 channel，`SciPlotApp::update` 里执行；会改项目的调用走 `edit`，可以撤销。`get_project`、`render_graph`、`save_project` 不进撤销栈。
+
+`sciplot --mcp [--project 文件.splot]` 是 stdio 上的 JSON-RPC，给 Claude Desktop、Cursor 用。stdout 只能写协议消息，日志写 stderr。每次 `tools/call` 先看 `.sciplot_api.json`，窗口在就转过去；不在就在本进程里调用同一套工具。带了 `--project` 时，本进程的改动会写回这个文件。Windows 的 exe 不带控制台，但父进程用管道启动时会继承标准输入输出。
 
 ## 示例项目
 
