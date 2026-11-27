@@ -1,4 +1,4 @@
-use sciplot_core::{Axis, AxisScale};
+use sciplot_core::{Axis, AxisScale, TickKind};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tick {
@@ -131,6 +131,110 @@ pub fn linear_ticks(min: f64, max: f64, target: usize) -> Vec<Tick> {
     ticks
 }
 
+/// 日期和日期时间的数值是距 1970-01-01 的天数，时刻是从午夜起的秒数。
+fn calendar_ticks(kind: TickKind, min: f64, max: f64) -> Vec<Tick> {
+    if max <= min || !min.is_finite() || !max.is_finite() {
+        return Vec::new();
+    }
+    match kind {
+        TickKind::Number => Vec::new(),
+        TickKind::Time => clock_ticks(min, max),
+        TickKind::Date | TickKind::DateTime => day_ticks(min, max),
+    }
+}
+
+fn clock_ticks(min: f64, max: f64) -> Vec<Tick> {
+    const STEPS: &[f64] = &[
+        1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 10800.0, 21600.0, 43200.0,
+    ];
+    aligned_step(min, max, pick_step(max - min, STEPS))
+}
+
+fn day_ticks(min: f64, max: f64) -> Vec<Tick> {
+    let span = max - min;
+    if span < 2.0 {
+        const HOURS: &[f64] = &[
+            60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 10800.0, 21600.0, 43200.0,
+        ];
+        let step = pick_step(span * 86_400.0, HOURS);
+        return aligned_step(min * 86_400.0, max * 86_400.0, step)
+            .into_iter()
+            .map(|tick| Tick {
+                value: tick.value / 86_400.0,
+                major: true,
+            })
+            .collect();
+    }
+    if span <= 70.0 {
+        const DAYS: &[f64] = &[1.0, 2.0, 5.0, 7.0, 14.0];
+        return aligned_step(min, max, pick_step(span, DAYS));
+    }
+    if span <= 800.0 {
+        let months = if span > 400.0 {
+            3
+        } else if span > 180.0 {
+            2
+        } else {
+            1
+        };
+        return month_ticks(min, max, months);
+    }
+    let years = pick_step(span / 365.25, &[1.0, 2.0, 5.0, 10.0]).round().max(1.0) as i32;
+    year_ticks(min, max, years)
+}
+
+fn pick_step(span: f64, steps: &[f64]) -> f64 {
+    let raw = span / 6.0;
+    steps.iter().copied().find(|step| *step + 1e-9 >= raw).unwrap_or_else(|| *steps.last().unwrap_or(&1.0))
+}
+
+fn aligned_step(min: f64, max: f64, step: f64) -> Vec<Tick> {
+    if step <= 0.0 || !step.is_finite() {
+        return Vec::new();
+    }
+    let mut value = (min / step).ceil() * step;
+    if value < min {
+        value += step;
+    }
+    let mut ticks = Vec::new();
+    for _ in 0..48 {
+        if value > max + step * 1e-6 {
+            break;
+        }
+        if value >= min - step * 1e-6 {
+            ticks.push(Tick { value, major: true });
+        }
+        value += step;
+    }
+    ticks
+}
+
+fn month_ticks(min: f64, max: f64, step: i32) -> Vec<Tick> {
+    let mut cursor = sciplot_core::month_start(min);
+    if cursor < min - 1e-6 {
+        cursor = sciplot_core::add_months(cursor, step);
+    }
+    let mut ticks = Vec::new();
+    for _ in 0..48 {
+        if cursor > max + 1e-6 {
+            break;
+        }
+        if cursor >= min - 1e-6 {
+            ticks.push(Tick { value: cursor, major: true });
+        }
+        let next = sciplot_core::add_months(cursor, step);
+        if next <= cursor {
+            break;
+        }
+        cursor = next;
+    }
+    ticks
+}
+
+fn year_ticks(min: f64, max: f64, step: i32) -> Vec<Tick> {
+    month_ticks(min, max, step.saturating_mul(12).max(12))
+}
+
 fn log_major_ticks(min: f64, max: f64, requested: i32) -> Vec<Tick> {
     if max <= min || min <= 0.0 || max <= 0.0 {
         return Vec::new();
@@ -176,6 +280,12 @@ pub fn ticks_for(scale: AxisScale, min: f64, max: f64) -> Vec<Tick> {
 pub fn ticks_for_axis(axis: &Axis, min: f64, max: f64) -> (Vec<Tick>, Option<&'static str>) {
     match axis.scale {
         AxisScale::Linear => {
+            if axis.tick_kind != TickKind::Number && axis.step.is_none() {
+                let ticks = calendar_ticks(axis.tick_kind, min, max);
+                if !ticks.is_empty() {
+                    return (ticks, None);
+                }
+            }
             if let Some(step) = axis.step {
                 if step <= 0.0 || !step.is_finite() {
                     return (linear_ticks(min, max, 6), Some(sciplot_core::t("步长必须为正数，已改用自动刻度")));

@@ -7,18 +7,21 @@ pub struct Summary {
     pub mean: f64,
     pub median: f64,
     pub stdev: f64,
+    /// 样本方差，分母是 n−1。不足两个数时为 0。
+    pub variance: f64,
 }
 
 impl Summary {
     pub fn report(&self, title: &str) -> String {
-        sciplot_core::trf!("{title}\n  个数 = {}\n  最小值 = {}\n  最大值 = {}\n  求和 = {}\n  均值 = {}\n  中位数 = {}\n  标准差（样本，n−1） = {}", "{title}\n  count = {}\n  minimum = {}\n  maximum = {}\n  sum = {}\n  mean = {}\n  median = {}\n  std. dev. (sample, n−1) = {}",
+        sciplot_core::trf!("{title}\n  个数 = {}\n  最小值 = {}\n  最大值 = {}\n  求和 = {}\n  均值 = {}\n  中位数 = {}\n  标准差（样本，n−1） = {}\n  方差（样本，n−1） = {}", "{title}\n  count = {}\n  minimum = {}\n  maximum = {}\n  sum = {}\n  mean = {}\n  median = {}\n  std. dev. (sample, n−1) = {}\n  variance (sample, n−1) = {}",
             self.n,
             sciplot_core::format_number(self.min),
             sciplot_core::format_number(self.max),
             sciplot_core::format_number(self.sum),
             sciplot_core::format_number(self.mean),
             sciplot_core::format_number(self.median),
-            sciplot_core::format_number(self.stdev)
+            sciplot_core::format_number(self.stdev),
+            sciplot_core::format_number(self.variance)
         , title = title)
     }
 }
@@ -37,9 +40,8 @@ pub fn summarize(values: &[f64]) -> Option<Summary> {
     } else {
         0.5 * (data[n / 2 - 1] + data[n / 2])
     };
-    let stdev = if n > 1 {
-        let var = data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
-        var.sqrt()
+    let variance = if n > 1 {
+        data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0)
     } else {
         0.0
     };
@@ -50,7 +52,8 @@ pub fn summarize(values: &[f64]) -> Option<Summary> {
         sum,
         mean,
         median,
-        stdev,
+        stdev: variance.sqrt(),
+        variance,
     })
 }
 
@@ -93,6 +96,8 @@ mod tests {
         let summary = summarize(&[1.0, 2.0, 3.0, 4.0]).unwrap();
         assert!((summary.mean - 2.5).abs() < 1e-12);
         assert!((summary.median - 2.5).abs() < 1e-12);
+        assert!((summary.variance - 5.0 / 3.0).abs() < 1e-12);
+        assert!((summary.stdev - (5.0 / 3.0_f64).sqrt()).abs() < 1e-12);
         let r = pearson(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]).unwrap();
         assert!((r - 1.0).abs() < 1e-12);
     }

@@ -16,25 +16,82 @@ use std::path::Path;
 fn main() {
     sciplot_core::set_language(prefs::load().language);
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--export-demo") {
-        let dir = args.get(1).map(Path::new).unwrap_or_else(|| Path::new("."));
-        if let Err(err) = export_demo(dir) {
-            eprintln!("{err}");
+    match parse_args(&args) {
+        Command::ExportDemo(dir) => {
+            if let Err(err) = export_demo(&dir) {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Command::Mcp { project } => {
+            if let Err(err) = api::serve(project.as_deref()) {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Command::Gui { project } => {
+            if let Err(err) = app::run(project) {
+                eprintln!(
+                    "{}",
+                    sciplot_core::trf!("SciPlot 启动失败：{err}", "SciPlot failed to start: {err}", err = err)
+                );
+                std::process::exit(1);
+            }
+        }
+        Command::Help => println!("{}", usage()),
+        Command::Error(message) => {
+            eprintln!("{message}");
             std::process::exit(1);
         }
-        return;
     }
-    if args.first().map(String::as_str) == Some("--mcp") {
-        let project = mcp_project_arg(&args[1..]);
-        if let Err(err) = api::serve(project.as_deref()) {
-            eprintln!("{err}");
-            std::process::exit(1);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    ExportDemo(std::path::PathBuf),
+    Mcp { project: Option<String> },
+    Gui { project: Option<std::path::PathBuf> },
+    Help,
+    Error(String),
+}
+
+fn usage() -> String {
+    sciplot_core::translate(
+        "用法：\n  sciplot [文件.splot]\n  sciplot --export-demo [目录]\n  sciplot --mcp [--project 文件.splot]\n  sciplot --help\n",
+        "Usage:\n  sciplot [file.splot]\n  sciplot --export-demo [directory]\n  sciplot --mcp [--project file.splot]\n  sciplot --help\n",
+    )
+    .to_string()
+}
+
+fn parse_args(args: &[String]) -> Command {
+    if args.is_empty() {
+        return Command::Gui { project: None };
+    }
+    match args[0].as_str() {
+        "--help" | "-h" => Command::Help,
+        "--export-demo" => {
+            if args.len() > 2 {
+                return Command::Error(format!("{}\n{}", sciplot_core::t("参数太多"), usage()));
+            }
+            let dir = args.get(1).map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
+            Command::ExportDemo(dir)
         }
-        return;
-    }
-    if let Err(err) = app::run() {
-        eprintln!("{}", sciplot_core::trf!("SciPlot 启动失败：{err}", "SciPlot failed to start: {err}", err = err));
-        std::process::exit(1);
+        "--mcp" => Command::Mcp {
+            project: mcp_project_arg(&args[1..]),
+        },
+        other if other.starts_with('-') => Command::Error(format!(
+            "{}\n{}",
+            sciplot_core::trf!("不认识的参数 {}", "Unknown argument {}", other),
+            usage()
+        )),
+        _ => {
+            if args.len() != 1 {
+                return Command::Error(format!("{}\n{}", sciplot_core::t("参数太多"), usage()));
+            }
+            Command::Gui {
+                project: Some(std::path::PathBuf::from(&args[0])),
+            }
+        }
     }
 }
 
@@ -76,4 +133,37 @@ fn export_demo(dir: &Path) -> Result<(), String> {
         println!("{}", sciplot_core::trf!("已导出 {stem}", "Exported {stem}", stem = stem));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn command_line_opens_a_project_file() {
+        assert_eq!(parse_args(&[]), Command::Gui { project: None });
+        assert_eq!(
+            parse_args(&args(&["实验.splot"])),
+            Command::Gui {
+                project: Some(std::path::PathBuf::from("实验.splot"))
+            }
+        );
+        assert!(matches!(parse_args(&args(&["实验.splot", "多余"])), Command::Error(_)));
+        assert!(matches!(parse_args(&args(&["--help"])), Command::Help));
+        assert_eq!(
+            parse_args(&args(&["--export-demo", "out"])),
+            Command::ExportDemo(std::path::PathBuf::from("out"))
+        );
+        assert_eq!(
+            parse_args(&args(&["--mcp", "--project", "实验.splot"])),
+            Command::Mcp {
+                project: Some("实验.splot".into())
+            }
+        );
+        assert!(matches!(parse_args(&args(&["--nope"])), Command::Error(_)));
+    }
 }

@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::datetime::{self, TemporalKind};
 use crate::tr;
-use crate::util::{default_true, format_number, parse_date};
+use crate::util::{default_true, format_fixed, format_number, format_scientific};
 
 /// 表格标识。用新类型避免和矩阵、图形的 id 混用。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -58,6 +59,8 @@ pub enum ColumnType {
     Numeric,
     Text,
     Date,
+    Time,
+    DateTime,
 }
 
 impl ColumnType {
@@ -66,12 +69,91 @@ impl ColumnType {
             ColumnType::Numeric => tr!("数值", "Numeric"),
             ColumnType::Text => tr!("文本", "Text"),
             ColumnType::Date => tr!("日期", "Date"),
+            ColumnType::Time => tr!("时刻", "Time"),
+            ColumnType::DateTime => tr!("日期时间", "Date and time"),
         }
     }
 
     pub fn all() -> &'static [ColumnType] {
-        &[ColumnType::Numeric, ColumnType::Text, ColumnType::Date]
+        &[
+            ColumnType::Numeric,
+            ColumnType::Text,
+            ColumnType::Date,
+            ColumnType::Time,
+            ColumnType::DateTime,
+        ]
     }
+
+    pub fn temporal(self) -> Option<TemporalKind> {
+        match self {
+            ColumnType::Date => Some(TemporalKind::Date),
+            ColumnType::Time => Some(TemporalKind::Time),
+            ColumnType::DateTime => Some(TemporalKind::DateTime),
+            ColumnType::Numeric | ColumnType::Text => None,
+        }
+    }
+}
+
+/// 数值列的显示方式。`General` 沿用原来的 `format_number`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NumericFormat {
+    #[default]
+    General,
+    Fixed,
+    Scientific,
+}
+
+impl NumericFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            NumericFormat::General => tr!("自动", "General"),
+            NumericFormat::Fixed => tr!("固定小数", "Fixed decimals"),
+            NumericFormat::Scientific => tr!("科学计数", "Scientific"),
+        }
+    }
+
+    pub fn all() -> &'static [NumericFormat] {
+        &[NumericFormat::General, NumericFormat::Fixed, NumericFormat::Scientific]
+    }
+}
+
+fn default_places() -> u8 {
+    6
+}
+
+/// 排序作用的范围。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SortMode {
+    /// 整表按一列重排，同一行的其他列跟着走。
+    #[default]
+    Whole,
+    /// 所选列（以及排序键那一列）用同一个顺序一起重排，其余列不动。
+    Together,
+    /// 每一列按自己的值分别排序，列与列不再对齐。
+    Separate,
+}
+
+impl SortMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Whole => tr!("整表", "Whole table"),
+            SortMode::Together => tr!("所选列一起", "Selected columns together"),
+            SortMode::Separate => tr!("所选列分别", "Selected columns separately"),
+        }
+    }
+
+    pub fn all() -> &'static [SortMode] {
+        &[SortMode::Whole, SortMode::Together, SortMode::Separate]
+    }
+}
+
+/// 把所选数值列，或这些列放在一起，线性缩放到 \[0, 1\]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NormalizeMode {
+    /// 每一列用自己的最小和最大。
+    Columns,
+    /// 所有选中单元格共用一个最小和最大。
+    Table,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,6 +166,13 @@ pub struct Column {
     pub texts: Vec<String>,
     pub formula: String,
     pub comment: String,
+    pub numeric_format: NumericFormat,
+    #[serde(default = "default_places")]
+    pub decimal_places: u8,
+    /// 日期、时刻、日期时间的显示格式。空字符串用该类型的默认格式。
+    pub time_format: String,
+    /// 与行对齐。空字符串表示这一格没有自己的公式。
+    pub cell_formulas: Vec<String>,
 }
 
 impl Default for Column {
@@ -96,6 +185,10 @@ impl Default for Column {
             texts: Vec::new(),
             formula: String::new(),
             comment: String::new(),
+            numeric_format: NumericFormat::General,
+            decimal_places: default_places(),
+            time_format: String::new(),
+            cell_formulas: Vec::new(),
         }
     }
 }
@@ -110,7 +203,7 @@ impl Column {
     }
 
     pub fn len(&self) -> usize {
-        self.numbers.len().max(self.texts.len())
+        self.numbers.len().max(self.texts.len()).max(self.cell_formulas.len())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -119,13 +212,85 @@ impl Column {
 
     pub fn normalize(&mut self) {
         let n = self.len();
-        self.numbers.resize(n, None);
-        self.texts.resize(n, String::new());
+        self.resize(n);
     }
 
     pub fn resize(&mut self, n: usize) {
         self.numbers.resize(n, None);
         self.texts.resize(n, String::new());
+        self.cell_formulas.resize(n, String::new());
+    }
+
+    /// 这一格自己的公式。列公式不算在内。
+    pub fn cell_formula(&self, row: usize) -> &str {
+        self.cell_formulas.get(row).map(String::as_str).unwrap_or("")
+    }
+
+    /// 公式编辑模式里文本框应显示的内容：单元格公式优先，否则列公式，都没有则显示值。
+    pub fn editor_text(&self, row: usize, formula_mode: bool) -> String {
+        if formula_mode {
+            let cell = self.cell_formula(row);
+            if !cell.is_empty() {
+                return cell.to_string();
+            }
+            if !self.formula.is_empty() {
+                return self.formula.clone();
+            }
+        }
+        self.display(row)
+    }
+
+    pub fn set_cell_formula_raw(&mut self, row: usize, text: &str) {
+        if row >= self.len() {
+            self.resize(row + 1);
+        }
+        self.cell_formulas[row] = text.to_string();
+    }
+
+    pub fn format_value(&self, value: f64) -> String {
+        if let Some(kind) = self.ty.temporal() {
+            return datetime::format_temporal(kind, value, &self.time_format);
+        }
+        if self.ty == ColumnType::Text {
+            return format_number(value);
+        }
+        match self.numeric_format {
+            NumericFormat::Fixed => format_fixed(value, self.decimal_places),
+            NumericFormat::Scientific => format_scientific(value, self.decimal_places),
+            NumericFormat::General => format_number(value),
+        }
+    }
+
+    /// 用当前类型和格式，把已解析的数值重新写进显示文本。
+    pub fn refresh_display(&mut self) {
+        if self.ty == ColumnType::Text {
+            return;
+        }
+        self.normalize();
+        for row in 0..self.len() {
+            if let Some(value) = self.numbers[row] {
+                self.texts[row] = self.format_value(value);
+            }
+        }
+    }
+
+    /// 更换列类型。能从现有文本重新解析的就重新解析，否则按存储单位换算。
+    pub fn set_type(&mut self, new_ty: ColumnType) {
+        if self.ty == new_ty {
+            return;
+        }
+        let old = self.ty;
+        self.normalize();
+        self.ty = new_ty;
+        for row in 0..self.len() {
+            let text = self.texts[row].clone();
+            if let Some(parsed) = parse_user_number(new_ty, &text, &self.time_format) {
+                self.numbers[row] = Some(parsed);
+            } else if let Some(value) = self.numbers[row] {
+                self.numbers[row] = convert_stored(old, new_ty, value);
+            }
+        }
+        self.refresh_display();
     }
 
     pub fn display(&self, row: usize) -> String {
@@ -157,18 +322,20 @@ impl Column {
             self.resize(row + 1);
         }
         self.texts[row] = text.to_string();
-        self.numbers[row] = parse_user_number(self.ty, text);
+        self.numbers[row] = parse_user_number(self.ty, text, &self.time_format);
     }
 
     pub fn set_numbers(&mut self, values: &[f64]) {
+        let texts: Vec<String> = values
+            .iter()
+            .map(|v| if v.is_finite() { self.format_value(*v) } else { String::new() })
+            .collect();
         self.numbers = values
             .iter()
             .map(|v| if v.is_finite() { Some(*v) } else { None })
             .collect();
-        self.texts = values
-            .iter()
-            .map(|v| if v.is_finite() { format_number(*v) } else { String::new() })
-            .collect();
+        self.texts = texts;
+        self.cell_formulas.resize(values.len(), String::new());
     }
 
     pub fn finite_values(&self) -> Vec<f64> {
@@ -176,16 +343,46 @@ impl Column {
     }
 }
 
-pub fn parse_user_number(ty: ColumnType, text: &str) -> Option<f64> {
+pub fn parse_user_number(ty: ColumnType, text: &str, pattern: &str) -> Option<f64> {
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    match ty {
-        ColumnType::Date => parse_date(text).or_else(|| text.parse::<f64>().ok()),
-        ColumnType::Numeric | ColumnType::Text => text.parse::<f64>().ok(),
+    let parsed = if let Some(kind) = ty.temporal() {
+        datetime::parse_temporal(kind, text, pattern)
+    } else {
+        text.parse::<f64>().ok()
+    };
+    parsed.filter(|v| v.is_finite())
+}
+
+fn convert_stored(from: ColumnType, to: ColumnType, value: f64) -> Option<f64> {
+    if !value.is_finite() {
+        return None;
     }
-    .filter(|v| v.is_finite())
+    let seconds_of_day = match from {
+        ColumnType::Time => value.rem_euclid(86_400.0),
+        ColumnType::Date | ColumnType::DateTime => (value - value.floor()) * 86_400.0,
+        ColumnType::Numeric | ColumnType::Text => value,
+    };
+    let converted = match to {
+        ColumnType::Time => {
+            if matches!(from, ColumnType::Date | ColumnType::DateTime) {
+                seconds_of_day.rem_euclid(86_400.0)
+            } else {
+                value
+            }
+        }
+        ColumnType::Date | ColumnType::DateTime => {
+            if from == ColumnType::Time {
+                seconds_of_day / 86_400.0
+            } else {
+                value
+            }
+        }
+        ColumnType::Numeric | ColumnType::Text => value,
+    };
+    converted.is_finite().then_some(converted)
 }
 
 /// 0 -> A, 25 -> Z, 26 -> AA，与电子表格列标一致。
@@ -291,6 +488,7 @@ impl Table {
             column.normalize();
             column.numbers.insert(index, None);
             column.texts.insert(index, String::new());
+            column.cell_formulas.insert(index, String::new());
         }
     }
 
@@ -310,6 +508,7 @@ impl Table {
             if row < column.len() {
                 column.numbers.remove(row);
                 column.texts.remove(row);
+                column.cell_formulas.remove(row);
             }
         }
     }
@@ -329,27 +528,260 @@ impl Table {
 
     /// 按某一列排序，其他列的同一行一起移动。空值排在最后。
     pub fn sort_by(&mut self, col: usize, ascending: bool) {
-        if col >= self.columns.len() {
+        self.sort_columns(&[col], col, ascending, SortMode::Whole);
+    }
+
+    /// `Whole` 重排整表。`Together` 只重排所选列和排序键。`Separate` 让每一列按自己的值排序。
+    pub fn sort_columns(&mut self, columns: &[usize], key: usize, ascending: bool, mode: SortMode) {
+        if self.columns.is_empty() {
             return;
         }
+        match mode {
+            SortMode::Whole => {
+                if key >= self.columns.len() {
+                    return;
+                }
+                let order = self.row_order(key, ascending);
+                for column in &mut self.columns {
+                    apply_order(column, &order);
+                }
+            }
+            SortMode::Together => {
+                if key >= self.columns.len() {
+                    return;
+                }
+                let mut moving: Vec<usize> = columns.iter().copied().filter(|index| *index < self.columns.len()).collect();
+                if !moving.contains(&key) {
+                    moving.push(key);
+                }
+                let order = self.row_order(key, ascending);
+                for index in moving {
+                    apply_order(&mut self.columns[index], &order);
+                }
+            }
+            SortMode::Separate => {
+                let targets: Vec<usize> = columns.iter().copied().filter(|index| *index < self.columns.len()).collect();
+                for index in targets {
+                    let order = self.row_order(index, ascending);
+                    apply_order(&mut self.columns[index], &order);
+                }
+            }
+        }
+    }
+
+    /// 用 1、2、3… 填满这一列。表是空的时先造 10 行。已有的列公式会被清掉，避免重算把填好的数盖掉。
+    pub fn fill_row_numbers(&mut self, col: usize) -> Result<(), String> {
+        self.fill_generated(col, true, 1)
+    }
+
+    /// 用 \[0, 1) 上的均匀随机数填满这一列。同一个 `seed` 得到同一串数。
+    pub fn fill_random(&mut self, col: usize, seed: u64) -> Result<(), String> {
+        self.fill_generated(col, false, seed)
+    }
+
+    fn fill_generated(&mut self, col: usize, rows: bool, seed: u64) -> Result<(), String> {
+        if col >= self.columns.len() {
+            return Err(crate::locale::t("找不到列").into());
+        }
+        let n = self.nrows().max(1);
+        let n = if self.nrows() == 0 { 10 } else { n };
+        self.ensure_rows(n);
+        let mut state = seed | 1;
+        let values: Vec<f64> = if rows {
+            (1..=n).map(|i| i as f64).collect()
+        } else {
+            (0..n).map(|_| next_unit(&mut state)).collect()
+        };
+        let column = &mut self.columns[col];
+        column.ty = ColumnType::Numeric;
+        column.formula.clear();
+        column.cell_formulas.clear();
+        column.set_numbers(&values);
+        if column.len() < n {
+            column.resize(n);
+        }
+        Ok(())
+    }
+
+    /// 把数值列线性缩放到 \[0, 1\]。最大值等于最小值时写成 0。文本、日期和时刻列跳过。
+    pub fn normalize_unit(&mut self, columns: &[usize], mode: NormalizeMode) -> Result<usize, String> {
+        let indexes: Vec<usize> = columns
+            .iter()
+            .copied()
+            .filter(|index| {
+                self.columns
+                    .get(*index)
+                    .is_some_and(|column| column.ty == ColumnType::Numeric && column.numbers.iter().flatten().any(|v| v.is_finite()))
+            })
+            .collect();
+        if indexes.is_empty() {
+            return Err(crate::locale::t("没有可归一化的数值列").into());
+        }
+        let span_of = |values: &[f64]| {
+            let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (min, max)
+        };
+        let global = if mode == NormalizeMode::Table {
+            let mut values = Vec::new();
+            for index in &indexes {
+                values.extend(self.columns[*index].finite_values());
+            }
+            Some(span_of(&values))
+        } else {
+            None
+        };
+        for index in &indexes {
+            let (min, max) = global.unwrap_or_else(|| span_of(&self.columns[*index].finite_values()));
+            let span = max - min;
+            let column = &mut self.columns[*index];
+            column.formula.clear();
+            for formula in &mut column.cell_formulas {
+                formula.clear();
+            }
+            column.normalize();
+            for slot in &mut column.numbers {
+                if let Some(value) = *slot {
+                    let scaled = if span.abs() < 1e-15 { 0.0 } else { (value - min) / span };
+                    *slot = Some(scaled);
+                }
+            }
+            column.refresh_display();
+        }
+        Ok(indexes.len())
+    }
+
+    /// 把一块单元格写成制表符分隔的文本，方便贴进 Excel 或另一张表。
+    pub fn copy_tsv(&self, row: usize, col: usize, nrows: usize, ncols: usize) -> String {
+        let mut lines = Vec::with_capacity(nrows);
+        for r in 0..nrows {
+            let mut cells = Vec::with_capacity(ncols);
+            for c in 0..ncols {
+                let text = self
+                    .columns
+                    .get(col + c)
+                    .map(|column| column.display(row + r))
+                    .unwrap_or_default();
+                cells.push(text);
+            }
+            lines.push(cells.join("\t"));
+        }
+        lines.join("\n")
+    }
+
+    /// 从 `row`,`col` 起粘贴制表符或逗号分隔的文本。不够的行列会补上。
+    pub fn paste_text(&mut self, row: usize, col: usize, text: &str) -> Result<(usize, usize), String> {
+        let grid = parse_clipboard(text);
+        if grid.is_empty() || grid.iter().all(|line| line.iter().all(|cell| cell.is_empty())) {
+            return Err(crate::locale::t("剪贴板里没有单元格").into());
+        }
+        let nrows = grid.len();
+        let ncols = grid.iter().map(|line| line.len()).max().unwrap_or(0);
+        if nrows > 20_000 || ncols > 512 || nrows.saturating_mul(ncols) > 200_000 {
+            return Err(crate::locale::t("一次粘贴的单元格太多").into());
+        }
+        while self.columns.len() < col + ncols {
+            let index = self.columns.len();
+            let mode = if index == 0 { ColumnMode::X } else { ColumnMode::Y };
+            self.add_column(column_letter(index), mode);
+        }
+        self.ensure_rows(row + nrows);
+        for (r, line) in grid.iter().enumerate() {
+            for (c, cell) in line.iter().enumerate() {
+                let column = &mut self.columns[col + c];
+                if row + r < column.cell_formulas.len() {
+                    column.cell_formulas[row + r].clear();
+                }
+                column.set_text(row + r, cell);
+            }
+        }
+        Ok((nrows, ncols))
+    }
+
+    fn row_order(&mut self, col: usize, ascending: bool) -> Vec<usize> {
         let n = self.nrows();
         self.ensure_rows(n);
         let mut order: Vec<usize> = (0..n).collect();
         let key_col = &self.columns[col];
-        order.sort_by(|&a, &b| {
-            let cmp = cmp_optional(key_col.numbers.get(a).copied().flatten(), key_col.numbers.get(b).copied().flatten())
-                .then_with(|| key_col.texts[a].cmp(&key_col.texts[b]));
-            if ascending {
-                cmp
-            } else {
-                cmp.reverse()
-            }
+        order.sort_by(|&a, &b| cmp_cells(key_col, a, b, ascending));
+        order
+    }
+}
+
+fn cmp_cells(column: &Column, a: usize, b: usize, ascending: bool) -> std::cmp::Ordering {
+    let cmp = cmp_optional(column.numbers.get(a).copied().flatten(), column.numbers.get(b).copied().flatten())
+        .then_with(|| {
+            let left = column.texts.get(a).map(String::as_str).unwrap_or("");
+            let right = column.texts.get(b).map(String::as_str).unwrap_or("");
+            left.cmp(right)
         });
-        for column in &mut self.columns {
-            reorder(&mut column.numbers, &order);
-            reorder(&mut column.texts, &order);
+    if ascending {
+        cmp
+    } else {
+        cmp.reverse()
+    }
+}
+
+fn apply_order(column: &mut Column, order: &[usize]) {
+    column.normalize();
+    if column.len() < order.len() {
+        column.resize(order.len());
+    }
+    reorder(&mut column.numbers, order);
+    reorder(&mut column.texts, order);
+    reorder(&mut column.cell_formulas, order);
+}
+
+fn next_unit(state: &mut u64) -> f64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+fn parse_clipboard(text: &str) -> Vec<Vec<String>> {
+    let text = text.trim_matches(['\u{feff}', '\r', '\n']);
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = text.split('\n').map(|line| line.trim_end_matches('\r')).collect();
+    let tabs = lines.iter().any(|line| line.contains('\t'));
+    let commas = !tabs && lines.iter().any(|line| line.contains(','));
+    lines
+        .into_iter()
+        .map(|line| {
+            if tabs {
+                line.split('\t').map(|cell| cell.to_string()).collect()
+            } else if commas {
+                split_csv_line(line)
+            } else {
+                vec![line.to_string()]
+            }
+        })
+        .collect()
+}
+
+fn split_csv_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if !quoted => quoted = true,
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                current.push('"');
+            }
+            '"' if quoted => quoted = false,
+            ',' if !quoted => out.push(std::mem::take(&mut current)),
+            _ => current.push(ch),
         }
     }
+    out.push(current);
+    out
 }
 
 fn cmp_optional(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
@@ -404,5 +836,96 @@ mod tests {
         assert_eq!(table.columns[1].numbers[2], Some(2.0));
         table.insert_row(99);
         assert_eq!(table.nrows(), 4);
+    }
+
+    #[test]
+    fn time_datetime_formats_and_numeric_places() {
+        let mut column = Column::new("t", ColumnMode::X);
+        column.set_type(ColumnType::DateTime);
+        column.time_format = "YYYY/MM/DD HH:mm".into();
+        column.set_text(0, "2020-01-02 03:04:05");
+        column.refresh_display();
+        assert!(column.numbers[0].unwrap() > 0.0);
+        assert_eq!(column.display(0), "2020/01/02 03:04");
+
+        column.time_format.clear();
+        column.set_type(ColumnType::Time);
+        assert_eq!(column.display(0), "03:04:05");
+
+        let mut numbers = Column::new("n", ColumnMode::Y);
+        numbers.numeric_format = NumericFormat::Fixed;
+        numbers.decimal_places = 2;
+        numbers.set_numbers(&[1.5, 2.0]);
+        assert_eq!(numbers.display(0), "1.50");
+        assert_eq!(numbers.display(1), "2.00");
+        numbers.numeric_format = NumericFormat::Scientific;
+        numbers.decimal_places = 1;
+        numbers.refresh_display();
+        assert!(numbers.display(0).contains('e'), "{}", numbers.display(0));
+
+        let json = serde_json::to_string(&Column::new("A", ColumnMode::X)).unwrap();
+        let loaded: Column = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.decimal_places, 6);
+        let legacy = r#"{"name":"A","ty":"Date","mode":"X","numbers":[0.0],"texts":["1970-01-01"],"formula":"","comment":""}"#;
+        let old: Column = serde_json::from_str(legacy).unwrap();
+        assert_eq!(old.ty, ColumnType::Date);
+        assert!(old.cell_formulas.is_empty());
+        assert_eq!(old.display(0), "1970-01-01");
+    }
+
+    #[test]
+    fn fill_sort_normalize_and_paste() {
+        let mut table = Table::new(TableId(1), "t");
+        table.columns.clear();
+        table.add_column("A", ColumnMode::X);
+        table.add_column("B", ColumnMode::Y);
+        table.add_column("C", ColumnMode::None);
+        table.ensure_rows(3);
+        table.columns[0].set_numbers(&[3.0, 1.0, 2.0]);
+        table.columns[1].set_numbers(&[30.0, 10.0, 20.0]);
+        table.columns[2].set_text(0, "a");
+        table.columns[2].set_text(1, "b");
+        table.columns[2].set_text(2, "c");
+
+        table.sort_columns(&[0, 1], 0, true, SortMode::Together);
+        assert_eq!(table.columns[0].finite_values(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(table.columns[1].finite_values(), vec![10.0, 20.0, 30.0]);
+        assert_eq!(table.columns[2].texts, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        table.columns[0].set_numbers(&[3.0, 1.0, 2.0]);
+        table.columns[1].set_numbers(&[30.0, 10.0, 20.0]);
+        table.sort_columns(&[0, 1], 0, true, SortMode::Separate);
+        assert_eq!(table.columns[0].finite_values(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(table.columns[1].finite_values(), vec![10.0, 20.0, 30.0]);
+        assert_eq!(table.columns[2].texts[0], "a");
+
+        table.fill_row_numbers(0).unwrap();
+        assert_eq!(table.columns[0].finite_values(), vec![1.0, 2.0, 3.0]);
+        table.fill_random(1, 7).unwrap();
+        let again = {
+            let mut other = table.clone();
+            other.fill_random(1, 7).unwrap();
+            other.columns[1].finite_values()
+        };
+        assert_eq!(table.columns[1].finite_values(), again);
+        assert!(table.columns[1].finite_values().iter().all(|v| (0.0..1.0).contains(v) || *v == 0.0));
+
+        table.columns[0].set_numbers(&[2.0, 4.0, 6.0]);
+        table.columns[1].set_numbers(&[0.0, 10.0, 5.0]);
+        table.normalize_unit(&[0], NormalizeMode::Columns).unwrap();
+        let scaled = table.columns[0].finite_values();
+        assert!((scaled[0]).abs() < 1e-12 && (scaled[1] - 0.5).abs() < 1e-12 && (scaled[2] - 1.0).abs() < 1e-12);
+
+        table.columns[0].set_numbers(&[0.0, 10.0]);
+        table.columns[1].set_numbers(&[5.0, 5.0]);
+        table.normalize_unit(&[0, 1], NormalizeMode::Table).unwrap();
+        assert!((table.columns[1].number_at(0) - 0.5).abs() < 1e-12);
+
+        let pasted = table.paste_text(0, 0, "9\t8\n7\t6\r\n").unwrap();
+        assert_eq!(pasted, (2, 2));
+        assert_eq!(table.columns[0].number_at(0), 9.0);
+        assert_eq!(table.columns[1].number_at(1), 6.0);
+        let copied = table.copy_tsv(0, 0, 2, 2);
+        assert_eq!(copied, "9\t8\n7\t6");
     }
 }

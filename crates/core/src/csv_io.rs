@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tr;
 
+use crate::datetime::{self, DateOrder};
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
 
 /// 导入导出用的文本编码。`Auto` 导入时识别 UTF-8、UTF-16（BOM 或大量空字节）和 GBK；导出时按 UTF-8 带 BOM。
@@ -31,6 +32,128 @@ impl CsvEncoding {
     }
 }
 
+/// 分隔符。`Auto` 仍按逗号、制表符、分号里出现最多的那个来猜，都没有就按空白切。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CsvDelimiter {
+    #[default]
+    Auto,
+    Comma,
+    Tab,
+    Semicolon,
+    Space,
+    Pipe,
+}
+
+impl CsvDelimiter {
+    pub fn label(self) -> &'static str {
+        match self {
+            CsvDelimiter::Auto => tr!("自动", "Auto"),
+            CsvDelimiter::Comma => tr!("逗号 ,", "Comma ,"),
+            CsvDelimiter::Tab => tr!("制表符", "Tab"),
+            CsvDelimiter::Semicolon => tr!("分号 ;", "Semicolon ;"),
+            CsvDelimiter::Space => tr!("空格", "Space"),
+            CsvDelimiter::Pipe => tr!("竖线 |", "Pipe |"),
+        }
+    }
+
+    pub fn all() -> &'static [CsvDelimiter] {
+        &[
+            CsvDelimiter::Auto,
+            CsvDelimiter::Comma,
+            CsvDelimiter::Tab,
+            CsvDelimiter::Semicolon,
+            CsvDelimiter::Space,
+            CsvDelimiter::Pipe,
+        ]
+    }
+}
+
+/// 第一行是不是列名。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CsvHeader {
+    #[default]
+    Auto,
+    Names,
+    None,
+}
+
+impl CsvHeader {
+    pub fn label(self) -> &'static str {
+        match self {
+            CsvHeader::Auto => tr!("自动", "Auto"),
+            CsvHeader::Names => tr!("首行是列名", "First row is names"),
+            CsvHeader::None => tr!("没有列名", "No names"),
+        }
+    }
+
+    pub fn all() -> &'static [CsvHeader] {
+        &[CsvHeader::Auto, CsvHeader::Names, CsvHeader::None]
+    }
+}
+
+/// 小数点。逗号小数配合分号分隔，用来读欧洲表格。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DecimalMark {
+    #[default]
+    Dot,
+    Comma,
+}
+
+impl DecimalMark {
+    pub fn label(self) -> &'static str {
+        match self {
+            DecimalMark::Dot => tr!("点 .", "Dot ."),
+            DecimalMark::Comma => tr!("逗号 ,", "Comma ,"),
+        }
+    }
+
+    pub fn all() -> &'static [DecimalMark] {
+        &[DecimalMark::Dot, DecimalMark::Comma]
+    }
+}
+
+/// 一次导入多个文件时，各自成表，或把数据行接在同一张表后面。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CsvLayout {
+    #[default]
+    Separate,
+    OneTable,
+}
+
+impl CsvLayout {
+    pub fn label(self) -> &'static str {
+        match self {
+            CsvLayout::Separate => tr!("每个文件一张表", "One table per file"),
+            CsvLayout::OneTable => tr!("合并到一张表", "Append into one table"),
+        }
+    }
+
+    pub fn all() -> &'static [CsvLayout] {
+        &[CsvLayout::Separate, CsvLayout::OneTable]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CsvImportOptions {
+    pub encoding: CsvEncoding,
+    pub delimiter: CsvDelimiter,
+    pub skip_rows: usize,
+    pub header: CsvHeader,
+    pub decimal: DecimalMark,
+}
+
+impl Default for CsvImportOptions {
+    fn default() -> Self {
+        Self {
+            encoding: CsvEncoding::Auto,
+            delimiter: CsvDelimiter::Auto,
+            skip_rows: 0,
+            header: CsvHeader::Auto,
+            decimal: DecimalMark::Dot,
+        }
+    }
+}
+
 /// 读入 CSV / TSV。自动识别 UTF-8（可带 BOM）、UTF-16 和 GBK，方便中文 Excel。
 pub fn import_csv(bytes: &[u8]) -> Result<Table, String> {
     import_csv_with(bytes, CsvEncoding::Auto)
@@ -38,11 +161,31 @@ pub fn import_csv(bytes: &[u8]) -> Result<Table, String> {
 
 /// 按指定编码读入 CSV / TSV。表名仍是「导入」，调用方可以再改成文件名。
 pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, String> {
+    let options = CsvImportOptions {
+        encoding,
+        ..CsvImportOptions::default()
+    };
+    import_csv_options(bytes, &options)
+}
+
+/// 按分隔符、跳过行数、列名和小数点读入一个文件。
+pub fn import_csv_options(bytes: &[u8], options: &CsvImportOptions) -> Result<Table, String> {
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return Err(crate::locale::t("文件是空的").into());
     }
-    let text = decode_bytes(bytes, encoding)?;
-    let delimiter = sniff_delimiter(&text);
+    let text = decode_bytes(bytes, options.encoding)?;
+    let text = skip_physical_lines(&text, options.skip_rows);
+    if text.trim().is_empty() {
+        return Err(crate::locale::t("跳过这些行之后没有数据").into());
+    }
+    let delimiter = match options.delimiter {
+        CsvDelimiter::Auto => sniff_delimiter(&text),
+        CsvDelimiter::Comma => b',',
+        CsvDelimiter::Tab => b'\t',
+        CsvDelimiter::Semicolon => b';',
+        CsvDelimiter::Space => b' ',
+        CsvDelimiter::Pipe => b'|',
+    };
     let rows = if delimiter == b' ' {
         parse_whitespace(&text)
     } else {
@@ -51,11 +194,16 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
     let rows: Vec<Vec<String>> = rows
         .into_iter()
         .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+        .map(|row| row.into_iter().map(|cell| apply_decimal(&cell, options.decimal)).collect())
         .collect();
     if rows.is_empty() {
         return Err(crate::locale::t("没有读到数据行").into());
     }
-    let header = is_header(&rows[0], rows.get(1));
+    let header = match options.header {
+        CsvHeader::Names => true,
+        CsvHeader::None => false,
+        CsvHeader::Auto => is_header(&rows[0], rows.get(1)),
+    };
     let (names, data) = if header {
         let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let mut names = Vec::with_capacity(width);
@@ -102,6 +250,143 @@ pub fn import_csv_with(bytes: &[u8], encoding: CsvEncoding) -> Result<Table, Str
         }
     }
     Ok(table)
+}
+
+/// 一次读入多个文件。`names` 是文件名，用来给分开的表起名。
+pub fn import_csv_files(files: &[(&str, &[u8])], options: &CsvImportOptions, layout: CsvLayout) -> Result<Vec<Table>, String> {
+    if files.is_empty() {
+        return Err(crate::locale::t("没有要导入的文件").into());
+    }
+    let mut tables = Vec::with_capacity(files.len());
+    for (name, bytes) in files {
+        let mut table = import_csv_options(bytes, options)?;
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or(name);
+        if !stem.is_empty() {
+            table.name = stem.to_string();
+        }
+        tables.push(table);
+    }
+    match layout {
+        CsvLayout::Separate => Ok(tables),
+        CsvLayout::OneTable => Ok(vec![stack_tables(tables)?]),
+    }
+}
+
+fn stack_tables(mut tables: Vec<Table>) -> Result<Table, String> {
+    let Some(mut base) = tables.first().cloned() else {
+        return Err(crate::locale::t("没有要导入的文件").into());
+    };
+    for extra in tables.drain(1..) {
+        let mut index_of = Vec::with_capacity(extra.columns.len());
+        for column in &extra.columns {
+            let index = if let Some(index) = base.column_index(&column.name) {
+                index
+            } else {
+                let index = base.add_column(column.name.clone(), column.mode);
+                base.columns[index].ty = column.ty;
+                index
+            };
+            index_of.push(index);
+        }
+        let start = base.nrows();
+        let extra_rows = extra.nrows();
+        base.ensure_rows(start + extra_rows);
+        for (src, dst) in index_of.into_iter().enumerate() {
+            for row in 0..extra_rows {
+                let text = extra.columns[src].display(row);
+                base.columns[dst].set_text(start + row, &text);
+            }
+        }
+    }
+    Ok(base)
+}
+
+fn skip_physical_lines(text: &str, count: usize) -> String {
+    if count == 0 {
+        return text.to_string();
+    }
+    let mut seen = 0usize;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            seen += 1;
+            if seen == count {
+                return text[index + ch.len_utf8()..].to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn apply_decimal(cell: &str, mark: DecimalMark) -> String {
+    let trimmed = cell.trim();
+    match mark {
+        DecimalMark::Dot => strip_thousands(trimmed, ',').unwrap_or_else(|| trimmed.to_string()),
+        DecimalMark::Comma => {
+            if let Some(stripped) = strip_thousands(trimmed, '.') {
+                return stripped.replace(',', ".");
+            }
+            if is_comma_decimal(trimmed) {
+                trimmed.replacen(',', ".", 1)
+            } else {
+                trimmed.to_string()
+            }
+        }
+    }
+}
+
+/// `1,234.5`（分组符是 `group`）里的分组符去掉。不像数字就返回 `None`。
+fn strip_thousands(text: &str, group: char) -> Option<String> {
+    let (sign, rest) = if let Some(rest) = text.strip_prefix(['+', '-']) {
+        (&text[..1], rest)
+    } else {
+        ("", text)
+    };
+    let (body, frac) = if group == ',' {
+        match rest.split_once('.') {
+            Some((body, frac)) if !frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit()) => (body, Some(frac)),
+            None => (rest, None),
+            Some(_) => return None,
+        }
+    } else {
+        match rest.split_once(',') {
+            Some((body, frac)) if !frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit()) => (body, Some(frac)),
+            None => (rest, None),
+            Some(_) => return None,
+        }
+    };
+    let parts: Vec<&str> = body.split(group).collect();
+    if parts.len() < 2 || parts.iter().any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    if parts[0].len() > 3 || parts[1..].iter().any(|part| part.len() != 3) {
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str(sign);
+    for part in parts {
+        out.push_str(part);
+    }
+    if let Some(frac) = frac {
+        out.push('.');
+        out.push_str(frac);
+    }
+    Some(out)
+}
+
+fn is_comma_decimal(text: &str) -> bool {
+    let rest = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let Some((whole, frac)) = rest.split_once(',') else {
+        return false;
+    };
+    !whole.is_empty()
+        && !frac.is_empty()
+        && !whole.contains('.')
+        && whole.bytes().all(|b| b.is_ascii_digit())
+        && frac.bytes().all(|b| b.is_ascii_digit())
 }
 
 pub fn export_csv(table: &Table) -> Vec<u8> {
@@ -308,11 +593,21 @@ fn infer_type(cells: &[String]) -> ColumnType {
     if nonempty.is_empty() {
         return ColumnType::Numeric;
     }
-    if nonempty
-        .iter()
-        .all(|cell| crate::util::parse_date(cell).is_some())
-    {
-        return ColumnType::Date;
+    if nonempty.iter().all(|cell| datetime::parse_clock(cell).is_some()) {
+        return ColumnType::Time;
+    }
+    let as_date = |cell: &str| datetime::parse_date_only(cell).is_some();
+    let as_days = |cell: &str| {
+        datetime::parse_days(cell, DateOrder::Ymd).is_some() || datetime::parse_days(cell, DateOrder::Dmy).is_some()
+    };
+    if nonempty.iter().all(|cell| as_days(cell)) {
+        let timed = nonempty.iter().any(|cell| cell.contains(':') || cell.contains('时'));
+        if timed {
+            return ColumnType::DateTime;
+        }
+        if nonempty.iter().all(|cell| as_date(cell)) {
+            return ColumnType::Date;
+        }
     }
     if nonempty.iter().all(|cell| cell.parse::<f64>().is_ok()) {
         ColumnType::Numeric
@@ -398,5 +693,45 @@ mod tests {
         assert_eq!(table.nrows(), 2);
         assert_eq!(table.columns[0].numbers[0], Some(1.0));
         assert_eq!(table.columns[1].numbers[1], Some(4.0));
+    }
+
+    #[test]
+    fn import_options_skip_delimiter_locale_and_many_files() {
+        let bytes = b"# comment\n# units\na;b\n1,5;2,25\n3,0;4\n";
+        let options = CsvImportOptions {
+            encoding: CsvEncoding::Utf8,
+            delimiter: CsvDelimiter::Semicolon,
+            skip_rows: 2,
+            header: CsvHeader::Names,
+            decimal: DecimalMark::Comma,
+        };
+        let table = import_csv_options(bytes, &options).unwrap();
+        assert_eq!(table.columns[0].name, "a");
+        assert_eq!(table.columns[1].numbers[0], Some(2.25));
+        assert_eq!(table.columns[0].numbers[1], Some(3.0));
+        assert_eq!(table.nrows(), 2);
+
+        let forced = CsvImportOptions {
+            delimiter: CsvDelimiter::Pipe,
+            header: CsvHeader::None,
+            ..CsvImportOptions::default()
+        };
+        let table = import_csv_options(b"1|2\n3|4\n", &forced).unwrap();
+        assert_eq!(table.columns[0].name, "A");
+        assert_eq!(table.columns[1].numbers[1], Some(4.0));
+
+        let files = [("one.csv", &b"x,y\n1,2\n"[..]), ("two.csv", &b"x,y\n3,4\n"[..])];
+        let separate = import_csv_files(&files, &CsvImportOptions::default(), CsvLayout::Separate).unwrap();
+        assert_eq!(separate.len(), 2);
+        assert_eq!(separate[0].name, "one");
+        assert_eq!(separate[1].columns[0].numbers[0], Some(3.0));
+        let joined = import_csv_files(&files, &CsvImportOptions::default(), CsvLayout::OneTable).unwrap();
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].nrows(), 2);
+        assert_eq!(joined[0].columns[1].numbers, vec![Some(2.0), Some(4.0)]);
+
+        let clock = import_csv(b"t\n13:45:00\n01:02:03\n").unwrap();
+        assert_eq!(clock.columns[0].ty, ColumnType::Time);
+        assert_eq!(clock.columns[0].numbers[0], Some(13.0 * 3600.0 + 45.0 * 60.0));
     }
 }

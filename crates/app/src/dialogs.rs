@@ -100,6 +100,10 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::ColumnProps { .. } => sciplot_core::t("列类型与角色").into(),
         Dialog::RenameColumn { .. } => sciplot_core::t("重命名列").into(),
         Dialog::Sort { .. } => sciplot_core::t("排序").into(),
+        Dialog::Stats { .. } => sciplot_core::t("统计").into(),
+        Dialog::Normalize { .. } => sciplot_core::t("归一化").into(),
+        Dialog::CellFormula { .. } => sciplot_core::t("单元格公式").into(),
+        Dialog::ImportAscii { .. } => sciplot_core::t("导入 ASCII").into(),
         Dialog::Axis { .. } => sciplot_core::t("坐标轴").into(),
         Dialog::ConfirmDelete { .. } => sciplot_core::t("确认删除").into(),
         Dialog::Legend { .. } => sciplot_core::t("图例").into(),
@@ -142,7 +146,13 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         } => formula(app, ui, *table, *column, expr, error, warning),
         Dialog::MatrixFormula { matrix, expr } => matrix_formula(app, ui, *matrix, expr),
         Dialog::NewMatrix { name, rows, cols } => new_matrix(app, ui, name, rows, cols),
-        Dialog::ColumnProps { table, column } => column_props(app, ui, *table, *column),
+        Dialog::ColumnProps {
+            table,
+            column,
+            format,
+            places,
+            time_format,
+        } => column_props(app, ui, *table, *column, format, places, time_format),
         Dialog::RenameColumn {
             table,
             column,
@@ -153,7 +163,30 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             table,
             column,
             ascending,
-        } => sort_dialog(app, ui, *table, column, ascending),
+            mode,
+            picked,
+        } => sort_dialog(app, ui, *table, column, ascending, mode, picked),
+        Dialog::Stats { table, picked } => stats_dialog(app, ui, *table, picked),
+        Dialog::Normalize { table, picked, whole } => normalize_dialog(app, ui, *table, picked, whole),
+        Dialog::CellFormula {
+            table,
+            column,
+            row,
+            expr,
+            error,
+        } => cell_formula(app, ui, *table, *column, *row, expr, error),
+        Dialog::ImportAscii {
+            encoding,
+            delimiter,
+            header,
+            decimal,
+            skip,
+            layout,
+            paths,
+            error,
+        } => import_ascii(
+            app, ui, encoding, delimiter, header, decimal, skip, layout, paths, error,
+        ),
         Dialog::Axis {
             graph,
             layer,
@@ -738,8 +771,14 @@ fn formula(
         if action_button(ui, sciplot_core::t("计算并写入列")) {
             let formula = expr.clone();
             let outcome = app.edit(sciplot_core::t("列公式"), |project| {
+                let others: Vec<sciplot_core::Table> = project
+                    .tables
+                    .iter()
+                    .filter(|item| item.id != table)
+                    .cloned()
+                    .collect();
                 let table = project.table_mut(table).ok_or(sciplot_core::t("找不到表格"))?;
-                sciplot_core::apply_formula(table, column, &formula)
+                sciplot_core::apply_formula_with(table, column, &formula, &others)
             });
             match outcome {
                 Some(evaluated) if evaluated.values.iter().all(|value| value.is_none()) => {
@@ -883,6 +922,9 @@ fn column_props(
     ui: &mut egui::Ui,
     table: sciplot_core::TableId,
     column: usize,
+    format: &mut sciplot_core::NumericFormat,
+    places: &mut u8,
+    time_format: &mut String,
 ) -> bool {
     let Some(current) = app
         .project
@@ -901,7 +943,7 @@ fn column_props(
         current.mode.label()
     ));
     ui.label(sciplot_core::t(
-        "点下面的类型或角色，会立刻改这一列。列名用表头右键「重命名此列…」，或双击表头。",
+        "点下面的类型或角色，会立刻改这一列。数值格式和时间格式用下面的按钮应用。列名用表头右键「重命名此列…」，或双击表头。",
     ));
     if ui
         .button(sciplot_core::trf!(
@@ -927,6 +969,45 @@ fn column_props(
             }
         }
     });
+    ui.separator();
+    ui.label(sciplot_core::t("数值格式"));
+    egui::ComboBox::from_id_salt("numeric-format")
+        .selected_text(format.label())
+        .show_ui(ui, |ui| {
+            for kind in sciplot_core::NumericFormat::all() {
+                ui.selectable_value(format, *kind, kind.label());
+            }
+        });
+    ui.label(sciplot_core::t("小数位数"));
+    ui.add(egui::DragValue::new(places).range(0..=12));
+    ui.label(sciplot_core::t("时间格式"));
+    ui.text_edit_singleline(time_format);
+    ui.label(sciplot_core::t(
+        "日期格式：YYYY 年，MM 月，DD 日，HH 时，mm 分，ss 秒。留空则按范围自动缩短。",
+    ));
+    if ui.button(sciplot_core::t("应用格式")).clicked() {
+        let format = *format;
+        let places = (*places).clamp(0, 12);
+        let time_format = time_format.trim().to_string();
+        if app
+            .edit(sciplot_core::t("列属性"), |project| {
+                let column = project
+                    .table_mut(table)
+                    .ok_or(sciplot_core::t("找不到表格"))?
+                    .columns
+                    .get_mut(column)
+                    .ok_or(sciplot_core::t("找不到列"))?;
+                column.numeric_format = format;
+                column.decimal_places = places;
+                column.time_format = time_format;
+                column.refresh_display();
+                Ok(())
+            })
+            .is_some()
+        {
+            app.status = sciplot_core::t("已更新显示格式").into();
+        }
+    }
     !ui.button(sciplot_core::t("取消")).clicked()
 }
 
@@ -989,7 +1070,9 @@ fn apply_column(
                 .columns
                 .get_mut(column)
                 .ok_or(sciplot_core::t("找不到列"))?;
-            column.ty = ty;
+            if column.ty != ty {
+                column.set_type(ty);
+            }
             if let Some(mode) = mode {
                 column.mode = mode;
             }
@@ -1007,6 +1090,8 @@ fn sort_dialog(
     table: sciplot_core::TableId,
     column: &mut usize,
     ascending: &mut bool,
+    mode: &mut sciplot_core::SortMode,
+    picked: &mut Vec<bool>,
 ) -> bool {
     let names: Vec<String> = app
         .project
@@ -1027,15 +1112,41 @@ fn sort_dialog(
         });
     ui.radio_value(ascending, true, sciplot_core::t("升序"));
     ui.radio_value(ascending, false, sciplot_core::t("降序"));
+    ui.label(sciplot_core::t("排序方式"));
+    for kind in sciplot_core::SortMode::all() {
+        ui.radio_value(mode, *kind, kind.label());
+    }
+    if *mode != sciplot_core::SortMode::Whole {
+        ui.label(sciplot_core::t("所选列"));
+        if picked.len() != names.len() {
+            picked.resize(names.len(), false);
+        }
+        for (index, name) in names.iter().enumerate() {
+            if let Some(flag) = picked.get_mut(index) {
+                ui.checkbox(flag, name);
+            }
+        }
+    }
     if action_button(ui, sciplot_core::t("排序")) {
         let column = *column;
         let ascending = *ascending;
+        let mode = *mode;
+        let selected: Vec<usize> = picked
+            .iter()
+            .enumerate()
+            .filter(|(_, flag)| **flag)
+            .map(|(index, _)| index)
+            .collect();
+        if mode != sciplot_core::SortMode::Whole && selected.is_empty() {
+            app.status = sciplot_core::t("没有选中要排序的列").into();
+            return true;
+        }
         if app
             .edit(sciplot_core::t("排序"), |project| {
                 project
                     .table_mut(table)
                     .ok_or(sciplot_core::t("找不到表格"))?
-                    .sort_by(column, ascending);
+                    .sort_columns(&selected, column, ascending, mode);
                 Ok(())
             })
             .is_some()
@@ -1093,6 +1204,18 @@ fn axis_dialog(
     }
     ui.label(sciplot_core::t("次刻度等分（空为 4）"));
     ui.text_edit_singleline(minor);
+    ui.label(sciplot_core::t("刻度文字格式（空为自动）"));
+    egui::ComboBox::from_id_salt("tick-kind")
+        .selected_text(axis.tick_kind.label())
+        .show_ui(ui, |ui| {
+            for kind in sciplot_core::TickKind::all() {
+                ui.selectable_value(&mut axis.tick_kind, *kind, kind.label());
+            }
+        });
+    ui.text_edit_singleline(&mut axis.tick_pattern);
+    ui.label(sciplot_core::t(
+        "日期格式：YYYY 年，MM 月，DD 日，HH 时，mm 分，ss 秒。留空则按范围自动缩短。",
+    ));
     if !error.is_empty() {
         ui.colored_label(egui::Color32::from_rgb(176, 32, 32), error.as_str());
     }
@@ -2205,4 +2328,267 @@ fn parse_opt(text: &str) -> Option<f64> {
 
 pub fn number_text(value: Option<f64>) -> String {
     value.map(format_number).unwrap_or_default()
+}
+
+fn column_checks(ui: &mut egui::Ui, names: &[String], picked: &mut [bool]) {
+    for (index, name) in names.iter().enumerate() {
+        if let Some(flag) = picked.get_mut(index) {
+            ui.checkbox(flag, name);
+        }
+    }
+}
+
+fn picked_indexes(picked: &[bool]) -> Vec<usize> {
+    picked
+        .iter()
+        .enumerate()
+        .filter(|(_, flag)| **flag)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn stats_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    table: sciplot_core::TableId,
+    picked: &mut Vec<bool>,
+) -> bool {
+    let names: Vec<String> = app
+        .project
+        .table(table)
+        .map(|item| item.columns.iter().map(|column| column.name.clone()).collect())
+        .unwrap_or_default();
+    if picked.len() != names.len() {
+        picked.resize(names.len(), false);
+    }
+    ui.label(sciplot_core::t("所选列"));
+    column_checks(ui, &names, picked);
+    let indexes = picked_indexes(picked);
+    ui.horizontal(|ui| {
+        if ui.button(sciplot_core::t("列统计表…")).clicked() {
+            if let Some(id) = app.edit(sciplot_core::t("列统计表…"), |project| {
+                ops::column_stats_table(project, table, &indexes)
+            }) {
+                app.open_tab(crate::app::Tab::Table(id));
+                app.status = sciplot_core::t("已写入列统计").into();
+            }
+        }
+        if ui.button(sciplot_core::t("行统计…")).clicked() {
+            if let Some(id) = app.edit(sciplot_core::t("行统计…"), |project| {
+                ops::row_stats_table(project, table, &indexes)
+            }) {
+                app.open_tab(crate::app::Tab::Table(id));
+                app.status = sciplot_core::t("已写入行统计").into();
+            }
+        }
+    });
+    !ui.button(sciplot_core::t("关闭")).clicked()
+}
+
+fn normalize_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    table: sciplot_core::TableId,
+    picked: &mut Vec<bool>,
+    whole: &mut bool,
+) -> bool {
+    let names: Vec<String> = app
+        .project
+        .table(table)
+        .map(|item| item.columns.iter().map(|column| column.name.clone()).collect())
+        .unwrap_or_default();
+    if picked.len() != names.len() {
+        picked.resize(names.len(), false);
+    }
+    ui.label(sciplot_core::t("所选列"));
+    column_checks(ui, &names, picked);
+    ui.radio_value(whole, false, sciplot_core::t("按列缩放到 [0, 1]"));
+    ui.radio_value(whole, true, sciplot_core::t("整表缩放到 [0, 1]"));
+    if action_button(ui, sciplot_core::t("归一化")) {
+        let indexes = picked_indexes(picked);
+        if indexes.is_empty() {
+            app.status = sciplot_core::t("没有选中要归一化的列").into();
+            return true;
+        }
+        let mode = if *whole {
+            sciplot_core::NormalizeMode::Table
+        } else {
+            sciplot_core::NormalizeMode::Columns
+        };
+        if app
+            .edit(sciplot_core::t("归一化"), |project| {
+                project
+                    .table_mut(table)
+                    .ok_or(sciplot_core::t("找不到表格"))?
+                    .normalize_unit(&indexes, mode)?;
+                Ok(())
+            })
+            .is_some()
+        {
+            app.status = sciplot_core::t("已归一化").into();
+            return false;
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn cell_formula(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    table: sciplot_core::TableId,
+    column: usize,
+    row: usize,
+    expr: &mut String,
+    error: &mut String,
+) -> bool {
+    ui.label(sciplot_core::t(
+        "这一格的公式。以 = 开头，或在公式编辑模式里直接写。可以用 tablecol(\"表\",\"列\") 引用别的表。",
+    ));
+    ui.text_edit_singleline(expr);
+    if !error.is_empty() {
+        ui.colored_label(egui::Color32::from_rgb(176, 32, 32), error.as_str());
+    }
+    if action_button(ui, sciplot_core::t("计算这一格")) {
+        let formula = expr.clone();
+        let outcome = app.edit(sciplot_core::t("单元格公式"), |project| {
+            let others: Vec<sciplot_core::Table> = project
+                .tables
+                .iter()
+                .filter(|item| item.id != table)
+                .cloned()
+                .collect();
+            let current = project.table_mut(table).ok_or(sciplot_core::t("找不到表格"))?;
+            if column >= current.columns.len() {
+                return Err(sciplot_core::t("找不到列").into());
+            }
+            current.columns[column].set_cell_formula_raw(row, &formula);
+            sciplot_core::commit_cell(&mut *current, column, row, true, &others)
+        });
+        match outcome {
+            Some(()) => {
+                error.clear();
+                app.status = sciplot_core::t("已写入单元格").into();
+                return false;
+            }
+            None => *error = app.status.clone(),
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_ascii(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    encoding: &mut sciplot_core::CsvEncoding,
+    delimiter: &mut sciplot_core::CsvDelimiter,
+    header: &mut sciplot_core::CsvHeader,
+    decimal: &mut sciplot_core::DecimalMark,
+    skip: &mut String,
+    layout: &mut sciplot_core::CsvLayout,
+    paths: &mut String,
+    error: &mut String,
+) -> bool {
+    ui.label(sciplot_core::t("编码"));
+    egui::ComboBox::from_id_salt("csv-encoding")
+        .selected_text(encoding.label())
+        .show_ui(ui, |ui| {
+            for kind in sciplot_core::CsvEncoding::all() {
+                ui.selectable_value(encoding, *kind, kind.label());
+            }
+        });
+    ui.label(sciplot_core::t("分隔符"));
+    egui::ComboBox::from_id_salt("csv-delimiter")
+        .selected_text(delimiter.label())
+        .show_ui(ui, |ui| {
+            for kind in sciplot_core::CsvDelimiter::all() {
+                ui.selectable_value(delimiter, *kind, kind.label());
+            }
+        });
+    ui.label(sciplot_core::t("表头"));
+    egui::ComboBox::from_id_salt("csv-header")
+        .selected_text(header.label())
+        .show_ui(ui, |ui| {
+            for kind in sciplot_core::CsvHeader::all() {
+                ui.selectable_value(header, *kind, kind.label());
+            }
+        });
+    ui.label(sciplot_core::t("小数点"));
+    egui::ComboBox::from_id_salt("csv-decimal")
+        .selected_text(decimal.label())
+        .show_ui(ui, |ui| {
+            for kind in sciplot_core::DecimalMark::all() {
+                ui.selectable_value(decimal, *kind, kind.label());
+            }
+        });
+    ui.label(sciplot_core::t("跳过的行数"));
+    ui.text_edit_singleline(skip);
+    ui.label(sciplot_core::t("多个文件怎么放"));
+    for kind in sciplot_core::CsvLayout::all() {
+        ui.radio_value(layout, *kind, kind.label());
+    }
+    ui.label(sciplot_core::t("文件路径。每行一个，也可以用 | 分开。留空则选择文件。"));
+    ui.text_edit_multiline(paths);
+    if !error.is_empty() {
+        ui.colored_label(egui::Color32::from_rgb(176, 32, 32), error.as_str());
+    }
+    if action_button(ui, sciplot_core::t("导入")) {
+        let skip_rows = skip.trim().parse::<usize>().unwrap_or(0);
+        let options = sciplot_core::CsvImportOptions {
+            encoding: *encoding,
+            delimiter: *delimiter,
+            skip_rows,
+            header: *header,
+            decimal: *decimal,
+        };
+        let layout = *layout;
+        let mut files = split_import_paths(paths);
+        if files.is_empty() {
+            if std::env::var("SCIPLOT_NO_DIALOG").is_ok() {
+                *error = sciplot_core::t("请填写要导入的文件，每行一个路径。").into();
+                return true;
+            }
+            match rfd::FileDialog::new()
+                .set_directory(crate::app::default_dir(app))
+                .add_filter("CSV", &["csv", "txt", "tsv", "dat"])
+                .pick_files()
+            {
+                Some(picked) => files = picked,
+                None => return true,
+            }
+        }
+        match read_import_files(&files) {
+            Ok(bytes) => match app.import_prepared(bytes, options, layout) {
+                Ok(()) => return false,
+                Err(err) => *error = err,
+            },
+            Err(err) => *error = err,
+        }
+    }
+    !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn split_import_paths(text: &str) -> Vec<std::path::PathBuf> {
+    text.split(['\n', '|'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+fn read_import_files(paths: &[std::path::PathBuf]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut files = Vec::new();
+    for path in paths {
+        let bytes = std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("import")
+            .to_string();
+        files.push((name, bytes));
+    }
+    if files.is_empty() {
+        return Err(sciplot_core::t("没有要导入的文件").into());
+    }
+    Ok(files)
 }

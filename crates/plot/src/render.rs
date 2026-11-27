@@ -1,5 +1,5 @@
 use sciplot_core::{
-    format_number, palette_color, resolve_curve, Axis, AxisScale, CurveKind, Dash, Graph, LegendPos,
+    format_axis_value, format_number, palette_color, resolve_curve, Axis, AxisScale, CurveKind, Dash, Graph, LegendPos,
     Project, SeriesData, Symbol,
 };
 
@@ -297,6 +297,9 @@ fn render_layer(
                 draw_markers(scene, &frame, item);
             }
             _ => draw_polyline(scene, &frame, item),
+        }
+        if shows_point_labels(item.kind) {
+            draw_point_labels(scene, &frame, item, scale);
         }
         if item.kind != CurveKind::Pie {
             legend.push(LegendEntry {
@@ -654,7 +657,7 @@ fn draw_axis_decor(
                     scene,
                     px,
                     frame.plot.bottom() + tick + 2.0 * scale,
-                    &format_number(tick_mark.value),
+                    &tick_label(&layer.x_axis, tick_mark.value, frame.x_min, frame.x_max),
                     layer.x_axis.tick_size * scale,
                     [30, 30, 30, 255],
                     HAlign::Center,
@@ -686,7 +689,7 @@ fn draw_axis_decor(
                     scene,
                     frame.plot.x - tick - 3.0 * scale,
                     py,
-                    &format_number(tick_mark.value),
+                    &tick_label(&layer.y_axis, tick_mark.value, frame.y_min, frame.y_max),
                     layer.y_axis.tick_size * scale,
                     [30, 30, 30, 255],
                     HAlign::Right,
@@ -734,6 +737,48 @@ fn draw_polyline(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
                 width: item.width,
                 dash: item.dash,
             });
+        }
+    }
+}
+
+fn tick_label(axis: &Axis, value: f64, min: f64, max: f64) -> String {
+    format_axis_value(axis.tick_kind.clock(), &axis.tick_pattern, value, max - min)
+}
+
+fn shows_point_labels(kind: CurveKind) -> bool {
+    matches!(
+        kind,
+        CurveKind::Line
+            | CurveKind::Scatter
+            | CurveKind::LineSymbol
+            | CurveKind::Steps
+            | CurveKind::Area
+            | CurveKind::ErrorBars
+            | CurveKind::Vector
+    )
+}
+
+fn draw_point_labels(scene: &mut Scene, frame: &LayerFrame, item: &Item, scale: f32) {
+    let n = item.series.x.len().min(item.series.y.len());
+    for i in 0..n {
+        let Some(label) = item.series.point_labels.get(i).map(String::as_str).filter(|text| !text.is_empty()) else {
+            continue;
+        };
+        let Some((px, py)) = map_xy(frame, item.series.x[i], item.series.y[i]) else {
+            continue;
+        };
+        if frame.plot.contains(px, py) {
+            text(
+                scene,
+                px + 6.0 * scale,
+                py - 4.0 * scale,
+                label,
+                11.0 * scale,
+                [30, 30, 30, 255],
+                HAlign::Left,
+                VAlign::Bottom,
+                false,
+            );
         }
     }
 }

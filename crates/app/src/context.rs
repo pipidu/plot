@@ -19,7 +19,7 @@ pub(crate) fn section_tables(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         }
     }
     if clicked_menu(ui, sciplot_core::t("导入 CSV…")) {
-        crate::app::start_file(app, PathAction::ImportCsv, "");
+        crate::app::open_import(app);
     }
 }
 
@@ -197,11 +197,99 @@ pub(crate) fn table_column(
     if clicked_menu(ui, sciplot_core::t("重算公式")) {
         recompute(app, table);
     }
+    if let Some(row) = row {
+        if clicked_menu(ui, sciplot_core::t("单元格公式…")) {
+            let expr = app
+                .project
+                .table(table)
+                .and_then(|item| item.columns.get(column))
+                .map(|col| {
+                    let cell = col.cell_formula(row);
+                    if cell.is_empty() {
+                        col.formula.clone()
+                    } else {
+                        cell.to_string()
+                    }
+                })
+                .unwrap_or_default();
+            app.dialog = Some(Dialog::CellFormula {
+                table,
+                column,
+                row,
+                expr,
+                error: String::new(),
+            });
+        }
+    }
+    let formula_label = if app.formula_mode {
+        sciplot_core::t("关闭公式编辑")
+    } else {
+        sciplot_core::t("公式编辑模式")
+    };
+    if clicked_menu(ui, formula_label) {
+        app.formula_mode = !app.formula_mode;
+    }
+    if clicked_menu(ui, sciplot_core::t("用行号填充"))
+        && app
+            .edit(sciplot_core::t("用行号填充"), |project| {
+                project
+                    .table_mut(table)
+                    .ok_or(sciplot_core::t("找不到表格"))?
+                    .fill_row_numbers(column)
+            })
+            .is_some()
+    {
+        app.status = sciplot_core::t("已填充行号").into();
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(1);
+    if clicked_menu(ui, sciplot_core::t("用随机数填充"))
+        && app
+            .edit(sciplot_core::t("用随机数填充"), |project| {
+                project
+                    .table_mut(table)
+                    .ok_or(sciplot_core::t("找不到表格"))?
+                    .fill_random(column, seed)
+            })
+            .is_some()
+    {
+        app.status = sciplot_core::t("已填充随机数").into();
+    }
+    ui.separator();
+    if clicked_menu(ui, sciplot_core::t("复制单元格")) {
+        if app.cell_anchor.is_none() {
+            app.selected_column = Some((table, column));
+            app.cell_anchor = None;
+            app.cell_focus = None;
+        }
+        app.copy_cells();
+    }
+    if clicked_menu(ui, sciplot_core::t("剪切单元格")) {
+        app.cut_cells();
+    }
+    if clicked_menu(ui, sciplot_core::t("粘贴单元格")) {
+        if app.cell_anchor.is_none() {
+            let row = row.unwrap_or(0);
+            app.cell_anchor = Some((table, column, row));
+            app.cell_focus = Some((table, column, row));
+        }
+        app.paste_cells();
+    }
+    ui.separator();
     if clicked_menu(ui, sciplot_core::t("排序…")) {
+        let n = app.project.table(table).map(|item| item.columns.len()).unwrap_or(0);
+        let mut picked = vec![false; n];
+        if column < n {
+            picked[column] = true;
+        }
         app.dialog = Some(Dialog::Sort {
             table,
             column,
             ascending: true,
+            mode: sciplot_core::SortMode::Whole,
+            picked,
         });
     }
     if clicked_menu(ui, sciplot_core::t("统计")) {
@@ -215,8 +303,33 @@ pub(crate) fn table_column(
             Err(err) => app.status = err,
         }
     }
+    if clicked_menu(ui, sciplot_core::t("列统计表…")) || clicked_menu(ui, sciplot_core::t("行统计…")) {
+        app.dialog = Some(Dialog::Stats {
+            table,
+            picked: column_flags(app, table, column),
+        });
+    }
+    if clicked_menu(ui, sciplot_core::t("归一化…")) {
+        app.dialog = Some(Dialog::Normalize {
+            table,
+            picked: column_flags(app, table, column),
+            whole: false,
+        });
+    }
     if clicked_menu(ui, sciplot_core::t("列类型与角色…")) {
-        app.dialog = Some(Dialog::ColumnProps { table, column });
+        let (format, places, time_format) = app
+            .project
+            .table(table)
+            .and_then(|item| item.columns.get(column))
+            .map(|column| (column.numeric_format, column.decimal_places, column.time_format.clone()))
+            .unwrap_or((sciplot_core::NumericFormat::General, 6, String::new()));
+        app.dialog = Some(Dialog::ColumnProps {
+            table,
+            column,
+            format,
+            places,
+            time_format,
+        });
     }
     plot_table_menu(app, ui, table);
     if clicked_menu(ui, sciplot_core::t("导出 CSV…")) {
@@ -224,8 +337,17 @@ pub(crate) fn table_column(
         crate::app::start_file(app, PathAction::ExportCsv, "");
     }
     if clicked_menu(ui, sciplot_core::t("导入 CSV…")) {
-        crate::app::start_file(app, PathAction::ImportCsv, "");
+        crate::app::open_import(app);
     }
+}
+
+fn column_flags(app: &SciPlotApp, table: TableId, column: usize) -> Vec<bool> {
+    let n = app.project.table(table).map(|item| item.columns.len()).unwrap_or(0);
+    let mut picked = vec![false; n];
+    if column < n {
+        picked[column] = true;
+    }
+    picked
 }
 
 pub(crate) fn table_row(app: &mut SciPlotApp, ui: &mut egui::Ui, table: TableId, row: usize) {
@@ -317,30 +439,29 @@ fn insert_column(app: &mut SciPlotApp, table: TableId, index: usize) {
 }
 
 fn recompute(app: &mut SciPlotApp, id: TableId) {
-    let formulas: Vec<(usize, String)> = app
-        .project
-        .table(id)
-        .map(|table| {
-            table
-                .columns
-                .iter()
-                .enumerate()
-                .filter(|(_, col)| !col.formula.is_empty())
-                .map(|(index, col)| (index, col.formula.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    if app
-        .edit(sciplot_core::t("重算公式"), |project| {
-            let table = project.table_mut(id).ok_or(sciplot_core::t("找不到表格"))?;
-            for (index, formula) in &formulas {
-                sciplot_core::apply_formula(table, *index, formula)?;
-            }
-            Ok(())
-        })
-        .is_some()
-    {
-        app.status = sciplot_core::t("已重算列公式").into();
+    let report = app.edit(sciplot_core::t("重算公式"), |project| {
+        let others: Vec<sciplot_core::Table> = project
+            .tables
+            .iter()
+            .filter(|table| table.id != id)
+            .cloned()
+            .collect();
+        let table = project.table_mut(id).ok_or(sciplot_core::t("找不到表格"))?;
+        let report = sciplot_core::recalculate_table(table, &others);
+        if let Some(err) = report.first_error.clone() {
+            project.log_line(&err);
+        }
+        Ok(report)
+    });
+    if let Some(report) = report {
+        app.status = match report.first_error {
+            Some(err) => err,
+            None => sciplot_core::trf!(
+                "已重算公式，写入 {n} 个单元格。",
+                "Recalculated formulas and wrote {n} cells.",
+                n = report.written
+            ),
+        };
     }
 }
 

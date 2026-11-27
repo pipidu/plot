@@ -37,6 +37,31 @@ mod tests {
     }
 
     #[test]
+    fn date_axis_ticks_and_point_labels() {
+        let mut project = Project::new("t");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns[0].set_type(sciplot_core::ColumnType::Date);
+            table.columns[0].set_text(0, "2020-01-01");
+            table.columns[0].set_text(1, "2020-01-02");
+            table.columns[0].set_text(2, "2020-01-03");
+            table.columns[1].set_numbers(&[1.0, 2.0, 3.0]);
+            table.add_column("标签", sciplot_core::ColumnMode::Label);
+            table.columns[2].set_text(0, "甲");
+            table.columns[2].set_text(1, "乙");
+            table.columns[2].set_text(2, "丙");
+        }
+        let graph_id = project.plot_table(table, CurveKind::Scatter).unwrap();
+        let graph = project.graph(graph_id).unwrap();
+        assert_eq!(graph.layers[0].x_axis.tick_kind, sciplot_core::TickKind::Date);
+        let scene = render(&project, graph, &[], 800.0, 600.0, 1.0);
+        let svg = to_svg(&scene);
+        assert!(svg.contains("2020-01"), "{svg}");
+        assert!(svg.contains("甲") && svg.contains("乙"), "{svg}");
+    }
+
+    #[test]
     fn log_axis_without_positive_data_stays_visible() {
         let mut project = Project::new("t");
         let table = project.new_table("t");

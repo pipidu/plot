@@ -2,7 +2,8 @@
 //!
 //! 语法是 evalexpr：`+ - * / % ^`、括号、比较运算。
 //! 另外注册了 SciDAVis / muParser 风格的函数名：`sin(x)`、`ln(x)`、`log(x)`（以 10 为底）。
-//! 列公式里可以用 `col("列名")`、`col("A")`（列名优先，没有同名列时才按字母列标）、`col(1)`（从 1 开始的位置）、`cell("A", 行号)`、`i`（从 1 开始的行号）。
+//! 列公式里可以用 `col("列名")`、`col("A")`（列名优先，没有同名列时才按字母列标）、`col(1)`（从 1 开始的位置）、`cell("A", 行号)`、`i`（从 1 开始的行号），以及 `tablecol("表","列")` 读另一张表的同一行。
+//! 某一格还可以有自己的公式，算的时候盖过这一列的公式。
 //! 整数相除会截断，需要小数时写成 `1.0/2`。
 
 use std::cell::{Cell, RefCell};
@@ -14,7 +15,6 @@ use evalexpr::{
 };
 
 use crate::table::{ColumnType, Table};
-use crate::util::format_number;
 
 struct ColumnStore {
     names: HashMap<String, usize>,
@@ -26,6 +26,7 @@ thread_local! {
         names: HashMap::new(),
         values: Vec::new(),
     });
+    static TABLES: RefCell<HashMap<String, ColumnStore>> = RefCell::new(HashMap::new());
     static ROW: Cell<usize> = const { Cell::new(0) };
     static MATH: RefCell<Option<HashMapContext>> = const { RefCell::new(None) };
 }
@@ -33,7 +34,7 @@ thread_local! {
 const FUNCTIONS: &[&str] = &[
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh",
     "atanh", "exp", "ln", "log", "log10", "log2", "sqrt", "abs", "floor", "ceil", "round", "hypot",
-    "sign", "pow", "min", "max", "cbrt", "col", "cell",
+    "sign", "pow", "min", "max", "cbrt", "col", "cell", "tablecol",
 ];
 
 pub struct CompiledExpr {
@@ -63,16 +64,13 @@ pub struct EvalColumn {
 
 /// 逐行计算公式。空单元格和计算失败的行记为 `None`，不中断其余行。
 pub fn eval_column(table: &Table, formula: &str) -> Result<EvalColumn, String> {
+    eval_column_with(table, formula, &[])
+}
+
+/// 和 `eval_column` 一样，另外可以用 `tablecol("表","列")` 读其他表的同一行。
+pub fn eval_column_with(table: &Table, formula: &str, others: &[Table]) -> Result<EvalColumn, String> {
     let compiled = CompiledExpr::compile(formula)?;
-    let mut names = HashMap::new();
-    let mut values = Vec::with_capacity(table.columns.len());
-    for (index, column) in table.columns.iter().enumerate() {
-        names.insert(column.name.clone(), index);
-        values.push(column.numbers.clone());
-    }
-    COLS.with(|cols| {
-        *cols.borrow_mut() = ColumnStore { names, values };
-    });
+    publish(table, others);
     let n = table.nrows();
     let mut values = Vec::with_capacity(n);
     let mut warnings = 0;
@@ -102,24 +100,202 @@ pub fn eval_column(table: &Table, formula: &str) -> Result<EvalColumn, String> {
     })
 }
 
-/// 把公式结果写回列，并记下公式文本。
+/// 把公式结果写回列，并记下公式文本。这一列上的单元格公式会被清掉。
 pub fn apply_formula(table: &mut Table, column: usize, formula: &str) -> Result<EvalColumn, String> {
-    let evaluated = eval_column(table, formula)?;
+    apply_formula_with(table, column, formula, &[])
+}
+
+/// 同 `apply_formula`，计算时能看见 `others` 里的表。
+pub fn apply_formula_with(table: &mut Table, column: usize, formula: &str, others: &[Table]) -> Result<EvalColumn, String> {
+    let evaluated = eval_column_with(table, formula, others)?;
     if column >= table.columns.len() {
         return Err(crate::locale::t("列不存在").to_string());
     }
     let n = evaluated.values.len();
     table.ensure_rows(n.max(table.nrows()));
-    let col = &mut table.columns[column];
-    col.ty = ColumnType::Numeric;
-    col.formula = formula.to_string();
-    col.numbers = evaluated.values.clone();
-    col.texts = evaluated
+    table.columns[column].ty = ColumnType::Numeric;
+    let texts: Vec<String> = evaluated
         .values
         .iter()
-        .map(|v| v.map(format_number).unwrap_or_default())
+        .map(|value| value.map(|number| table.columns[column].format_value(number)).unwrap_or_default())
         .collect();
+    let col = &mut table.columns[column];
+    col.formula = formula.to_string();
+    col.numbers = evaluated.values.clone();
+    col.texts = texts;
+    col.cell_formulas = vec![String::new(); n];
     Ok(evaluated)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RecalcReport {
+    pub written: usize,
+    pub warnings: usize,
+    pub first_error: Option<String>,
+}
+
+/// 先按从左到右重算列公式（已有单元格公式的格子跳过），再按行重算单元格公式。
+/// 后面的公式能看见前面刚写进去的数。`tablecol` 能读 `others`。
+pub fn recalculate_table(table: &mut Table, others: &[Table]) -> RecalcReport {
+    let mut report = RecalcReport::default();
+    let rows = table.nrows();
+    publish(table, others);
+    for index in 0..table.columns.len() {
+        let formula = table.columns[index].formula.trim().to_string();
+        if formula.is_empty() {
+            continue;
+        }
+        let compiled = match CompiledExpr::compile(&formula) {
+            Ok(compiled) => compiled,
+            Err(err) => {
+                note_formula_error(&mut report, &err);
+                continue;
+            }
+        };
+        for row in 0..rows {
+            if !table.columns[index].cell_formula(row).trim().is_empty() {
+                continue;
+            }
+            write_evaluated(&mut table.columns[index], row, eval_at(&compiled, row), &mut report);
+        }
+        publish(table, others);
+    }
+    for index in 0..table.columns.len() {
+        for row in 0..rows {
+            let raw = table.columns[index].cell_formula(row).trim().to_string();
+            if raw.is_empty() {
+                continue;
+            }
+            let expr = raw.trim_start_matches('=').trim().to_string();
+            table.columns[index].cell_formulas[row] = expr.clone();
+            if expr.is_empty() {
+                continue;
+            }
+            let compiled = match CompiledExpr::compile(&expr) {
+                Ok(compiled) => compiled,
+                Err(err) => {
+                    note_formula_error(&mut report, &err);
+                    continue;
+                }
+            };
+            write_evaluated(&mut table.columns[index], row, eval_at(&compiled, row), &mut report);
+            publish(table, others);
+        }
+    }
+    report
+}
+
+/// 结束编辑一个格子。公式模式，或以 `=` 开头的文本，写成这一格自己的公式并立刻计算。
+pub fn commit_cell(table: &mut Table, column: usize, row: usize, formula_mode: bool, others: &[Table]) -> Result<(), String> {
+    if column >= table.columns.len() {
+        return Err(crate::locale::t("列不存在").into());
+    }
+    table.ensure_rows(row + 1);
+    let raw = if formula_mode {
+        table.columns[column].cell_formula(row).to_string()
+    } else {
+        table.columns[column].texts.get(row).cloned().unwrap_or_default()
+    };
+    let trimmed = raw.trim();
+    if formula_mode || trimmed.starts_with('=') {
+        let expr = trimmed.trim_start_matches('=').trim().to_string();
+        table.columns[column].cell_formulas[row] = expr.clone();
+        if expr.is_empty() {
+            return Ok(());
+        }
+        publish(table, others);
+        let compiled = CompiledExpr::compile(&expr).map_err(|err| {
+            if row < table.columns[column].texts.len() {
+                table.columns[column].texts[row] = raw.trim().to_string();
+            }
+            explain_error(&err)
+        })?;
+        let mut report = RecalcReport::default();
+        write_evaluated(&mut table.columns[column], row, eval_at(&compiled, row), &mut report);
+        if let Some(err) = report.first_error {
+            // 计算失败时把公式留在格子里，否则下一帧编辑框会从空白文本重新加载。
+            if row < table.columns[column].texts.len() {
+                table.columns[column].texts[row] = raw.trim().to_string();
+            }
+            return Err(err);
+        }
+        Ok(())
+    } else {
+        table.columns[column].cell_formulas[row].clear();
+        let column = &mut table.columns[column];
+        column.set_text(row, trimmed);
+        if column.ty != ColumnType::Text {
+            if let Some(value) = column.numbers[row] {
+                column.texts[row] = column.format_value(value);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn publish(table: &Table, others: &[Table]) {
+    let mut tables = HashMap::new();
+    tables.insert(table.name.clone(), snapshot(table));
+    for other in others {
+        tables.insert(other.name.clone(), snapshot(other));
+    }
+    let current = snapshot(table);
+    COLS.with(|cols| *cols.borrow_mut() = current);
+    TABLES.with(|slot| *slot.borrow_mut() = tables);
+}
+
+fn snapshot(table: &Table) -> ColumnStore {
+    let mut names = HashMap::new();
+    let mut values = Vec::with_capacity(table.columns.len());
+    for (index, column) in table.columns.iter().enumerate() {
+        names.insert(column.name.clone(), index);
+        values.push(column.numbers.clone());
+    }
+    ColumnStore { names, values }
+}
+
+fn eval_at(compiled: &CompiledExpr, row: usize) -> Result<f64, String> {
+    ROW.with(|current| current.set(row));
+    let row_number = row as f64 + 1.0;
+    compiled.eval(&[("i", row_number), ("row", row_number)])
+}
+
+fn write_evaluated(column: &mut crate::table::Column, row: usize, value: Result<f64, String>, report: &mut RecalcReport) {
+    match value {
+        Ok(number) if number.is_finite() => {
+            write_number(column, row, Some(number));
+            report.written += 1;
+        }
+        Ok(_) => {
+            write_number(column, row, None);
+            report.warnings += 1;
+            if report.first_error.is_none() {
+                report.first_error = Some(crate::locale::t("公式没有得到有限数值").into());
+            }
+        }
+        Err(err) => {
+            write_number(column, row, None);
+            note_formula_error(report, &err);
+        }
+    }
+}
+
+fn write_number(column: &mut crate::table::Column, row: usize, value: Option<f64>) {
+    if row >= column.len() {
+        column.resize(row + 1);
+    }
+    column.numbers[row] = value.filter(|number| number.is_finite());
+    column.texts[row] = match column.numbers[row] {
+        Some(number) => column.format_value(number),
+        None => String::new(),
+    };
+}
+
+fn note_formula_error(report: &mut RecalcReport, err: &str) {
+    report.warnings += 1;
+    if report.first_error.is_none() {
+        report.first_error = Some(explain_error(err));
+    }
 }
 
 pub fn parameter_names(expr: &str) -> Vec<String> {
@@ -325,6 +501,8 @@ fn math_context() -> HashMapContext {
         .expect("col");
     ctx.set_function("cell".to_string(), Function::new(cell_fn))
         .expect("cell");
+    ctx.set_function("tablecol".to_string(), Function::new(tablecol_fn))
+        .expect("tablecol");
     ctx
 }
 
@@ -354,6 +532,44 @@ fn col_fn(arg: &Value) -> Result<Value, EvalexprError> {
     }
     let index = index_from_value(arg)?;
     Ok(Value::Float(lookup_index(index, row)))
+}
+
+fn tablecol_fn(arg: &Value) -> Result<Value, EvalexprError> {
+    let tuple = arg.as_fixed_len_tuple(2)?;
+    let table = tuple[0].as_string()?;
+    let row = ROW.with(|row| row.get());
+    let value = if let Ok(name) = tuple[1].as_string() {
+        lookup_foreign(&table, Some(name.as_str()), None, row)
+    } else {
+        let index = index_from_value(&tuple[1])?;
+        lookup_foreign(&table, None, Some(index), row)
+    };
+    Ok(Value::Float(value))
+}
+
+fn lookup_foreign(table: &str, name: Option<&str>, index: Option<usize>, row: usize) -> f64 {
+    TABLES.with(|tables| {
+        let tables = tables.borrow();
+        let Some(store) = tables.get(table) else {
+            return f64::NAN;
+        };
+        let index = if let Some(name) = name {
+            if let Some(index) = store.names.get(name).copied() {
+                index
+            } else if let Some(index) = letter_index(name) {
+                index
+            } else {
+                return f64::NAN;
+            }
+        } else {
+            index.unwrap_or(usize::MAX)
+        };
+        store
+            .values
+            .get(index)
+            .and_then(|values| values.get(row).copied().flatten())
+            .unwrap_or(f64::NAN)
+    })
 }
 
 fn cell_fn(arg: &Value) -> Result<Value, EvalexprError> {
@@ -491,7 +707,7 @@ fn explain_evalexpr(err: &str) -> String {
         return crate::trf!("不认识变量「{name}」。列要写成 col(\"列名\")，当前行号用 i 或 row。", "Unknown variable \"{name}\". Write a column as col(\"name\"). The current row is i or row.", name = name);
     }
     if let Some(name) = quoted_after(err, "function identifier is not bound") {
-        return crate::trf!("没有函数「{name}」。可用 sin、cos、exp、ln、log、sqrt 等，列引用用 col(\"列名\")。", "Unknown function \"{name}\". You can use sin, cos, exp, ln, log, sqrt, and col(\"name\") for a column.", name = name);
+        return crate::trf!("没有函数「{name}」。可用 sin、cos、exp、ln、log、sqrt 等，列引用用 col(\"列名\") 或 tablecol(\"表\",\"列\")。", "Unknown function \"{name}\". You can use sin, cos, exp, ln, log, sqrt, col(\"name\"), or tablecol(\"table\", \"column\").", name = name);
     }
     if lower.contains("expected") && lower.contains("argument") {
         return crate::trf!("函数的参数个数不对。{err}", "Wrong number of function arguments. {err}", err = err);
@@ -513,6 +729,78 @@ fn quoted_after(err: &str, marker: &str) -> Option<String> {
         return None;
     }
     err.rsplit([':', ' ', '\'', '"', '.']).find(|part| !part.is_empty()).map(|part| part.to_string())
+}
+
+/// 把 `tablecol("表","旧列")` 里的列名换成新列名。表名不符的不动。
+pub(crate) fn rewrite_tablecol_column(formula: &str, table: &str, old: &str, new: &str) -> String {
+    rewrite_tablecol(formula, table, old, new, true)
+}
+
+/// 把 `tablecol("旧表", …)` 的表名换成新表名。
+pub(crate) fn rewrite_tablecol_table(formula: &str, old: &str, new: &str) -> String {
+    rewrite_tablecol(formula, old, new, "", false)
+}
+
+fn rewrite_tablecol(formula: &str, first_old: &str, first_new: &str, second_new: &str, column: bool) -> String {
+    if formula.is_empty() || (column && first_new == second_new) || (!column && first_old == first_new) {
+        return formula.to_string();
+    }
+    let mut out = String::with_capacity(formula.len());
+    let mut i = 0;
+    while i < formula.len() {
+        let prev_ok = i == 0 || !is_ident_continue(formula[..i].chars().next_back().unwrap_or(' '));
+        if prev_ok {
+            if let Some((text, consumed)) = replace_tablecol(&formula[i..], first_old, first_new, second_new, column) {
+                out.push_str(&text);
+                i += consumed;
+                continue;
+            }
+        }
+        let ch = formula[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn replace_tablecol(rest: &str, first_old: &str, first_new: &str, second_new: &str, column: bool) -> Option<(String, usize)> {
+    let after = rest.strip_prefix("tablecol")?;
+    if after.chars().next().is_some_and(is_ident_continue) {
+        return None;
+    }
+    let mut offset = "tablecol".len();
+    offset += skip_ws(&rest[offset..]);
+    if !rest[offset..].starts_with('(') {
+        return None;
+    }
+    offset += 1;
+    offset += skip_ws(&rest[offset..]);
+    let (table_name, table_len) = parse_formula_string(&rest[offset..])?;
+    offset += table_len;
+    offset += skip_ws(&rest[offset..]);
+    if !rest[offset..].starts_with(',') {
+        return None;
+    }
+    offset += 1;
+    offset += skip_ws(&rest[offset..]);
+    let (column_name, column_len) = parse_formula_string(&rest[offset..])?;
+    let matched = if column {
+        table_name == first_old && column_name == first_new
+    } else {
+        table_name == first_old
+    };
+    if !matched {
+        return None;
+    }
+    offset += column_len;
+    let new_table = if column { table_name } else { first_new.to_string() };
+    let new_column = if column { second_new.to_string() } else { column_name };
+    let text = format!(
+        "tablecol(\"{}\", \"{}\"",
+        escape_formula_string(&new_table),
+        escape_formula_string(&new_column)
+    );
+    Some((text, offset))
 }
 
 /// 把公式里的 `col("旧名")` 和 `cell("旧名", …)` 换成新列名。其它写法保持不动。
@@ -722,5 +1010,43 @@ mod tests {
         assert!((value - 2.0).abs() < 1e-12);
         let value = CompiledExpr::compile("ln(e)").unwrap().eval(&[]).unwrap();
         assert!((value - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cell_formulas_and_tablecol() {
+        let mut source = Table::new(TableId(1), "Table1");
+        source.columns.clear();
+        source.add_numeric_column("time", ColumnMode::X, &[10.0, 20.0, 30.0]);
+
+        let mut table = Table::new(TableId(2), "Table2");
+        table.columns.clear();
+        table.add_numeric_column("A", ColumnMode::X, &[1.0, 2.0, 3.0]);
+        table.add_column("B", ColumnMode::Y);
+        table.add_column("C", ColumnMode::Y);
+        table.columns[1].set_cell_formula_raw(0, "col(\"A\")+10");
+        table.columns[1].set_cell_formula_raw(1, "=col(\"A\")*col(\"A\")");
+        table.columns[2].formula = "tablecol(\"Table1\", \"time\")+1".into();
+        let report = recalculate_table(&mut table, &[source]);
+        assert!(report.first_error.is_none(), "{:?}", report.first_error);
+        assert_eq!(table.columns[1].numbers[0], Some(11.0));
+        assert_eq!(table.columns[1].numbers[1], Some(4.0));
+        assert!(table.columns[1].numbers[2].is_none());
+        assert_eq!(table.columns[2].numbers, vec![Some(11.0), Some(21.0), Some(31.0)]);
+
+        table.columns[1].set_text(2, "=tablecol(\"Table1\", 1)+5");
+        commit_cell(&mut table, 1, 2, false, &[]).unwrap_err();
+        let mut source = Table::new(TableId(1), "Table1");
+        source.columns.clear();
+        source.add_numeric_column("time", ColumnMode::X, &[10.0, 20.0, 30.0]);
+        commit_cell(&mut table, 1, 2, false, &[source]).unwrap();
+        assert_eq!(table.columns[1].numbers[2], Some(35.0));
+        assert_eq!(
+            rewrite_tablecol_column("tablecol(\"Table1\", \"time\")+col(\"A\")", "Table1", "time", "t"),
+            "tablecol(\"Table1\", \"t\")+col(\"A\")"
+        );
+        assert_eq!(
+            rewrite_tablecol_table("tablecol(\"Table1\", \"t\")", "Table1", "数据"),
+            "tablecol(\"数据\", \"t\")"
+        );
     }
 }

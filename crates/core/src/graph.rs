@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::datetime::AxisClock;
 use crate::tr;
 use crate::util::{default_true, palette_color};
 use crate::{GraphId, MatrixId, TableId};
@@ -198,6 +199,40 @@ impl CurveStyle {
     }
 }
 
+/// 刻度写成普通数字，还是日期、时刻、日期时间。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TickKind {
+    #[default]
+    Number,
+    Date,
+    Time,
+    DateTime,
+}
+
+impl TickKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            TickKind::Number => tr!("数字", "Number"),
+            TickKind::Date => tr!("日期", "Date"),
+            TickKind::Time => tr!("时刻", "Time"),
+            TickKind::DateTime => tr!("日期时间", "Date and time"),
+        }
+    }
+
+    pub fn all() -> &'static [TickKind] {
+        &[TickKind::Number, TickKind::Date, TickKind::Time, TickKind::DateTime]
+    }
+
+    pub fn clock(self) -> AxisClock {
+        match self {
+            TickKind::Number => AxisClock::Number,
+            TickKind::Date => AxisClock::Date,
+            TickKind::Time => AxisClock::Time,
+            TickKind::DateTime => AxisClock::DateTime,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Axis {
@@ -215,6 +250,9 @@ pub struct Axis {
     pub step: Option<f64>,
     /// 相邻主刻度之间分成几段。空表示 4 等分。
     pub minor_count: Option<u8>,
+    pub tick_kind: TickKind,
+    /// 刻度文字格式。空字符串按范围自动选短格式。写法同列的日期格式。
+    pub tick_pattern: String,
 }
 
 impl Default for Axis {
@@ -231,6 +269,8 @@ impl Default for Axis {
             tick_size: 12.0,
             step: None,
             minor_count: None,
+            tick_kind: TickKind::Number,
+            tick_pattern: String::new(),
         }
     }
 }

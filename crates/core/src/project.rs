@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSpec, SurfaceSource};
+use crate::graph::{Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSpec, SurfaceSource, TickKind};
 use crate::matrix::Matrix;
-use crate::table::{ColumnMode, Table, TableId};
+use crate::table::{ColumnMode, ColumnType, Table, TableId};
 use crate::util::unique_name;
 use crate::{GraphId, MatrixId, NoteId};
 
@@ -278,31 +278,60 @@ impl Project {
         if self.tables.iter().any(|t| t.id != id && t.name == name) {
             return Err(crate::locale::t("已有同名表格").into());
         }
+        let old = self.table(id).ok_or(crate::locale::t("找不到表格"))?.name.clone();
+        if old == name {
+            return Ok(());
+        }
         self.table_mut(id).ok_or(crate::locale::t("找不到表格"))?.name = name.to_string();
+        for table in &mut self.tables {
+            for column in &mut table.columns {
+                column.formula = crate::formula::rewrite_tablecol_table(&column.formula, &old, name);
+                for cell in &mut column.cell_formulas {
+                    *cell = crate::formula::rewrite_tablecol_table(cell, &old, name);
+                }
+            }
+        }
         Ok(())
     }
 
-    /// 重命名一列，并把本表公式里的 `col("旧名")`、`cell("旧名", …)` 改成新名字。
+    /// 重命名一列，并把公式里的 `col("旧名")`、`cell("旧名", …)`、`tablecol("本表","旧名")` 改成新名字。
     /// 曲线按列序号引用，不在这里改。
     pub fn rename_table_column(&mut self, id: TableId, index: usize, name: &str) -> Result<(), String> {
         if name.trim().is_empty() {
             return Err(crate::locale::t("名称不能为空").into());
         }
-        let table = self.table_mut(id).ok_or(crate::locale::t("找不到表格"))?;
-        if index >= table.columns.len() {
-            return Err(crate::locale::t("找不到列").into());
+        let (table_name, old) = {
+            let table = self.table(id).ok_or(crate::locale::t("找不到表格"))?;
+            if index >= table.columns.len() {
+                return Err(crate::locale::t("找不到列").into());
+            }
+            if table.columns.iter().enumerate().any(|(i, column)| i != index && column.name == name) {
+                return Err(crate::locale::t("已有同名列").into());
+            }
+            let old = table.columns[index].name.clone();
+            if old == name {
+                return Ok(());
+            }
+            (table.name.clone(), old)
+        };
+        for table in &mut self.tables {
+            let same = table.id == id;
+            for column in &mut table.columns {
+                if same {
+                    column.formula = crate::formula::rewrite_column_refs(&column.formula, &old, name);
+                    for cell in &mut column.cell_formulas {
+                        *cell = crate::formula::rewrite_column_refs(cell, &old, name);
+                    }
+                }
+                column.formula = crate::formula::rewrite_tablecol_column(&column.formula, &table_name, &old, name);
+                for cell in &mut column.cell_formulas {
+                    *cell = crate::formula::rewrite_tablecol_column(cell, &table_name, &old, name);
+                }
+            }
+            if same {
+                table.columns[index].name = name.to_string();
+            }
         }
-        if table.columns.iter().enumerate().any(|(i, column)| i != index && column.name == name) {
-            return Err(crate::locale::t("已有同名列").into());
-        }
-        let old = table.columns[index].name.clone();
-        if old == name {
-            return Ok(());
-        }
-        for column in &mut table.columns {
-            column.formula = crate::formula::rewrite_column_refs(&column.formula, &old, name);
-        }
-        table.columns[index].name = name.to_string();
         Ok(())
     }
 
@@ -391,6 +420,7 @@ impl Project {
     }
 
     pub fn add_curves(&mut self, graph_id: GraphId, layer: usize, table_id: TableId, kind: CurveKind) -> Result<(), String> {
+        let layer_index = layer;
         let curves = {
             let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
             curves_from_table(table, kind)?
@@ -399,13 +429,46 @@ impl Project {
         if graph.layers.is_empty() {
             graph.layers.push(Layer::default());
         }
-        let layer = graph.layers.get_mut(layer).ok_or(crate::locale::t("找不到图层"))?;
+        let layer = graph.layers.get_mut(layer_index).ok_or(crate::locale::t("找不到图层"))?;
         let color_start = layer.curves.len();
         for (offset, mut curve) in curves.into_iter().enumerate() {
             curve.style = CurveStyle::from_index(color_start + offset);
             layer.curves.push(curve);
         }
+        self.adopt_axis_ticks(graph_id, layer_index, table_id);
         Ok(())
+    }
+
+    /// 新曲线的 X/Y 若是日期或时刻，而坐标轴还是普通数字，就把刻度改成对应的格式。
+    pub fn adopt_axis_ticks(&mut self, graph_id: GraphId, layer: usize, table_id: TableId) {
+        let Some(table) = self.table(table_id) else {
+            return;
+        };
+        let Some(source) = self
+            .graph(graph_id)
+            .and_then(|graph| graph.layers.get(layer))
+            .and_then(|layer| layer.curves.last())
+            .map(|curve| curve.source.clone())
+        else {
+            return;
+        };
+        let DataSource::Columns { x, y, .. } = source else {
+            return;
+        };
+        let x_info = table.columns.get(x).map(|column| (column.ty, column.time_format.clone()));
+        let y_info = table.columns.get(y).map(|column| (column.ty, column.time_format.clone()));
+        let Some(graph) = self.graph_mut(graph_id) else {
+            return;
+        };
+        let Some(layer) = graph.layers.get_mut(layer) else {
+            return;
+        };
+        if let Some((ty, format)) = x_info {
+            adopt_tick(&mut layer.x_axis, ty, &format);
+        }
+        if let Some((ty, format)) = y_info {
+            adopt_tick(&mut layer.y_axis, ty, &format);
+        }
     }
 
     pub fn plot_matrix(&mut self, matrix_id: MatrixId, kind: CurveKind) -> Result<GraphId, String> {
@@ -523,6 +586,21 @@ impl Project {
 
     fn graph_names(&self) -> Vec<String> {
         self.graphs.iter().map(|g| g.name.clone()).collect()
+    }
+}
+
+fn adopt_tick(axis: &mut crate::graph::Axis, ty: ColumnType, format: &str) {
+    let kind = match ty {
+        ColumnType::Date => TickKind::Date,
+        ColumnType::Time => TickKind::Time,
+        ColumnType::DateTime => TickKind::DateTime,
+        ColumnType::Numeric | ColumnType::Text => return,
+    };
+    if axis.tick_kind == TickKind::Number {
+        axis.tick_kind = kind;
+        if axis.tick_pattern.is_empty() {
+            axis.tick_pattern = format.to_string();
+        }
     }
 }
 

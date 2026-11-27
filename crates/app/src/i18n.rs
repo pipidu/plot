@@ -47,6 +47,9 @@ const FORMULA_HELP_ZH: &str = "\
   col(1)（从 1 开始的列位置，不看列名）
   cell(\"A\", 行号)
   i 或 row：从 1 开始的当前行号
+  tablecol(\"表名\", \"列名\") 或 tablecol(\"表名\", 1)：另一张表同一行的数
+
+某一格可以有自己的公式，计算时盖过这一列的公式。表格工具栏或右键菜单里的「公式编辑模式」会在格子里显示公式。以 = 开头的文本在离开格子时也会当成公式。
 
 例如：sin(col(\"X\")) * 2
 ";
@@ -68,6 +71,9 @@ Column formulas can also use:
   col(1) (the column in that position, starting at 1, ignoring the name)
   cell(\"A\", row)
   i or row: the current row number, starting at 1
+  tablecol(\"table\", \"column\") or tablecol(\"table\", 1): the same row of another table
+
+A cell can have its own formula, which overrides the column formula. Formula edit mode, on the table toolbar or the context menu, shows those formulas in the cells. Text that starts with = is also treated as a formula when you leave the cell.
 
 Example: sin(col(\"X\")) * 2
 ";

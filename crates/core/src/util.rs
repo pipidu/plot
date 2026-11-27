@@ -89,53 +89,28 @@ fn trim_sci(s: &str) -> String {
     format!("{}e{}", trim_plain(mant), exp)
 }
 
-/// 解析 `YYYY-MM-DD` 或 `YYYY/MM/DD`，返回 Unix 纪元起的天数。
+/// 固定小数位。`places` 超过 12 时按 12 位。
+pub fn format_fixed(v: f64, places: u8) -> String {
+    if !v.is_finite() {
+        return String::new();
+    }
+    let places = places.min(12) as usize;
+    format!("{v:.places$}")
+}
+
+/// 科学计数法，保留指定的小数位。
+pub fn format_scientific(v: f64, places: u8) -> String {
+    if !v.is_finite() {
+        return String::new();
+    }
+    let places = places.min(12) as usize;
+    format!("{v:.places$e}")
+}
+
+/// 解析日期，返回 Unix 纪元起的天数。接受 `YYYY-MM-DD`、`YYYY/MM/DD`、`YYYY.MM.DD`、
+/// `DD.MM.YYYY`、`DD/MM/YYYY` 和 `YYYYMMDD`。带时刻的字符串不在这里解析。
 pub fn parse_date(text: &str) -> Option<f64> {
-    let text = text.trim();
-    let parts: Vec<&str> = if text.contains('-') {
-        text.split('-').collect()
-    } else if text.contains('/') {
-        text.split('/').collect()
-    } else {
-        return None;
-    };
-    if parts.len() != 3 {
-        return None;
-    }
-    let year: i32 = parts[0].parse().ok()?;
-    let month: u32 = parts[1].parse().ok()?;
-    let day: u32 = parts[2].parse().ok()?;
-    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
-        return None;
-    }
-    Some(days_from_civil(year, month, day))
-}
-
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap(year) => 29,
-        2 => 28,
-        _ => 0,
-    }
-}
-
-fn is_leap(year: i32) -> bool {
-    let divisible = |n: i32| year.rem_euclid(n) == 0;
-    divisible(4) && (!divisible(100) || divisible(400))
-}
-
-/// Howard Hinnant 的公历转天数算法，1970-01-01 为 0。
-fn days_from_civil(year: i32, month: u32, day: u32) -> f64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u32;
-    let mp = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era as i64 * 146097 + doe as i64 - 719468;
-    days as f64
+    crate::datetime::parse_date_only(text)
 }
 
 #[cfg(test)]

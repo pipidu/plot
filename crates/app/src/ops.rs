@@ -551,6 +551,139 @@ pub fn filter_table(
     Ok(id)
 }
 
+fn stat_labels() -> Vec<String> {
+    vec![
+        sciplot_core::t("个数").into(),
+        sciplot_core::t("最小值").into(),
+        sciplot_core::t("最大值").into(),
+        sciplot_core::t("求和").into(),
+        sciplot_core::t("均值").into(),
+        sciplot_core::t("中位数").into(),
+        sciplot_core::t("标准差").into(),
+        sciplot_core::t("方差").into(),
+    ]
+}
+
+fn summary_values(summary: &sciplot_analysis::Summary) -> [f64; 8] {
+    [
+        summary.n as f64,
+        summary.min,
+        summary.max,
+        summary.sum,
+        summary.mean,
+        summary.median,
+        summary.stdev,
+        summary.variance,
+    ]
+}
+
+fn numeric_columns(table: &sciplot_core::Table, columns: &[usize]) -> Vec<usize> {
+    let picked: Vec<usize> = if columns.is_empty() {
+        (0..table.columns.len()).collect()
+    } else {
+        columns.to_vec()
+    };
+    picked
+        .into_iter()
+        .filter(|index| {
+            table
+                .columns
+                .get(*index)
+                .is_some_and(|column| column.ty == sciplot_core::ColumnType::Numeric)
+        })
+        .collect()
+}
+
+/// 把所选数值列的描述统计写成一张新表。行是统计量，列是原来的每一列，包含方差。
+pub fn column_stats_table(
+    project: &mut Project,
+    table: sciplot_core::TableId,
+    columns: &[usize],
+) -> Result<sciplot_core::TableId, String> {
+    let source = project.table(table).ok_or(sciplot_core::t("找不到表格"))?.clone();
+    let indexes = numeric_columns(&source, columns);
+    if indexes.is_empty() {
+        return Err(sciplot_core::t("没有可统计的数值列").into());
+    }
+    let mut summaries = Vec::new();
+    for index in indexes {
+        let column = &source.columns[index];
+        let Some(summary) = summarize(&column.finite_values()) else {
+            continue;
+        };
+        summaries.push((column.name.clone(), summary));
+    }
+    if summaries.is_empty() {
+        return Err(sciplot_core::t("这些列没有数值").into());
+    }
+    let id = project.new_table(&sciplot_core::trf!("列统计_{}", "Column stats {}", source.name));
+    let stat_table = project.table_mut(id).ok_or(sciplot_core::t("找不到表格"))?;
+    stat_table.columns.clear();
+    stat_table.add_column(sciplot_core::t("统计量"), sciplot_core::ColumnMode::X);
+    stat_table.columns[0].ty = sciplot_core::ColumnType::Text;
+    for (row, label) in stat_labels().iter().enumerate() {
+        stat_table.columns[0].set_text(row, label);
+    }
+    for (name, summary) in summaries {
+        let index = stat_table.add_column(name, sciplot_core::ColumnMode::Y);
+        stat_table.columns[index].set_numbers(&summary_values(&summary));
+    }
+    project.log_line(sciplot_core::trf!(
+        "已把「{}」的列统计写入新表。",
+        "Wrote column statistics for \"{}\" into a new table.",
+        source.name
+    ));
+    Ok(id)
+}
+
+/// 按行汇总所选数值列，每个原行在新表里占一行。
+pub fn row_stats_table(
+    project: &mut Project,
+    table: sciplot_core::TableId,
+    columns: &[usize],
+) -> Result<sciplot_core::TableId, String> {
+    let source = project.table(table).ok_or(sciplot_core::t("找不到表格"))?.clone();
+    let indexes = numeric_columns(&source, columns);
+    if indexes.is_empty() {
+        return Err(sciplot_core::t("没有可统计的数值列").into());
+    }
+    let nrows = source.nrows();
+    if nrows == 0 {
+        return Err(sciplot_core::t("表格没有数据行").into());
+    }
+    let id = project.new_table(&sciplot_core::trf!("行统计_{}", "Row stats {}", source.name));
+    let stat_table = project.table_mut(id).ok_or(sciplot_core::t("找不到表格"))?;
+    stat_table.columns.clear();
+    stat_table.add_column(sciplot_core::t("行"), sciplot_core::ColumnMode::X);
+    for label in stat_labels() {
+        stat_table.add_column(label, sciplot_core::ColumnMode::Y);
+    }
+    let row_index: Vec<f64> = (1..=nrows).map(|n| n as f64).collect();
+    stat_table.columns[0].set_numbers(&row_index);
+    for row in 0..nrows {
+        let values: Vec<f64> = indexes
+            .iter()
+            .filter_map(|index| {
+                let value = source.columns[*index].number_at(row);
+                value.is_finite().then_some(value)
+            })
+            .collect();
+        if let Some(summary) = summarize(&values) {
+            for (offset, value) in summary_values(&summary).into_iter().enumerate() {
+                stat_table.columns[offset + 1].set_text(row, &format_number(value));
+            }
+        } else {
+            stat_table.columns[1].set_text(row, "0");
+        }
+    }
+    project.log_line(sciplot_core::trf!(
+        "已把「{}」的行统计写入新表。",
+        "Wrote row statistics for \"{}\" into a new table.",
+        source.name
+    ));
+    Ok(id)
+}
+
 pub fn column_stats(
     project: &Project,
     table: sciplot_core::TableId,
@@ -762,5 +895,25 @@ mod tests {
             other => panic!("拟合线应是函数，实际 {other:?}"),
         }
         assert!(project.graph(graph).unwrap().layers[0].curves.len() > curves_after_wide);
+    }
+
+    #[test]
+    fn stats_tables_include_variance_and_rows() {
+        let mut project = Project::new("t");
+        let id = project.new_table("测量");
+        {
+            let table = project.table_mut(id).unwrap();
+            table.columns[0].set_numbers(&[1.0, 2.0, 3.0]);
+            table.columns[1].set_numbers(&[10.0, 20.0, 30.0]);
+        }
+        let stats = column_stats_table(&mut project, id, &[0, 1]).unwrap();
+        let table = project.table(stats).unwrap();
+        assert_eq!(table.columns[0].texts[7], "方差");
+        assert!((table.columns[1].numbers[7].unwrap() - 1.0).abs() < 1e-9);
+        assert!((table.columns[2].numbers[4].unwrap() - 20.0).abs() < 1e-9);
+        let rows = row_stats_table(&mut project, id, &[0, 1]).unwrap();
+        let table = project.table(rows).unwrap();
+        assert!((table.columns[0].numbers[1].unwrap() - 2.0).abs() < 1e-9);
+        assert!((table.columns[5].number_at(0) - 5.5).abs() < 1e-9);
     }
 }

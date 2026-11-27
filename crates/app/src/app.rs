@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
-    demo_project, export_csv_with, import_csv_with, tr, AnnotationKind, CsvEncoding, CurveKind,
-    DataSource, Graph, GraphId, History, MatrixId, NoteId, Project, SurfaceMode, SurfaceSource,
+    demo_project, export_csv_with, import_csv_files, import_csv_with, tr, AnnotationKind, CsvDelimiter,
+    CsvEncoding, CsvHeader, CsvImportOptions, CsvLayout, CurveKind, DataSource, DecimalMark, Graph, GraphId,
+    History, MatrixId, NoteId, NumericFormat, Project, SortMode, SurfaceMode, SurfaceSource,
     TableId,
 };
 use sciplot_plot::{
@@ -139,6 +140,9 @@ pub enum Dialog {
     ColumnProps {
         table: TableId,
         column: usize,
+        format: NumericFormat,
+        places: u8,
+        time_format: String,
     },
     RenameColumn {
         table: TableId,
@@ -150,6 +154,34 @@ pub enum Dialog {
         table: TableId,
         column: usize,
         ascending: bool,
+        mode: SortMode,
+        picked: Vec<bool>,
+    },
+    Stats {
+        table: TableId,
+        picked: Vec<bool>,
+    },
+    Normalize {
+        table: TableId,
+        picked: Vec<bool>,
+        whole: bool,
+    },
+    CellFormula {
+        table: TableId,
+        column: usize,
+        row: usize,
+        expr: String,
+        error: String,
+    },
+    ImportAscii {
+        encoding: CsvEncoding,
+        delimiter: CsvDelimiter,
+        header: CsvHeader,
+        decimal: DecimalMark,
+        skip: String,
+        layout: CsvLayout,
+        paths: String,
+        error: String,
     },
     Axis {
         graph: GraphId,
@@ -333,6 +365,10 @@ pub struct SciPlotApp {
     ann_drag: Option<AnnDrag>,
     pub(crate) selected_ann: Option<(GraphId, usize, u64)>,
     pub(crate) selected_column: Option<(TableId, usize)>,
+    /// 公式编辑模式只存在界面里，不写进项目文件。
+    pub(crate) formula_mode: bool,
+    pub(crate) cell_anchor: Option<(TableId, usize, usize)>,
+    pub(crate) cell_focus: Option<(TableId, usize, usize)>,
     active_layer: usize,
     pub(crate) curve: usize,
     pushed_edit: bool,
@@ -358,7 +394,7 @@ fn window_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok()
 }
 
-pub fn run() -> eframe::Result<()> {
+pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 800.0])
         .with_title(i18n::APP_TITLE);
@@ -372,8 +408,15 @@ pub fn run() -> eframe::Result<()> {
     eframe::run_native(
         i18n::APP_TITLE,
         options,
-        Box::new(|cc| {
-            let app = SciPlotApp::demo();
+        Box::new(move |cc| {
+            let app = match initial {
+                Some(path) => {
+                    let mut app = SciPlotApp::empty(Project::new(sciplot_core::t("未命名项目")));
+                    app.load_path(&path);
+                    app
+                }
+                None => SciPlotApp::demo(),
+            };
             fonts::install(&cc.egui_ctx, &app.fonts);
             Ok(Box::new(app))
         }),
@@ -413,6 +456,9 @@ impl SciPlotApp {
             ann_drag: None,
             selected_ann: None,
             selected_column: None,
+            formula_mode: false,
+            cell_anchor: None,
+            cell_focus: None,
             active_layer: 0,
             curve: 0,
             pushed_edit: false,
@@ -820,6 +866,153 @@ impl SciPlotApp {
         }
     }
 
+    pub(crate) fn cell_is_selected(&self, id: TableId, column: usize, row: usize) -> bool {
+        let Some((table, c0, r0, c1, r1)) = self.cell_bounds() else {
+            return false;
+        };
+        table == id && column >= c0 && column <= c1 && row >= r0 && row <= r1
+    }
+
+    fn cell_bounds(&self) -> Option<(TableId, usize, usize, usize, usize)> {
+        if let (Some((id, c0, r0)), Some((id2, c1, r1))) = (self.cell_anchor, self.cell_focus) {
+            if id == id2 {
+                return Some((id, c0.min(c1), r0.min(r1), c0.max(c1), r0.max(r1)));
+            }
+        }
+        let (id, column) = self.selected_column?;
+        let last = self.project.table(id).map(|table| table.nrows()).unwrap_or(0).saturating_sub(1);
+        Some((id, column, 0, column, last))
+    }
+
+    pub(crate) fn selection_text(&self) -> Option<String> {
+        let (id, c0, r0, c1, r1) = self.cell_bounds()?;
+        let table = self.project.table(id)?;
+        let text = table.copy_tsv(r0, c0, r1 - r0 + 1, c1 - c0 + 1);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    pub(crate) fn copy_cells(&mut self) -> bool {
+        let Some(text) = self.selection_text() else {
+            self.status = sciplot_core::t("没有选中的单元格").into();
+            return false;
+        };
+        match arboard::Clipboard::new().and_then(|mut clip| clip.set_text(text)) {
+            Ok(()) => {
+                self.status = sciplot_core::t("已复制单元格").into();
+                true
+            }
+            Err(err) => {
+                self.status = sciplot_core::trf!(
+                    "剪贴板不可用：{err}",
+                    "Clipboard is unavailable: {err}",
+                    err = err
+                );
+                false
+            }
+        }
+    }
+
+    pub(crate) fn cut_cells(&mut self) {
+        if !self.copy_cells() {
+            return;
+        }
+        let Some((id, c0, r0, c1, r1)) = self.cell_bounds() else {
+            return;
+        };
+        if self
+            .edit(sciplot_core::t("剪切单元格"), |project| {
+                let table = project.table_mut(id).ok_or(sciplot_core::t("找不到表格"))?;
+                for column in c0..=c1 {
+                    let Some(column) = table.columns.get_mut(column) else {
+                        continue;
+                    };
+                    for row in r0..=r1 {
+                        if row < column.cell_formulas.len() {
+                            column.cell_formulas[row].clear();
+                        }
+                        column.set_text(row, "");
+                    }
+                }
+                Ok(())
+            })
+            .is_some()
+        {
+            self.status = sciplot_core::t("已剪切单元格").into();
+        }
+    }
+
+    pub(crate) fn paste_cells(&mut self) {
+        let text = match arboard::Clipboard::new().and_then(|mut clip| clip.get_text()) {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => {
+                self.status = sciplot_core::t("剪贴板是空的").into();
+                return;
+            }
+            Err(err) => {
+                self.status = sciplot_core::trf!(
+                    "剪贴板不可用：{err}",
+                    "Clipboard is unavailable: {err}",
+                    err = err
+                );
+                return;
+            }
+        };
+        let Some((id, column, row, _, _)) = self.cell_bounds() else {
+            self.status = sciplot_core::t("没有选中的单元格").into();
+            return;
+        };
+        if let Some((rows, cols)) = self.edit(sciplot_core::t("粘贴单元格"), |project| {
+            project
+                .table_mut(id)
+                .ok_or(sciplot_core::t("找不到表格"))?
+                .paste_text(row, column, &text)
+        }) {
+            self.cell_focus = Some((
+                id,
+                column + cols.saturating_sub(1),
+                row + rows.saturating_sub(1),
+            ));
+            self.status = sciplot_core::trf!(
+                "已粘贴 {rows}×{cols}",
+                "Pasted {rows}×{cols}",
+                rows = rows,
+                cols = cols
+            );
+        }
+    }
+
+    pub(crate) fn import_prepared(
+        &mut self,
+        files: Vec<(String, Vec<u8>)>,
+        options: CsvImportOptions,
+        layout: CsvLayout,
+    ) -> Result<(), String> {
+        let named: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect();
+        let tables = import_csv_files(&named, &options, layout)?;
+        let count = tables.len();
+        let ids = self
+            .edit(sciplot_core::t("导入 CSV"), |project| {
+                let mut ids = Vec::new();
+                for table in tables {
+                    ids.push(project.insert_table(table));
+                }
+                Ok(ids)
+            })
+            .ok_or_else(|| self.status.clone())?;
+        for id in ids {
+            self.open_tab(Tab::Table(id));
+        }
+        self.status = sciplot_core::trf!("已导入 {count} 张表。", "Imported {count} tables.", count = count);
+        Ok(())
+    }
+
     fn ensure_api(&mut self, ctx: &egui::Context) {
         if !self.prefs.api_enabled {
             self.api = None;
@@ -1120,6 +1313,18 @@ fn shortcuts(app: &mut SciPlotApp, ctx: &egui::Context) {
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)) {
         delete_selected_annotation(app);
     }
+    let shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+    if matches!(app.focus, Some(Tab::Table(_))) {
+        if ctx.input_mut(|i| i.consume_key(shift, egui::Key::C)) {
+            app.copy_cells();
+        }
+        if ctx.input_mut(|i| i.consume_key(shift, egui::Key::X)) {
+            app.cut_cells();
+        }
+        if ctx.input_mut(|i| i.consume_key(shift, egui::Key::V)) {
+            app.paste_cells();
+        }
+    }
 }
 
 fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
@@ -1189,7 +1394,7 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
         start_file(app, PathAction::SaveAs, "");
     }
     if clicked(ui, sciplot_core::t("导入 CSV…"), "") {
-        start_file(app, PathAction::ImportCsv, "");
+        open_import(app);
     }
     if clicked(ui, sciplot_core::t("导出当前图形 PNG…"), "") {
         start_file(app, PathAction::ExportPng, "144");
@@ -1249,6 +1454,26 @@ fn edit_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     };
     if clicked(ui, delete_label, "") {
         delete_focused(app);
+    }
+    if matches!(app.focus, Some(Tab::Table(_))) {
+        ui.separator();
+        if clicked(ui, sciplot_core::t("复制单元格"), "Ctrl+Shift+C") {
+            app.copy_cells();
+        }
+        if clicked(ui, sciplot_core::t("剪切单元格"), "Ctrl+Shift+X") {
+            app.cut_cells();
+        }
+        if clicked(ui, sciplot_core::t("粘贴单元格"), "Ctrl+Shift+V") {
+            app.paste_cells();
+        }
+        let formula = if app.formula_mode {
+            sciplot_core::t("关闭公式编辑")
+        } else {
+            sciplot_core::t("公式编辑模式")
+        };
+        if clicked(ui, formula, "") {
+            app.formula_mode = !app.formula_mode;
+        }
     }
 }
 
@@ -1536,6 +1761,22 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
             app.pushed_name = false;
         }
     });
+    ui.horizontal(|ui| {
+        let label = if app.formula_mode {
+            sciplot_core::t("关闭公式编辑")
+        } else {
+            sciplot_core::t("公式编辑模式")
+        };
+        if ui.button(label).clicked() {
+            app.formula_mode = !app.formula_mode;
+        }
+        if ui.button(sciplot_core::t("复制单元格")).clicked() {
+            app.copy_cells();
+        }
+        if ui.button(sciplot_core::t("粘贴单元格")).clicked() {
+            app.paste_cells();
+        }
+    });
     ui.separator();
     let min_width = 46.0 + 120.0 * ncols as f32;
     egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -1564,6 +1805,9 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                         );
                         if response.clicked() || response.secondary_clicked() {
                             app.selected_column = Some((id, index));
+                            let last = nrows.saturating_sub(1);
+                            app.cell_anchor = Some((id, index, 0));
+                            app.cell_focus = Some((id, index, last));
                         }
                         if response.double_clicked() {
                             crate::context::open_rename_column(app, id, index);
@@ -1582,20 +1826,28 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                             egui::Label::new(format!("{}", row_index + 1))
                                 .sense(egui::Sense::click()),
                         );
+                        if response.clicked() {
+                            app.cell_anchor = Some((id, 0, row_index));
+                            app.cell_focus = Some((id, ncols.saturating_sub(1), row_index));
+                        }
                         response
                             .context_menu(|ui| crate::context::table_row(app, ui, id, row_index));
                     });
                     for column in 0..ncols {
                         row.col(|ui| {
+                            let formula_mode = app.formula_mode;
                             let mut text = app
                                 .project
                                 .table(id)
                                 .and_then(|t| t.columns.get(column))
-                                .map(|c| c.display(row_index))
+                                .map(|c| c.editor_text(row_index, formula_mode))
                                 .unwrap_or_default();
-                            let mut output = egui::TextEdit::singleline(&mut text)
-                                .id(ui.id().with(("cell", column, row_index)))
-                                .show(ui);
+                            let mut edit = egui::TextEdit::singleline(&mut text)
+                                .id(ui.id().with(("cell", column, row_index)));
+                            if app.cell_is_selected(id, column, row_index) {
+                                edit = edit.background_color(egui::Color32::from_rgb(210, 228, 248));
+                            }
+                            let mut output = edit.show(ui);
                             let response = output.response.clone();
                             let arm_cell = app.arm_cell_focus == Some(id)
                                 && app.dialog.is_none()
@@ -1621,7 +1873,12 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                             {
                                 app.status = sciplot_core::t("已写入单元格").into();
                             }
-                            if response.secondary_clicked() {
+                            if response.clicked() || response.secondary_clicked() {
+                                let shift = ui.input(|input| input.modifiers.shift);
+                                if !shift || app.cell_anchor.map(|(table, _, _)| table) != Some(id) {
+                                    app.cell_anchor = Some((id, column, row_index));
+                                }
+                                app.cell_focus = Some((id, column, row_index));
                                 app.selected_column = Some((id, column));
                             }
                             response.context_menu(|ui| {
@@ -1639,11 +1896,36 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                                     .table_mut(id)
                                     .and_then(|t| t.columns.get_mut(column))
                                 {
-                                    column.set_text(row_index, &text);
+                                    if formula_mode {
+                                        column.set_cell_formula_raw(row_index, &text);
+                                    } else {
+                                        column.set_text(row_index, &text);
+                                    }
                                 }
                             }
                             if response.lost_focus() {
+                                let commit = app.pushed_edit || text.trim_start().starts_with('=');
                                 app.pushed_edit = false;
+                                if commit {
+                                    let others: Vec<sciplot_core::Table> = app
+                                        .project
+                                        .tables
+                                        .iter()
+                                        .filter(|table| table.id != id)
+                                        .cloned()
+                                        .collect();
+                                    if let Some(table) = app.project.table_mut(id) {
+                                        if let Err(err) = sciplot_core::commit_cell(
+                                            table,
+                                            column,
+                                            row_index,
+                                            formula_mode,
+                                            &others,
+                                        ) {
+                                            app.status = err;
+                                        }
+                                    }
+                                }
                             }
                         });
                     }
@@ -2627,6 +2909,19 @@ fn load_demo(app: &mut SciPlotApp) {
     app.status = sciplot_core::t("已重新载入示例项目").into();
 }
 
+pub(crate) fn open_import(app: &mut SciPlotApp) {
+    app.dialog = Some(Dialog::ImportAscii {
+        encoding: app.prefs.csv_encoding,
+        delimiter: CsvDelimiter::Auto,
+        header: CsvHeader::Auto,
+        decimal: DecimalMark::Dot,
+        skip: "0".into(),
+        layout: CsvLayout::Separate,
+        paths: String::new(),
+        error: String::new(),
+    });
+}
+
 pub(crate) fn start_file(app: &mut SciPlotApp, action: PathAction, extra: &str) {
     let file_name = default_file_name(app, action);
     let full = if file_name.is_empty() {
@@ -2881,5 +3176,22 @@ mod tests {
             tabs.len()
                 < app.project.tables.len() + app.project.graphs.len() + app.project.matrices.len()
         );
+    }
+
+    #[test]
+    fn cell_selection_copies_a_tsv_rectangle() {
+        let mut app = SciPlotApp::empty(Project::new("t"));
+        let id = app.project.new_table("测量");
+        {
+            let table = app.project.table_mut(id).unwrap();
+            table.columns[0].set_numbers(&[1.0, 2.0]);
+            table.columns[1].set_numbers(&[10.0, 20.0]);
+        }
+        app.cell_anchor = Some((id, 0, 0));
+        app.cell_focus = Some((id, 1, 1));
+        let text = app.selection_text().unwrap();
+        assert_eq!(text, "1\t10\n2\t20");
+        assert!(app.cell_is_selected(id, 1, 0));
+        assert!(!app.cell_is_selected(id, 0, 2));
     }
 }

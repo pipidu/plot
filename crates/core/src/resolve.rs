@@ -1,7 +1,7 @@
 use crate::formula::CompiledExpr;
 use crate::graph::{Curve, CurveKind, DataSource};
 use crate::matrix::Matrix;
-use crate::table::Column;
+use crate::table::{Column, ColumnMode};
 use crate::Project;
 
 #[derive(Clone, Debug)]
@@ -50,6 +50,8 @@ pub struct SeriesData {
     pub dx: Vec<f64>,
     pub dy: Vec<f64>,
     pub labels: Vec<String>,
+    /// 点旁边的文字，来自角色为「标签」的列。和分类轴用的 `labels` 分开。
+    pub point_labels: Vec<String>,
     pub grid: Option<GridData>,
 }
 
@@ -75,6 +77,7 @@ pub fn resolve_curve(project: &Project, curve: &Curve) -> Result<SeriesData, Str
         dx: Vec::new(),
         dy: Vec::new(),
         labels: Vec::new(),
+        point_labels: Vec::new(),
         grid: None,
     };
     match &curve.source {
@@ -94,6 +97,11 @@ pub fn resolve_curve(project: &Project, curve: &Curve) -> Result<SeriesData, Str
             series.x = pad(xs, n);
             series.y = pad(ys, n);
             series.labels = if labels.len() == n { labels } else { Vec::new() };
+            if let Some(index) = label_column(table, *x, *y) {
+                series.point_labels = (0..n)
+                    .map(|row| table.columns[index].display(row))
+                    .collect();
+            }
             if let Some(index) = x_err {
                 series.x_err = pad(column_numbers(table.columns.get(*index).ok_or(crate::locale::t("x 误差列不存在"))?), n);
             }
@@ -166,6 +174,24 @@ pub fn sample_expr(expr: &str, min: f64, max: f64, samples: usize, var: &str) ->
         ys.push(y);
     }
     Ok((xs, ys))
+}
+
+fn label_column(table: &crate::table::Table, x: usize, y: usize) -> Option<usize> {
+    let labels: Vec<usize> = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(index, column)| column.mode == ColumnMode::Label && *index != x && *index != y)
+        .map(|(index, _)| index)
+        .collect();
+    if labels.is_empty() {
+        return None;
+    }
+    if labels.contains(&(y.saturating_add(1))) {
+        Some(y + 1)
+    } else {
+        labels.first().copied()
+    }
 }
 
 fn column_numbers(column: &Column) -> Vec<f64> {
