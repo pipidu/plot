@@ -282,6 +282,30 @@ impl Project {
         Ok(())
     }
 
+    /// 重命名一列，并把本表公式里的 `col("旧名")`、`cell("旧名", …)` 改成新名字。
+    /// 曲线按列序号引用，不在这里改。
+    pub fn rename_table_column(&mut self, id: TableId, index: usize, name: &str) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err(crate::locale::t("名称不能为空").into());
+        }
+        let table = self.table_mut(id).ok_or(crate::locale::t("找不到表格"))?;
+        if index >= table.columns.len() {
+            return Err(crate::locale::t("找不到列").into());
+        }
+        if table.columns.iter().enumerate().any(|(i, column)| i != index && column.name == name) {
+            return Err(crate::locale::t("已有同名列").into());
+        }
+        let old = table.columns[index].name.clone();
+        if old == name {
+            return Ok(());
+        }
+        for column in &mut table.columns {
+            column.formula = crate::formula::rewrite_column_refs(&column.formula, &old, name);
+        }
+        table.columns[index].name = name.to_string();
+        Ok(())
+    }
+
     pub fn to_json(&self) -> Result<String, String> {
         let file = ProjectFile {
             format: FORMAT_VERSION,
@@ -724,6 +748,32 @@ mod tests {
         project.remove_table_column(table_id, 2).unwrap();
         assert!(project.graph(graph_id).unwrap().layers[0].curves.is_empty());
         assert!(project.log.iter().any(|line| line.contains("因列被删除而移除")));
+    }
+
+    #[test]
+    fn rename_column_rewrites_formulas_and_rejects_duplicates() {
+        let mut project = Project::new("p");
+        let table_id = project.new_table("t");
+        {
+            let table = project.table_mut(table_id).unwrap();
+            table.columns[0].name = "温度".into();
+            table.columns[1].formula = "col(\"温度\")*2 + cell(\"温度\", i)".into();
+            table.add_column("备注", ColumnMode::None);
+            table.columns[2].formula = "col(\"温度\") + col(1) + column(\"温度\")".into();
+        }
+        let err = project.rename_table_column(table_id, 0, "备注").unwrap_err();
+        assert!(err.contains("同名"), "{err}");
+        assert!(project.rename_table_column(table_id, 0, "  ").is_err());
+        project.rename_table_column(table_id, 0, "气温").unwrap();
+        let table = project.table(table_id).unwrap();
+        assert_eq!(table.columns[0].name, "气温");
+        assert_eq!(table.columns[1].formula, "col(\"气温\")*2 + cell(\"气温\", i)");
+        assert_eq!(table.columns[2].formula, "col(\"气温\") + col(1) + column(\"温度\")");
+        project.rename_table_column(table_id, 0, "a\"b\\c").unwrap();
+        assert_eq!(
+            project.table(table_id).unwrap().columns[1].formula,
+            "col(\"a\\\"b\\\\c\")*2 + cell(\"a\\\"b\\\\c\", i)"
+        );
     }
 
     #[test]

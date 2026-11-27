@@ -515,6 +515,111 @@ fn quoted_after(err: &str, marker: &str) -> Option<String> {
     err.rsplit([':', ' ', '\'', '"', '.']).find(|part| !part.is_empty()).map(|part| part.to_string())
 }
 
+/// 把公式里的 `col("旧名")` 和 `cell("旧名", …)` 换成新列名。其它写法保持不动。
+pub(crate) fn rewrite_column_refs(formula: &str, old: &str, new: &str) -> String {
+    if old == new || formula.is_empty() {
+        return formula.to_string();
+    }
+    let mut out = String::with_capacity(formula.len());
+    let mut i = 0;
+    while i < formula.len() {
+        let prev_ok = i == 0 || !is_ident_continue(formula[..i].chars().next_back().unwrap_or(' '));
+        if prev_ok {
+            if let Some((text, consumed)) = replace_named_call(&formula[i..], "col", old, new, true) {
+                out.push_str(&text);
+                i += consumed;
+                continue;
+            }
+            if let Some((text, consumed)) = replace_named_call(&formula[i..], "cell", old, new, false) {
+                out.push_str(&text);
+                i += consumed;
+                continue;
+            }
+        }
+        let ch = formula[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn replace_named_call(rest: &str, func: &str, old: &str, new: &str, expect_paren: bool) -> Option<(String, usize)> {
+    let after = rest.strip_prefix(func)?;
+    if after.chars().next().is_some_and(is_ident_continue) {
+        return None;
+    }
+    let mut offset = func.len();
+    offset += skip_ws(&rest[offset..]);
+    if !rest[offset..].starts_with('(') {
+        return None;
+    }
+    offset += 1;
+    offset += skip_ws(&rest[offset..]);
+    let (value, literal_len) = parse_formula_string(&rest[offset..])?;
+    if value != old {
+        return None;
+    }
+    offset += literal_len;
+    if expect_paren {
+        offset += skip_ws(&rest[offset..]);
+        if !rest[offset..].starts_with(')') {
+            return None;
+        }
+        offset += 1;
+    }
+    let escaped = escape_formula_string(new);
+    let text = if expect_paren {
+        format!("{func}(\"{escaped}\")")
+    } else {
+        format!("{func}(\"{escaped}\"")
+    };
+    Some((text, offset))
+}
+
+fn skip_ws(text: &str) -> usize {
+    text.chars().take_while(|c| c.is_whitespace()).map(char::len_utf8).sum()
+}
+
+fn parse_formula_string(text: &str) -> Option<(String, usize)> {
+    let mut chars = text.chars();
+    if chars.next() != Some('"') {
+        return None;
+    }
+    let mut value = String::new();
+    let mut len = 1usize;
+    loop {
+        let ch = chars.next()?;
+        len += ch.len_utf8();
+        match ch {
+            '"' => return Some((value, len)),
+            '\\' => match chars.next()? {
+                '"' => {
+                    len += 1;
+                    value.push('"');
+                }
+                '\\' => {
+                    len += 1;
+                    value.push('\\');
+                }
+                _ => return None,
+            },
+            other => value.push(other),
+        }
+    }
+}
+
+fn escape_formula_string(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }

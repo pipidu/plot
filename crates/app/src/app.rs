@@ -140,6 +140,12 @@ pub enum Dialog {
         table: TableId,
         column: usize,
     },
+    RenameColumn {
+        table: TableId,
+        column: usize,
+        name: String,
+        error: String,
+    },
     Sort {
         table: TableId,
         column: usize,
@@ -1440,6 +1446,9 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
                         );
                         if response.clicked() || response.secondary_clicked() {
                             app.selected_column = Some((id, index));
+                        }
+                        if response.double_clicked() {
+                            crate::context::open_rename_column(app, id, index);
                         }
                         response.context_menu(|ui| {
                             crate::context::table_column(app, ui, id, index, None)

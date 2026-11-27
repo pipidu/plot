@@ -126,6 +126,21 @@ pub(crate) fn tree_note(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
     }
 }
 
+pub(crate) fn open_rename_column(app: &mut SciPlotApp, table: TableId, column: usize) {
+    let name = app
+        .project
+        .table(table)
+        .and_then(|item| item.columns.get(column))
+        .map(|col| col.name.clone())
+        .unwrap_or_default();
+    app.dialog = Some(Dialog::RenameColumn {
+        table,
+        column,
+        name,
+        error: String::new(),
+    });
+}
+
 pub(crate) fn table_column(
     app: &mut SciPlotApp,
     ui: &mut egui::Ui,
@@ -142,6 +157,9 @@ pub(crate) fn table_column(
         .unwrap_or_else(|| sciplot_core::t("列").into());
     ui.label(name);
     ui.separator();
+    if clicked_menu(ui, sciplot_core::t("重命名此列…")) {
+        open_rename_column(app, table, column);
+    }
     if clicked_menu(ui, sciplot_core::t("在左侧插入列")) {
         insert_column(app, table, column);
     }

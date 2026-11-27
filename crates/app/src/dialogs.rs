@@ -98,6 +98,7 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::MatrixFormula { .. } => sciplot_core::t("矩阵公式").into(),
         Dialog::NewMatrix { .. } => sciplot_core::t("新建矩阵").into(),
         Dialog::ColumnProps { .. } => sciplot_core::t("列类型与角色").into(),
+        Dialog::RenameColumn { .. } => sciplot_core::t("重命名列").into(),
         Dialog::Sort { .. } => sciplot_core::t("排序").into(),
         Dialog::Axis { .. } => sciplot_core::t("坐标轴").into(),
         Dialog::ConfirmDelete { .. } => sciplot_core::t("确认删除").into(),
@@ -142,6 +143,12 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         Dialog::MatrixFormula { matrix, expr } => matrix_formula(app, ui, *matrix, expr),
         Dialog::NewMatrix { name, rows, cols } => new_matrix(app, ui, name, rows, cols),
         Dialog::ColumnProps { table, column } => column_props(app, ui, *table, *column),
+        Dialog::RenameColumn {
+            table,
+            column,
+            name,
+            error,
+        } => rename_column(app, ui, *table, *column, name, error),
         Dialog::Sort {
             table,
             column,
@@ -881,7 +888,7 @@ fn column_props(
         current.mode.label()
     ));
     ui.label(sciplot_core::t(
-        "点下面的类型或角色，会立刻改这一列。名称可以在表头左边的表格名称旁改列名。",
+        "点下面的类型或角色，会立刻改这一列。列名用表头右键「重命名此列…」，或双击表头。",
     ));
     if ui
         .button(sciplot_core::trf!(
@@ -908,6 +915,50 @@ fn column_props(
         }
     });
     !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+fn rename_column(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    table: sciplot_core::TableId,
+    column: usize,
+    name: &mut String,
+    error: &mut String,
+) -> bool {
+    ui.label(sciplot_core::t("名称"));
+    ui.text_edit_singleline(name);
+    if !error.is_empty() {
+        ui.colored_label(egui::Color32::from_rgb(176, 32, 32), error.as_str());
+    }
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if action_button(ui, sciplot_core::t("确定")) {
+            let new_name = name.clone();
+            let current = app
+                .project
+                .table(table)
+                .and_then(|item| item.columns.get(column))
+                .map(|col| col.name.clone());
+            if current.as_deref() == Some(new_name.as_str()) {
+                stay = false;
+            } else if app
+                .edit(sciplot_core::t("重命名列"), |project| {
+                    project.rename_table_column(table, column, &new_name)
+                })
+                .is_some()
+            {
+                error.clear();
+                app.status = sciplot_core::t("已重命名列").into();
+                stay = false;
+            } else {
+                *error = app.status.clone();
+            }
+        }
+        if ui.button(sciplot_core::t("取消")).clicked() {
+            stay = false;
+        }
+    });
+    stay
 }
 
 fn apply_column(
