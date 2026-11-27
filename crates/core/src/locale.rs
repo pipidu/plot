@@ -129,17 +129,17 @@ macro_rules! trf {
 
 /// 把带参数的句子填进当前语言。简体用中文，英语用英文。
 /// 其余七种语言用 `lang_formats` 里的格式串，孔按中文的顺序填入已经格式化的文字。
-/// 没有收录时留简体中文，不再改用英文。
+/// 状态栏那一批都在词表里。没有收录的句子仍用英文，和第五批的短句回落一样。
 pub fn fill_trf(zh_template: &str, zh_filled: String, en_filled: String) -> String {
     match language() {
         Language::Zh => zh_filled,
         Language::En => en_filled,
         other => {
             let Some(translated) = crate::lang_formats::template(other, zh_template) else {
-                return zh_filled;
+                return en_filled;
             };
             apply_holes(translated, &extract_holes(zh_template, &zh_filled).unwrap_or_default())
-                .unwrap_or(zh_filled)
+                .unwrap_or(en_filled)
         }
     }
 }
@@ -331,7 +331,19 @@ mod tests {
             assert!(printed.contains("200"), "{printed}");
             assert!(!printed.contains("Printed"), "{printed}");
             let missing = crate::trf!("完全没有收录 {}", "Totally missing {}", "x");
-            assert_eq!(missing, "完全没有收录 x");
+            assert_eq!(missing, "Totally missing x");
+            let wrote = crate::trf!(
+                "已写入 {written} 行，有 {missed} 行没有得到数值。{detail}",
+                "Wrote {written} rows. {missed} rows did not produce a number. {detail}",
+                written = 3,
+                missed = 1,
+                detail = "x"
+            );
+            assert!(wrote.contains('3') && wrote.contains('1') && wrote.contains('x'), "{wrote}");
+            assert!(!wrote.contains("Wrote"), "{wrote}");
+            let exported = crate::trf!("已导出 {}", "Exported {}", "out.svg");
+            assert!(exported.contains("out.svg"), "{exported}");
+            assert!(!exported.contains("Exported"), "{exported}");
         }
         set_language(Language::En);
         assert_eq!(crate::trf!("已保存 {}", "Saved {}", "a"), "Saved a");

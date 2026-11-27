@@ -45,6 +45,9 @@ const ZH_HANT: &[(&str, &str)] = &[
     ("已重算公式，写入 {n} 个单元格。", "已重算公式，寫入 {n} 個儲存格。"),
     ("已撤销：{label}", "已復原：{label}"),
     ("求得 {count} 个交点，已标在图上，并写入新表格", "求得 {count} 個交點，已標在圖上，並寫入新表格"),
+    ("已导出 {}", "已匯出 {}"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。", "已寫入 {written} 行，有 {missed} 行沒有得到數值。"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。{detail}", "已寫入 {written} 行，有 {missed} 行沒有得到數值。{detail}"),
 ];
 
 const DE: &[(&str, &str)] = &[
@@ -75,6 +78,9 @@ const DE: &[(&str, &str)] = &[
     ("已重算公式，写入 {n} 个单元格。", "Formeln neu berechnet, {n} Zellen geschrieben."),
     ("已撤销：{label}", "Rückgängig: {label}"),
     ("求得 {count} 个交点，已标在图上，并写入新表格", "{count} Schnittpunkte gefunden, in der Grafik markiert und in eine neue Tabelle geschrieben"),
+    ("已导出 {}", "Exportiert: {}"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。", "{written} Zeilen geschrieben, {missed} Zeilen ohne Zahl."),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。{detail}", "{written} Zeilen geschrieben, {missed} Zeilen ohne Zahl. {detail}"),
 ];
 
 const FR: &[(&str, &str)] = &[
@@ -105,6 +111,9 @@ const FR: &[(&str, &str)] = &[
     ("已重算公式，写入 {n} 个单元格。", "Formules recalculées, {n} cellules écrites."),
     ("已撤销：{label}", "Annulé : {label}"),
     ("求得 {count} 个交点，已标在图上，并写入新表格", "{count} intersections trouvées, marquées sur le graphique et écrites dans une nouvelle table"),
+    ("已导出 {}", "Exporté : {}"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。", "{written} lignes écrites, {missed} lignes sans nombre."),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。{detail}", "{written} lignes écrites, {missed} lignes sans nombre. {detail}"),
 ];
 
 const RU: &[(&str, &str)] = &[
@@ -135,6 +144,9 @@ const RU: &[(&str, &str)] = &[
     ("已重算公式，写入 {n} 个单元格。", "Формулы пересчитаны, записано ячеек: {n}."),
     ("已撤销：{label}", "Отменено: {label}"),
     ("求得 {count} 个交点，已标在图上，并写入新表格", "Найдено пересечений: {count}, отмечены на графике и записаны в новую таблицу"),
+    ("已导出 {}", "Экспортировано: {}"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。", "Записано строк: {written}, без числа: {missed}."),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。{detail}", "Записано строк: {written}, без числа: {missed}. {detail}"),
 ];
 
 const ES: &[(&str, &str)] = &[
@@ -165,6 +177,9 @@ const ES: &[(&str, &str)] = &[
     ("已重算公式，写入 {n} 个单元格。", "Fórmulas recalculadas, {n} celdas escritas."),
     ("已撤销：{label}", "Deshecho: {label}"),
     ("求得 {count} 个交点，已标在图上，并写入新表格", "Se hallaron {count} intersecciones, marcadas en el gráfico y escritas en una tabla nueva"),
+    ("已导出 {}", "Exportado: {}"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。", "Se escribieron {written} filas; {missed} filas no dieron un número."),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。{detail}", "Se escribieron {written} filas; {missed} filas no dieron un número. {detail}"),
 ];
 
 const CS: &[(&str, &str)] = &[
@@ -195,6 +210,9 @@ const CS: &[(&str, &str)] = &[
     ("已重算公式，写入 {n} 个单元格。", "Vzorce přepočteny, zapsáno {n} buněk."),
     ("已撤销：{label}", "Zpět: {label}"),
     ("求得 {count} 个交点，已标在图上，并写入新表格", "Nalezeno {count} průsečíků, označeny v grafu a zapsány do nové tabulky"),
+    ("已导出 {}", "Exportováno: {}"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。", "Zapsáno {written} řádků, {missed} řádků bez čísla."),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。{detail}", "Zapsáno {written} řádků, {missed} řádků bez čísla. {detail}"),
 ];
 
 const PT_BR: &[(&str, &str)] = &[
@@ -225,4 +243,7 @@ const PT_BR: &[(&str, &str)] = &[
     ("已重算公式，写入 {n} 个单元格。", "Fórmulas recalculadas, {n} células gravadas."),
     ("已撤销：{label}", "Desfeito: {label}"),
     ("求得 {count} 个交点，已标在图上，并写入新表格", "{count} interseções encontradas, marcadas no gráfico e gravadas numa tabela nova"),
+    ("已导出 {}", "Exportado: {}"),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。", "{written} linhas gravadas, {missed} linhas sem número."),
+    ("已写入 {written} 行，有 {missed} 行没有得到数值。{detail}", "{written} linhas gravadas, {missed} linhas sem número. {detail}"),
 ];
