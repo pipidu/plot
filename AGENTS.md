@@ -21,7 +21,7 @@ Cargo workspace，resolver 2，edition 2021，`rust-version` 1.81，许可证 MI
 | `crates/plot` | `sciplot-plot` | `sciplot_plot` | 坐标变换、图元、二维/三维绘制、SVG 和 PNG。不依赖 analysis |
 | `crates/app` | `sciplot` | 二进制 `sciplot` | egui 主窗口、菜单、对话框、字体 |
 | `assets/fonts` |  |  | 内嵌中文字体 Droid Sans Fallback 及其许可证 |
-| `crates/app/assets/icon.ico` |  |  | Windows 图标，由 `crates/app/build.rs` 嵌入 |
+| `crates/app/assets/icon.ico`、`icon.png` |  |  | 应用图标。Windows 下由 `crates/app/build.rs` 把 ICO 嵌入可执行文件；启动时用 PNG 设置窗口图标（Linux 任务栏和窗口标题也靠它） |
 
 依赖方向只能是 `app → analysis / plot / core`，`analysis → core`，`plot → core`。不要让 `core` 反过来依赖上面三层。求交点的算法放在 `crates/analysis/src/intersect.rs`，画到图上和写入表格的流程放在 `crates/app/src/ops.rs`。
 

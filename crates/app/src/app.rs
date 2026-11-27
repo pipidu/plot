@@ -354,10 +354,17 @@ pub struct SciPlotApp {
     api_failed: Option<u16>,
 }
 
+fn window_icon() -> Option<egui::IconData> {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok()
+}
+
 pub fn run() -> eframe::Result<()> {
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 800.0])
         .with_title(i18n::APP_TITLE);
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()

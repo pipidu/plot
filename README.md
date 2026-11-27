@@ -1,15 +1,39 @@
-# SciPlot
+<p align="center">
+  <img src="crates/app/assets/icon.png" width="128" height="128" alt="SciPlot">
+</p>
 
-用 Rust 编写的科学绘图与数据分析程序，界面对齐 [SciDAVis](https://scidavis.sourceforge.net/)，原生支持中文。在表格、矩阵、多种二维图、三维曲面和拟合分析之外，可以求曲线或折线的交点。
+<h1 align="center">SciPlot</h1>
+
+<p align="center">
+  用 Rust 编写的中文科学绘图桌面程序<br>
+  界面对齐 <a href="https://scidavis.sourceforge.net/">SciDAVis</a>，原生支持中文
+</p>
+
+<p align="center">
+  <a href="#下载">下载</a> ·
+  <a href="#构建">构建</a> ·
+  <a href="#主要功能">功能</a> ·
+  <a href="https://github.com/pipidu/plot/releases">Releases</a>
+</p>
+
+在表格和矩阵里整理数据，画出多种二维图和三维曲面，做拟合与分析，还可以求曲线或折线的交点。图可以导出为 PNG 或 SVG，也可以复制到剪贴板。
+
+<p align="center">
+  <img src="docs/screenshots/main.png" alt="SciPlot 主界面：正弦与余弦及其交点">
+</p>
+
+<p align="center"><sub>启动后会打开示例项目：正弦与余弦已经算出交点，标在图上，并写入表格「交点_sin_cos」。</sub></p>
 
 ## 下载
 
-程序在 [GitHub Releases](https://github.com/pipidu/plot/releases)。每次推送到 `main` 都会编译并发布两个文件：
+程序在 [GitHub Releases](https://github.com/pipidu/plot/releases)。官方以 Windows 为主，同时提供 Linux 包。每次推送到 `main` 都会编译并发布两个文件。当前最新版本是 [0.2.1-b7](https://github.com/pipidu/plot/releases/tag/v0.2.1-b7)：
 
-- `sciplot-<版本>-b<构建号>-windows-x86_64.exe`：Windows 64 位，下载后双击运行，不需要安装。这是主要使用的版本。
-- `sciplot-<版本>-b<构建号>-linux-x86_64`：Linux x86_64。需要图形界面（X11 或 Wayland），并且动态链接构建机上的 glibc，较老的系统可能打不开。下载后加上可执行权限再运行，例如 `chmod +x sciplot-*-linux-x86_64`。
+| 文件 | 平台 | 说明 |
+| --- | --- | --- |
+| `sciplot-<版本>-b<构建号>-windows-x86_64.exe` | 64 位 Windows | 主要使用的版本。下载后双击运行，不需要安装。找不到微软雅黑时，会使用程序内嵌的中文字体。 |
+| `sciplot-<版本>-b<构建号>-linux-x86_64` | 64 位 Linux | 需要图形界面（X11 或 Wayland）。动态链接构建机上的 glibc，较老的系统可能打不开。下载后加上可执行权限再运行，例如 `chmod +x sciplot-*-linux-x86_64`。 |
 
-仓库地址是 <https://github.com/pipidu/plot>。程序里「帮助 → 关于」可以打开这个地址，也可以检查更新。
+没有 macOS 包，也没有安装程序、AppImage 或发行版软件包。仓库地址是 <https://github.com/pipidu/plot>。程序里「帮助 → 关于」可以打开这个地址，也可以检查更新。
 
 ## 构建
 
@@ -20,15 +44,11 @@ cargo run -p sciplot
 cargo test
 ```
 
-启动后会打开示例项目：正弦与余弦已经算出交点，标在图上，并写入表格「交点_sin_cos」。
-
 不打开窗口、只导出示例图：
 
 ```bash
 cargo run -p sciplot -- --export-demo target/demo
 ```
-
-## Windows
 
 程序面向 Windows。在 Linux 上可以交叉编译：
 
@@ -56,6 +76,24 @@ cargo build -p sciplot --release --target x86_64-pc-windows-gnu
 - 三维曲面、线框和散点。左键拖拽旋转，滚轮缩放，双击或「清除缩放」恢复默认视角。
 - 分析：线性、多项式、指数、高斯、洛伦兹和自定义拟合，微分、积分、插值、平滑、FFT、滤波、相关。
 - 导出 PNG（可设 DPI）、SVG，或复制到剪贴板。
+
+<p align="center">
+  <img src="docs/screenshots/table.png" alt="表格：三角函数示例数据">
+</p>
+
+<p align="center"><sub>表格里编辑数据、设置列角色，也可以用列公式和 CSV 导入导出。</sub></p>
+
+<p align="center">
+  <img src="docs/screenshots/surface3d.png" alt="三维曲面图">
+</p>
+
+<p align="center"><sub>三维曲面带坐标范围和色标，可以旋转、缩放，再恢复默认视角。</sub></p>
+
+<p align="center">
+  <img src="docs/screenshots/fit.png" alt="在正弦曲线上做线性拟合">
+</p>
+
+<p align="center"><sub>拟合结果写成易读的公式，曲线画在图上；也可以先按住 Shift 拖出 X 区间，再只拟合这一段。</sub></p>
 
 ## 求交点
 
