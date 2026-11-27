@@ -178,7 +178,6 @@ fn render_layer(
                 }
             }
             CurveKind::HorizontalBars => {
-                y_auto.add(0.0);
                 for (index, value) in item.series.y.iter().enumerate() {
                     if value.is_finite() {
                         x_auto.add(0.0);
@@ -188,6 +187,8 @@ fn render_layer(
                         y_auto.add(item.series.x[index]);
                     }
                 }
+                // 条形沿 Y 方向占 half，中心取 series.x。只记中心会把两端切掉。
+                extend_bar_span(&mut y_auto, &item.series.x);
                 if !item.series.labels.is_empty() {
                     category_y = Some(labeled(&item.series));
                 }
@@ -202,6 +203,7 @@ fn render_layer(
                         x_auto.add(item.series.x[index]);
                     }
                 }
+                extend_bar_span(&mut x_auto, &item.series.x);
                 if !item.series.labels.is_empty() {
                     category_x = Some(labeled(&item.series));
                 }
@@ -826,15 +828,38 @@ fn draw_errors(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
     }
 }
 
-fn draw_bars(scene: &mut Scene, frame: &LayerFrame, item: &Item, horizontal: bool) {
-    let n = item.series.x.len().min(item.series.y.len()).max(item.series.x.len()).max(item.series.y.len());
-    let xs: Vec<f64> = if horizontal { item.series.y.clone() } else { item.series.x.clone() };
-    let mut sorted: Vec<f64> = xs.iter().copied().filter(|v| v.is_finite()).collect();
+/// 柱宽的一半。相邻中心的最小间距乘 0.35；只有一根柱时按间距 1。
+/// 竖向柱和横向条的中心都在 `series.x` 上（条形把这个值画到 Y 轴）。
+fn bar_half_width(centers: &[f64]) -> f64 {
+    let mut sorted: Vec<f64> = centers.iter().copied().filter(|v| v.is_finite()).collect();
     sorted.sort_by(|a, b| a.total_cmp(b));
     sorted.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-    let gap = sorted.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0.0).fold(f64::INFINITY, f64::min);
+    let gap = sorted
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|d| *d > 0.0)
+        .fold(f64::INFINITY, f64::min);
     let gap = if gap.is_finite() { gap } else { 1.0 };
-    let half = gap * 0.35;
+    gap * 0.35
+}
+
+fn extend_bar_span(auto: &mut Range, centers: &[f64]) {
+    let half = bar_half_width(centers);
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for value in centers.iter().copied().filter(|v| v.is_finite()) {
+        lo = lo.min(value);
+        hi = hi.max(value);
+    }
+    if lo.is_finite() {
+        auto.add(lo - half);
+        auto.add(hi + half);
+    }
+}
+
+fn draw_bars(scene: &mut Scene, frame: &LayerFrame, item: &Item, horizontal: bool) {
+    let n = item.series.x.len().min(item.series.y.len()).max(item.series.x.len()).max(item.series.y.len());
+    let half = bar_half_width(&item.series.x);
     let baseline = if (if horizontal { frame.x_scale } else { frame.y_scale }) == AxisScale::Linear {
         0.0
     } else if horizontal {

@@ -75,6 +75,42 @@ mod tests {
     }
 
     #[test]
+    fn bar_auto_range_includes_full_bar_width() {
+        let mut project = Project::new("t");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns[0].set_numbers(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+            table.columns[1].set_numbers(&[3.0, 1.0, 4.0, 2.0, 5.0]);
+        }
+        let graph_id = project.plot_table(table, CurveKind::Bars).unwrap();
+        let graph = project.graph(graph_id).unwrap().clone();
+        let scene = render(&project, &graph, &[], 800.0, 600.0, 1.0);
+        let frame = &scene.layers[0];
+        let half = 0.35;
+        assert!(frame.x_min <= 1.0 - half + 1e-9, "x_min {}", frame.x_min);
+        assert!(frame.x_max >= 5.0 + half - 1e-9, "x_max {}", frame.x_max);
+    }
+
+    #[test]
+    fn horizontal_bar_auto_range_includes_full_bar_width() {
+        let mut project = Project::new("t");
+        let table = project.new_table("t");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns[0].set_numbers(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+            table.columns[1].set_numbers(&[3.0, 1.0, 4.0, 2.0, 5.0]);
+        }
+        let graph_id = project.plot_table(table, CurveKind::HorizontalBars).unwrap();
+        let graph = project.graph(graph_id).unwrap().clone();
+        let scene = render(&project, &graph, &[], 800.0, 600.0, 1.0);
+        let frame = &scene.layers[0];
+        let half = 0.35;
+        assert!(frame.y_min <= 1.0 - half + 1e-9, "y_min {}", frame.y_min);
+        assert!(frame.y_max >= 5.0 + half - 1e-9, "y_max {}", frame.y_max);
+    }
+
+    #[test]
     fn png_starts_with_signature_and_draws_glyphs() {
         let project = demo_project();
         let graph = project.graphs.iter().find(|graph| graph.name == sciplot_core::t("正弦与余弦")).unwrap();
