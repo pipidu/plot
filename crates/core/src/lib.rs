@@ -14,6 +14,7 @@ mod project;
 mod resolve;
 mod surface_data;
 mod table;
+mod template;
 mod util;
 
 pub use csv_io::{
@@ -33,6 +34,7 @@ pub use matrix::Matrix;
 pub use project::{Project, ProjectFile, FORMAT_VERSION};
 pub use resolve::{resolve_curve, sample_expr, GridData, SeriesData};
 pub use surface_data::{column_3d, Column3D};
+pub use template::{GraphTemplate, LabelKind, LayerTemplate, TextLabel, TEMPLATE_FORMAT, TEMPLATE_NOTE, TEMPLATE_VERSION};
 pub use table::{
     column_letter, Column, ColumnMode, ColumnType, NormalizeMode, NumericFormat, SortMode, Table, TableId,
 };

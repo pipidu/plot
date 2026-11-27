@@ -254,6 +254,8 @@ fn http_body(result: Result<ToolOutput, String>) -> Value {
             "data": output.data,
             "png_base64": output.png.as_ref().map(|bytes| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)),
             "svg": output.svg,
+            "file_base64": output.file.as_ref().map(|bytes| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)),
+            "mime": output.mime,
             "graph_id": output.graph.map(|id| id.raw()),
             "table_id": output.table.map(|id| id.raw()),
             "project_path": output.project_path,
@@ -279,9 +281,17 @@ pub(crate) fn output_from_http(value: &Value) -> Result<ToolOutput, String> {
         open_table: false,
         project_path: value.get("project_path").and_then(Value::as_str).map(str::to_string),
         replaced_project: value.get("replaced_project").and_then(Value::as_bool).unwrap_or(false),
+        file: None,
+        mime: value.get("mime").and_then(Value::as_str).map(str::to_string),
     };
     if let Some(encoded) = value.get("png_base64").and_then(Value::as_str) {
         output.png = Some(
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+                .map_err(|err| err.to_string())?,
+        );
+    }
+    if let Some(encoded) = value.get("file_base64").and_then(Value::as_str) {
+        output.file = Some(
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
                 .map_err(|err| err.to_string())?,
         );

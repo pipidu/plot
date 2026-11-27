@@ -18,7 +18,7 @@ Cargo workspace，resolver 2，edition 2021，`rust-version` 1.81，许可证 MI
 | --- | --- | --- | --- |
 | `crates/core` | `sciplot-core` | `sciplot_core` | 表格、矩阵、图形模型、公式、撤销、`.splot`、CSV。不依赖 GUI，也不依赖 analysis |
 | `crates/analysis` | `sciplot-analysis` | `sciplot_analysis` | 拟合、微积分、插值、平滑、FFT、统计、求交点。不依赖 GUI |
-| `crates/plot` | `sciplot-plot` | `sciplot_plot` | 坐标变换、图元、二维/三维绘制、SVG 和 PNG。不依赖 analysis |
+| `crates/plot` | `sciplot-plot` | `sciplot_plot` | 坐标变换、图元、二维/三维绘制、SVG、PNG、EPS、PDF 和 JPEG/BMP/PBM/PGM/PPM/XBM/XPM。不依赖 analysis |
 | `crates/app` | `sciplot` | 二进制 `sciplot` | egui 主窗口、菜单、对话框、字体 |
 | `assets/fonts` |  |  | 内嵌中文字体 Droid Sans Fallback 及其许可证 |
 | `crates/app/assets/icon.ico`、`icon.png` |  |  | 应用图标。Windows 下由 `crates/app/build.rs` 把 ICO 嵌入可执行文件；启动时用 PNG 设置窗口图标（Linux 任务栏和窗口标题也靠它） |
@@ -51,7 +51,9 @@ Windows 交叉编译需要 `x86_64-w64-mingw32-gcc` 和 `x86_64-w64-mingw32-wind
 
 撤销是整份项目的 JSON 快照，上限 40 步，接口是 `History::push`、`undo`、`redo`。界面上的修改走 `SciPlotApp::edit`，失败时恢复修改前的项目。
 
-CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件列表在用户主目录的 `.sciplot_recent.json`。默认样式和字体在 `.sciplot_prefs.json`，不写进项目。`font_path` 为空时按系统字体自动选择。
+CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件列表在用户主目录的 `.sciplot_recent.json`。默认样式和字体在 `.sciplot_prefs.json`，不写进项目。`font_path` 为空时按系统字体自动选择。这套默认样式可以另存为 `.spstyle`（`sciplot-style`），只含字体、字号、线型、符号、直方图箱数和颜色，不含语言、本机 API 和最近目录。它不是图形模板。
+
+图形模板是 `.sptpl`（`sciplot-template`），JSON，不是 SciDAVis 的 `.qpt`。`GraphTemplate` 记下画布大小、图层几何、字体、颜色、坐标轴标题和文字标注，打开后是空图。曲线、曲线样式和刻度（步长、次刻度、刻度样式）不写入模板。
 
 列公式和拟合表达式用 evalexpr **11.3.1**，锁死这个版本。12 及以上是 AGPL，不要升级。整数除法会截断，需要小数时写成 `1.0/2`。乘方是 `^`。`col("名字")`、`col("A")`、`col(1)`（从 1 开始）、`cell("A", 行号)`、`i` 和 `row` 可用。给上下文注册函数时要引入 `ContextWithMutableVariables` 和 `ContextWithMutableFunctions`。多参数函数收到的是 `Value::Tuple`。
 
@@ -62,6 +64,9 @@ CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件�
 - `paint`：egui `Painter`，用于普通二维图的屏幕绘制
 - `to_svg`：矢量导出，`font-family` 使用 `SVG_FONT`
 - `to_png` / `to_rgba`：`tiny-skia` 光栅。三维图在屏幕上也走 `to_rgba`，再贴成纹理。egui 的 `convex_polygon` 会把很瘦的三角形拉成刺，所以曲面不要直接用 `Painter` 填三角形
+- `export_scene` / `print_pdf`：EPS、PDF 和 JPEG、BMP、PBM、PGM、PPM、XBM、XPM。纸张、方向、DPI、JPEG 质量和透明背景从 `ExportOptions` 进去。不贴纸时 PNG 仍是 960×640 乘以 DPI/96，默认 DPI 144。EPS 和 PDF 的页始终用纸张点尺寸；文字用 `ttf-parser` 转成轮廓。透明背景会跳过铺满画布的白底，目前用于 PNG、XPM 和 SVG。PDF/EPS 里的图像标注画成平均色块，像素仍只在 PNG 和 SVG 里。打印没有系统打印队列，`print_pdf` 把每张图写成 PDF 的一页
+
+`Graph.arrangement` 用行列、对齐、边距和间距摆图层。`rows == 0` 且 `cols == 0` 时按接近正方形的网格，两层是左右而不是上下。新建、复制和插入图层都会重排。删除只在 `auto_rearrange` 为真时重排。单个图层的数值位置仍是归一化的 `x,y,w,h`。当前图层是界面上的 `active_layer`，不写进项目；图窗口左上角的数字按钮切换它。表格右键「面板」走 `Project::plot_panel`。
 
 坐标可以是线性、以 10 为底的对数、倒数，并支持反向轴。刻度用 1-2-5。视图缩放和平移存在 `LayerView` 里，和坐标轴的 min/max 分开。双击恢复视图。按住 Shift 拖拽只记录 X 区间，给求交点用。
 
@@ -90,11 +95,12 @@ Savitzky-Golay 按窗口内每个偏移单独算系数，这样边缘也能保�
 - 表格表头和单元格：插入或删除这一列、这一行，公式、排序、统计、绘制为、导入导出 CSV。行号上是行操作。
 - 矩阵：公式填充、转置、求逆、转成表格、热力图、等高线、三维图。
 - 项目树：分组标题上新建，每一项上打开、绘制、删除。
-- 图上：先命中标注，再按线段距离命中曲线（`nearest_curve`，12 像素）。曲线菜单改属性、显隐、删除、拟合和求交点。空白处是坐标轴、图例、标题、标注、加曲线和导出。三维图右键切换显示样式，也可以打开三维设置。多峰拟合点选峰位时不平移视图，Esc 取消。
+- 图上：先命中标注，再按线段距离命中曲线（`nearest_curve`，12 像素）。曲线菜单改属性、显隐、删除、拟合和求交点。空白处是坐标轴、图例、标题、标注、加曲线和导出。图层菜单里有新建、复制、插入其他图、排列和删除。三维图右键切换显示样式，也可以打开三维设置。多峰拟合点选峰位时不平移视图，Esc 取消。
+- 文件菜单：导出图形、导出全部图形、打印、打印全部图形、保存为模板、打开模板。设置菜单：导出默认样式、打开默认样式。这些对话框和 `crates/app/src/api/tools.rs` 里的同名工具调用同一套函数。
 
 平移、框选 X 区间、拖标注和旋转三维图只认鼠标左键。右键打开菜单，不改变视图。菜单项点下去要 `close_menu()`。
 
-「设置 → 默认样式与字体」改字体文件、标题和坐标轴字号、线宽、线型、符号。保存后立刻 `fonts::install`。新建图形时套用整套样式；往已有图追加曲线时只改新曲线。已打开的示例图不要在启动时重套样式。
+「设置 → 默认样式与字体」改字体文件、标题和坐标轴字号、线宽、线型、符号。保存后立刻 `fonts::install`。新建图形时套用整套样式；往已有图追加曲线时只改新曲线。已打开的示例图不要在启动时重套样式。导出的 `.spstyle` 只含这些视觉字段；打开时保留本机的语言、API 和最近目录。
 
 界面字体启动时按顺序找 Windows 的微软雅黑（`msyh.ttc` 等），再找系统里的 Noto Sans、文泉驿、Droid，最后用 `include_bytes!` 的 `assets/fonts/DroidSansFallbackFull.ttf`。图上的拉丁字母按 Times New Roman、Liberation Serif 这条顺序，中文按宋体、Noto Serif CJK、思源宋体、文鼎明体，找不到就用同一份内嵌 Droid。设置里的字体文件如果填了，界面和图都改用这一个文件；留空才走上面的自动顺序。TTC 要先抽出一个 TTF，`ab_glyph` 读不了字体集合。界面字体同时注册为 egui 的 Proportional 和 Monospace。图使用名为 `sciplot-plot` 的字体族，拉丁文件在前、中文文件在后，缺字时 egui 会落到后一个。SVG 的 `font-family` 写成 Times New Roman、Liberation Serif、SimSun、宋体这一串，不用双引号，避免撑破 XML 属性。
 

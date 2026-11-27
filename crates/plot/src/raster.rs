@@ -166,11 +166,19 @@ fn blend(pixmap: &mut Pixmap, x: i32, y: i32, color: [u8; 4], coverage: f32) {
 }
 
 pub fn to_png(scene: &Scene, font: Option<&GlyphFont>) -> Result<Vec<u8>, String> {
-    draw_pixmap(scene, font)?.encode_png().map_err(|err| err.to_string())
+    to_png_with(scene, font, false)
+}
+
+pub fn to_png_with(scene: &Scene, font: Option<&GlyphFont>, transparent: bool) -> Result<Vec<u8>, String> {
+    draw_pixmap(scene, font, transparent)?.encode_png().map_err(|err| err.to_string())
 }
 
 pub fn to_rgba(scene: &Scene, font: Option<&GlyphFont>) -> Result<(u32, u32, Vec<u8>), String> {
-    let pixmap = draw_pixmap(scene, font)?;
+    to_rgba_with(scene, font, false)
+}
+
+pub fn to_rgba_with(scene: &Scene, font: Option<&GlyphFont>, transparent: bool) -> Result<(u32, u32, Vec<u8>), String> {
+    let pixmap = draw_pixmap(scene, font, transparent)?;
     let mut rgba = Vec::with_capacity((pixmap.width() * pixmap.height() * 4) as usize);
     for pixel in pixmap.pixels() {
         let color = pixel.demultiply();
@@ -179,14 +187,21 @@ pub fn to_rgba(scene: &Scene, font: Option<&GlyphFont>) -> Result<(u32, u32, Vec
     Ok((pixmap.width(), pixmap.height(), rgba))
 }
 
-fn draw_pixmap(scene: &Scene, font: Option<&GlyphFont>) -> Result<Pixmap, String> {
+fn draw_pixmap(scene: &Scene, font: Option<&GlyphFont>, transparent: bool) -> Result<Pixmap, String> {
     let width = scene.width.max(1.0).round() as u32;
     let height = scene.height.max(1.0).round() as u32;
     let mut pixmap = Pixmap::new(width, height).ok_or(sciplot_core::t("无法创建位图"))?;
-    pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    if transparent {
+        pixmap.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 0));
+    } else {
+        pixmap.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+    }
     for prim in &scene.primitives {
         match prim {
             Prim::Rect { x, y, w, h, fill, stroke } => {
+                if transparent && is_full_white_background(scene, *x, *y, *w, *h, *fill) {
+                    continue;
+                }
                 if let Some(path) = rect_path(*x, *y, *w, *h) {
                     if let Some(color) = fill {
                         fill_path(&mut pixmap, &path, *color);
@@ -267,6 +282,13 @@ fn blit_image(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, rgba: &[u8], 
         transform,
         None,
     );
+}
+
+fn is_full_white_background(scene: &Scene, x: f32, y: f32, w: f32, h: f32, fill: Option<[u8; 4]>) -> bool {
+    let Some(color) = fill else {
+        return false;
+    };
+    color[0] > 250 && color[1] > 250 && color[2] > 250 && color[3] > 250 && x <= 1.0 && y <= 1.0 && w >= scene.width - 2.0 && h >= scene.height - 2.0
 }
 
 fn fill_path(pixmap: &mut Pixmap, path: &tiny_skia::Path, color: [u8; 4]) {

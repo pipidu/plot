@@ -961,6 +961,224 @@ impl SurfaceSpec {
     }
 }
 
+/// 一行没排满时，剩余图层在这一行里怎么对齐。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LayerAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl LayerAlign {
+    pub fn label(self) -> &'static str {
+        match self {
+            LayerAlign::Left => crate::tr!("靠左", "Left"),
+            LayerAlign::Center => crate::tr!("居中", "Center"),
+            LayerAlign::Right => crate::tr!("靠右", "Right"),
+        }
+    }
+
+    pub fn all() -> &'static [LayerAlign] {
+        &[LayerAlign::Left, LayerAlign::Center, LayerAlign::Right]
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "left" | "靠左" => Some(Self::Left),
+            "center" | "居中" => Some(Self::Center),
+            "right" | "靠右" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+/// 图层在图幅上的行列网格。边距和间距都是相对整张图的比例，原点在左上。
+/// `rows == 0` 且 `cols == 0` 时按图层数量取接近正方形的网格。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayerArrangement {
+    pub rows: u32,
+    pub cols: u32,
+    pub align: LayerAlign,
+    pub margin_left: f32,
+    pub margin_right: f32,
+    pub margin_top: f32,
+    pub margin_bottom: f32,
+    pub gap_x: f32,
+    pub gap_y: f32,
+    /// 删除图层之后是否按这个网格重新摆放。新建图层始终按网格摆放。
+    pub auto_rearrange: bool,
+}
+
+impl Default for LayerArrangement {
+    fn default() -> Self {
+        Self {
+            rows: 0,
+            cols: 0,
+            align: LayerAlign::Left,
+            margin_left: 0.0,
+            margin_right: 0.0,
+            margin_top: 0.0,
+            margin_bottom: 0.0,
+            gap_x: 0.0,
+            gap_y: 0.0,
+            auto_rearrange: true,
+        }
+    }
+}
+
+impl LayerArrangement {
+    pub fn resolved(&self, count: usize) -> (u32, u32) {
+        let n = count.max(1) as u32;
+        let mut rows = self.rows;
+        let mut cols = self.cols;
+        if rows == 0 && cols == 0 {
+            return auto_grid(n);
+        }
+        if cols == 0 {
+            cols = 1;
+        }
+        if rows == 0 {
+            rows = n.div_ceil(cols);
+        }
+        if rows.saturating_mul(cols) < n {
+            rows = n.div_ceil(cols);
+        }
+        (rows.max(1), cols.max(1))
+    }
+}
+
+fn auto_grid(n: u32) -> (u32, u32) {
+    if n <= 1 {
+        return (1, 1);
+    }
+    let cols = (n as f32).sqrt().ceil() as u32;
+    let rows = n.div_ceil(cols);
+    (rows.max(1), cols.max(1))
+}
+
+/// 把 `count` 个图层排进网格。返回的矩形按行优先，原点在左上。
+pub fn layout_frames(count: usize, arrangement: &LayerArrangement) -> Vec<FrameRect> {
+    let n = count.max(1);
+    let (rows, cols) = arrangement.resolved(n);
+    let ml = arrangement.margin_left.clamp(0.0, 0.45);
+    let mr = arrangement.margin_right.clamp(0.0, 0.45);
+    let mt = arrangement.margin_top.clamp(0.0, 0.45);
+    let mb = arrangement.margin_bottom.clamp(0.0, 0.45);
+    let usable_w = (1.0 - ml - mr).max(0.05);
+    let usable_h = (1.0 - mt - mb).max(0.05);
+    let mut gap_x = arrangement.gap_x.max(0.0);
+    let mut gap_y = arrangement.gap_y.max(0.0);
+    if cols > 1 {
+        gap_x = gap_x.min(usable_w / cols as f32 * 0.5);
+    } else {
+        gap_x = 0.0;
+    }
+    if rows > 1 {
+        gap_y = gap_y.min(usable_h / rows as f32 * 0.5);
+    } else {
+        gap_y = 0.0;
+    }
+    let cell_w = ((usable_w - gap_x * (cols as f32 - 1.0)) / cols as f32).max(0.02);
+    let cell_h = ((usable_h - gap_y * (rows as f32 - 1.0)) / rows as f32).max(0.02);
+    let mut frames = Vec::with_capacity(n);
+    for index in 0..n {
+        let row = index as u32 / cols;
+        let col = index as u32 % cols;
+        let in_row = if row + 1 == rows { n as u32 - row * cols } else { cols };
+        let row_w = in_row as f32 * cell_w + in_row.saturating_sub(1) as f32 * gap_x;
+        let spare = (usable_w - row_w).max(0.0);
+        let shift = match arrangement.align {
+            LayerAlign::Left => 0.0,
+            LayerAlign::Center => spare * 0.5,
+            LayerAlign::Right => spare,
+        };
+        frames.push(FrameRect {
+            x: ml + shift + col as f32 * (cell_w + gap_x),
+            y: mt + row as f32 * (cell_h + gap_y),
+            w: cell_w,
+            h: cell_h,
+        });
+    }
+    frames
+}
+
+/// 表格右键「面板」里的快速布局，对应 SciDAVis Plot → Panel。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelPreset {
+    Vertical2,
+    Horizontal2,
+    Grid4,
+    Stacked,
+    StackedHistogram,
+}
+
+impl PanelPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelPreset::Vertical2 => crate::tr!("上下两层", "Vertical 2 layers"),
+            PanelPreset::Horizontal2 => crate::tr!("左右两层", "Horizontal 2 layers"),
+            PanelPreset::Grid4 => crate::tr!("四层", "4 layers"),
+            PanelPreset::Stacked => crate::tr!("堆叠图层", "Stacked layers"),
+            PanelPreset::StackedHistogram => crate::tr!("堆叠直方图", "Stacked histograms"),
+        }
+    }
+
+    pub fn all() -> &'static [PanelPreset] {
+        &[
+            PanelPreset::Vertical2,
+            PanelPreset::Horizontal2,
+            PanelPreset::Grid4,
+            PanelPreset::Stacked,
+            PanelPreset::StackedHistogram,
+        ]
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "vertical2" | "vertical" | "上下两层" => Some(Self::Vertical2),
+            "horizontal2" | "horizontal" | "左右两层" => Some(Self::Horizontal2),
+            "grid4" | "four" | "四层" => Some(Self::Grid4),
+            "stacked" | "堆叠图层" => Some(Self::Stacked),
+            "stacked_histogram" | "stacked-histogram" | "堆叠直方图" => Some(Self::StackedHistogram),
+            _ => None,
+        }
+    }
+
+    /// 这一预设要建几个图层。堆叠类按 Y 列的条数，至少一层。
+    pub fn layer_count(self, curves: usize) -> usize {
+        match self {
+            PanelPreset::Vertical2 | PanelPreset::Horizontal2 => 2,
+            PanelPreset::Grid4 => 4,
+            PanelPreset::Stacked => curves.max(1),
+            PanelPreset::StackedHistogram => 1,
+        }
+    }
+
+    pub fn arrangement(self, layer_count: usize) -> LayerArrangement {
+        let (rows, cols, gap_y, margin) = match self {
+            PanelPreset::Vertical2 => (2, 1, 0.03, 0.02),
+            PanelPreset::Horizontal2 => (1, 2, 0.03, 0.02),
+            PanelPreset::Grid4 => (2, 2, 0.03, 0.02),
+            PanelPreset::Stacked => (layer_count.max(1) as u32, 1, 0.012, 0.02),
+            PanelPreset::StackedHistogram => (1, 1, 0.0, 0.0),
+        };
+        LayerArrangement {
+            rows,
+            cols,
+            align: LayerAlign::Left,
+            margin_left: margin,
+            margin_right: margin,
+            margin_top: margin,
+            margin_bottom: margin,
+            gap_x: if cols > 1 { 0.03 } else { 0.0 },
+            gap_y,
+            auto_rearrange: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Graph {
@@ -968,6 +1186,7 @@ pub struct Graph {
     pub name: String,
     pub layers: Vec<Layer>,
     pub surface: Option<SurfaceSpec>,
+    pub arrangement: LayerArrangement,
 }
 
 impl Default for Graph {
@@ -977,6 +1196,7 @@ impl Default for Graph {
             name: crate::locale::t("图").to_string(),
             layers: vec![Layer::default()],
             surface: None,
+            arrangement: LayerArrangement::default(),
         }
     }
 }
@@ -990,16 +1210,60 @@ impl Graph {
         }
     }
 
+    /// 按 `arrangement` 把现有图层摆进行列网格。不再只做垂直均分。
     pub fn reflow_layers(&mut self) {
-        let n = self.layers.len().max(1) as f32;
-        for (i, layer) in self.layers.iter_mut().enumerate() {
-            layer.frame = FrameRect {
-                x: 0.0,
-                y: i as f32 / n,
-                w: 1.0,
-                h: 1.0 / n,
-            };
+        let frames = layout_frames(self.layers.len(), &self.arrangement);
+        for (layer, frame) in self.layers.iter_mut().zip(frames) {
+            layer.frame = frame;
         }
+    }
+
+    pub fn add_layer(&mut self) -> usize {
+        self.layers.push(Layer::default());
+        let index = self.layers.len() - 1;
+        self.reflow_layers();
+        index
+    }
+
+    pub fn duplicate_layer(&mut self, index: usize) -> Result<usize, String> {
+        let mut layer = self
+            .layers
+            .get(index)
+            .cloned()
+            .ok_or_else(|| crate::locale::t("找不到图层").to_string())?;
+        if !layer.title.is_empty() {
+            layer.title = crate::trf!("{title} 副本", "{title} copy", title = layer.title);
+        }
+        let at = index + 1;
+        self.layers.insert(at, layer);
+        self.reflow_layers();
+        Ok(at)
+    }
+
+    /// 删除一层。勾了自动重排时按网格重摆，否则留下其余图层的位置。
+    pub fn remove_layer(&mut self, index: usize) -> Result<(), String> {
+        if self.layers.len() <= 1 {
+            return Err(crate::locale::t("至少保留一个图层").into());
+        }
+        if index >= self.layers.len() {
+            return Err(crate::locale::t("找不到图层").into());
+        }
+        self.layers.remove(index);
+        if self.arrangement.auto_rearrange {
+            self.reflow_layers();
+        }
+        Ok(())
+    }
+
+    /// 把另一张图的每个图层追加进来，再按当前网格重排。
+    pub fn insert_graph_layers(&mut self, source: &Graph) -> Result<usize, String> {
+        if source.layers.is_empty() {
+            return Err(crate::locale::t("找不到图层").into());
+        }
+        let added = source.layers.len();
+        self.layers.extend(source.layers.iter().cloned());
+        self.reflow_layers();
+        Ok(added)
     }
 }
 
@@ -1007,12 +1271,119 @@ impl Graph {
 mod tests {
     use super::*;
 
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
     #[test]
-    fn reflow_splits_vertically() {
+    fn two_new_layers_use_a_grid_not_only_a_vertical_split() {
         let mut graph = Graph::new(GraphId(1), "g");
-        graph.layers.push(Layer::default());
+        graph.add_layer();
+        assert_eq!(graph.layers.len(), 2);
+        let (rows, cols) = graph.arrangement.resolved(2);
+        assert_eq!((rows, cols), (1, 2));
+        assert!(near(graph.layers[0].frame.w, 0.5));
+        assert!(near(graph.layers[1].frame.x, 0.5));
+        assert!(near(graph.layers[0].frame.y, graph.layers[1].frame.y));
+        assert!(graph.layers[1].frame.x > graph.layers[0].frame.x);
+    }
+
+    #[test]
+    fn explicit_vertical_horizontal_and_four_layer_grids() {
+        let vertical = LayerArrangement { rows: 2, cols: 1, ..LayerArrangement::default() };
+        let frames = layout_frames(2, &vertical);
+        assert!(near(frames[0].h, 0.5) && near(frames[1].y, 0.5));
+        assert!(near(frames[0].w, 1.0) && near(frames[1].x, 0.0));
+
+        let horizontal = LayerArrangement { rows: 1, cols: 2, ..LayerArrangement::default() };
+        let frames = layout_frames(2, &horizontal);
+        assert!(near(frames[0].w, 0.5) && near(frames[1].x, 0.5));
+        assert!(near(frames[0].h, 1.0));
+
+        let grid = LayerArrangement { rows: 2, cols: 2, ..LayerArrangement::default() };
+        let frames = layout_frames(4, &grid);
+        assert!(near(frames[0].x, 0.0) && near(frames[0].y, 0.0));
+        assert!(near(frames[1].x, 0.5) && near(frames[1].y, 0.0));
+        assert!(near(frames[2].x, 0.0) && near(frames[2].y, 0.5));
+        assert!(near(frames[3].x, 0.5) && near(frames[3].y, 0.5));
+        assert!(frames.iter().all(|frame| near(frame.w, 0.5) && near(frame.h, 0.5)));
+    }
+
+    #[test]
+    fn margins_gaps_and_alignment_move_the_short_row() {
+        let mut arrangement = LayerArrangement {
+            rows: 1,
+            cols: 1,
+            margin_left: 0.1,
+            margin_right: 0.1,
+            margin_top: 0.1,
+            margin_bottom: 0.1,
+            ..LayerArrangement::default()
+        };
+        let frames = layout_frames(1, &arrangement);
+        assert!(near(frames[0].x, 0.1) && near(frames[0].y, 0.1));
+        assert!(near(frames[0].w, 0.8) && near(frames[0].h, 0.8));
+
+        arrangement.rows = 2;
+        arrangement.cols = 2;
+        arrangement.gap_x = 0.04;
+        arrangement.gap_y = 0.02;
+        arrangement.align = LayerAlign::Center;
+        let frames = layout_frames(3, &arrangement);
+        assert!(frames[2].x > 0.1);
+        assert!(near(frames[0].y, 0.1));
+        assert!(frames[2].y > frames[0].y + frames[0].h);
+
+        arrangement.align = LayerAlign::Right;
+        let right = layout_frames(3, &arrangement);
+        arrangement.align = LayerAlign::Left;
+        let left = layout_frames(3, &arrangement);
+        assert!(right[2].x > left[2].x);
+        assert!(near(left[2].x, 0.1));
+    }
+
+    #[test]
+    fn deleting_a_layer_keeps_positions_when_auto_rearrange_is_off() {
+        let mut graph = Graph::new(GraphId(1), "g");
+        graph.arrangement.rows = 1;
+        graph.arrangement.cols = 3;
+        graph.layers = vec![Layer::default(), Layer::default(), Layer::default()];
         graph.reflow_layers();
-        assert!((graph.layers[0].frame.h - 0.5).abs() < 1e-6);
-        assert!((graph.layers[1].frame.y - 0.5).abs() < 1e-6);
+        let kept = graph.layers[2].frame;
+        graph.arrangement.auto_rearrange = false;
+        graph.remove_layer(0).unwrap();
+        assert_eq!(graph.layers.len(), 2);
+        assert_eq!(graph.layers[1].frame, kept);
+
+        graph.arrangement.auto_rearrange = true;
+        graph.remove_layer(0).unwrap();
+        assert_eq!(graph.layers.len(), 1);
+        assert!(near(graph.layers[0].frame.w, 1.0 / 3.0));
+        assert!(near(graph.layers[0].frame.x, 0.0));
+    }
+
+    #[test]
+    fn copy_and_insert_keep_curves_and_reflow() {
+        let mut graph = Graph::new(GraphId(1), "g");
+        graph.layers[0].title = "甲".into();
+        graph.layers[0].curves.push(Curve {
+            name: "sin".into(),
+            ..Curve::default()
+        });
+        let copy = graph.duplicate_layer(0).unwrap();
+        assert_eq!(copy, 1);
+        assert_eq!(graph.layers[1].curves[0].name, "sin");
+        assert!(graph.layers[1].title.contains("甲"));
+        assert!(graph.layers[1].frame.x > graph.layers[0].frame.x);
+
+        let mut other = Graph::new(GraphId(2), "other");
+        other.layers[0].curves.push(Curve {
+            name: "cos".into(),
+            ..Curve::default()
+        });
+        let added = graph.insert_graph_layers(&other).unwrap();
+        assert_eq!(added, 1);
+        assert_eq!(graph.layers.len(), 3);
+        assert!(graph.layers.iter().any(|layer| layer.curves.iter().any(|curve| curve.name == "cos")));
     }
 }

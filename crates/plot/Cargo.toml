@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "SciPlot 2D/3D plot engine, SVG and PNG export"
+description = "SciPlot 2D/3D plot engine, SVG, PDF, EPS and bitmap export"
 
 [dependencies]
 sciplot-core = { path = "../core" }
@@ -13,6 +13,8 @@ ab_glyph = "0.2"
 base64 = "0.22"
 egui = { version = "0.31.1", default-features = false }
 png = "0.17"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+ttf-parser = "0.25"
 
 [lib]
 name = "sciplot_plot"

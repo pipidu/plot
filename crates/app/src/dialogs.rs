@@ -135,6 +135,36 @@ fn title_of(dialog: &Dialog) -> String {
         }
         Dialog::Signal { .. } => sciplot_core::tr!("信号处理", "Signal").into(),
         Dialog::SurfaceSettings { .. } => sciplot_core::tr!("三维设置", "3D settings").into(),
+        Dialog::ArrangeLayers { .. } => sciplot_core::tr!("排列图层", "Arrange layers").into(),
+        Dialog::InsertLayer { .. } => sciplot_core::tr!("插入其他图形", "Insert another graph").into(),
+        Dialog::ExportGraph { all, .. } => {
+            if *all {
+                sciplot_core::tr!("导出全部图形", "Export all graphs").into()
+            } else {
+                sciplot_core::tr!("导出图形", "Export graph").into()
+            }
+        }
+        Dialog::Print { all, .. } => {
+            if *all {
+                sciplot_core::tr!("打印全部图形", "Print all plots").into()
+            } else {
+                sciplot_core::tr!("打印", "Print").into()
+            }
+        }
+        Dialog::TemplateFile { save, .. } => {
+            if *save {
+                sciplot_core::tr!("保存为模板", "Save as template").into()
+            } else {
+                sciplot_core::tr!("打开模板", "Open template").into()
+            }
+        }
+        Dialog::StyleFile { save, .. } => {
+            if *save {
+                sciplot_core::tr!("导出默认样式", "Export default style").into()
+            } else {
+                sciplot_core::tr!("打开默认样式", "Open default style").into()
+            }
+        }
     }
 }
 
@@ -375,6 +405,66 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
         Dialog::AddCurve { graph, table, kind } => add_curve(app, ui, *graph, table, kind),
         Dialog::Prefs(prefs) => prefs_dialog(app, ui, prefs),
         Dialog::ImportInstead { path } => import_instead(app, ui, path),
+        Dialog::ArrangeLayers {
+            graph,
+            rows,
+            cols,
+            align,
+            margin_left,
+            margin_right,
+            margin_top,
+            margin_bottom,
+            gap_x,
+            gap_y,
+            auto_rearrange,
+        } => arrange_layers_dialog(
+            app,
+            ui,
+            *graph,
+            rows,
+            cols,
+            align,
+            margin_left,
+            margin_right,
+            margin_top,
+            margin_bottom,
+            gap_x,
+            gap_y,
+            auto_rearrange,
+        ),
+        Dialog::InsertLayer { graph, source } => insert_layer_dialog(app, ui, *graph, source),
+        Dialog::ExportGraph {
+            all,
+            format,
+            path,
+            dpi,
+            quality,
+            transparent,
+            paper,
+            orientation,
+            fit_paper,
+        } => export_graph_dialog(
+            app,
+            ui,
+            *all,
+            format,
+            path,
+            dpi,
+            quality,
+            transparent,
+            paper,
+            orientation,
+            fit_paper,
+        ),
+        Dialog::Print {
+            all,
+            path,
+            dpi,
+            paper,
+            orientation,
+        } => print_dialog(app, ui, *all, path, dpi, paper, orientation),
+        Dialog::TemplateFile { save, graph, path } => template_file_dialog(app, ui, *save, *graph, path),
+        Dialog::StyleFile { save, path } => style_file_dialog(app, ui, *save, path),
     }
 }
 
@@ -3419,4 +3509,372 @@ fn read_import_files(paths: &[std::path::PathBuf]) -> Result<Vec<(String, Vec<u8
         return Err(sciplot_core::t("没有要导入的文件").into());
     }
     Ok(files)
+}
+
+fn replace_known_extension(path: &str, ext: &str) -> String {
+    let known = [
+        "png", "svg", "eps", "pdf", "jpg", "jpeg", "bmp", "pbm", "pgm", "ppm", "xbm", "xpm", "sptpl", "spstyle",
+    ];
+    let file = std::path::Path::new(path);
+    let Some(current) = file.extension().and_then(|item| item.to_str()) else {
+        return path.to_string();
+    };
+    if known.iter().any(|item| item.eq_ignore_ascii_case(current)) {
+        file.with_extension(ext).display().to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn graphs_for(app: &SciPlotApp, all: bool) -> Vec<sciplot_core::GraphId> {
+    if all {
+        app.project.graphs.iter().map(|graph| graph.id).collect()
+    } else {
+        app.active_graph().into_iter().collect()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn arrange_layers_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    graph: sciplot_core::GraphId,
+    rows: &mut String,
+    cols: &mut String,
+    align: &mut sciplot_core::LayerAlign,
+    margin_left: &mut String,
+    margin_right: &mut String,
+    margin_top: &mut String,
+    margin_bottom: &mut String,
+    gap_x: &mut String,
+    gap_y: &mut String,
+    auto_rearrange: &mut bool,
+) -> bool {
+    ui.label(sciplot_core::tr!(
+        "按行和列把图层铺到图上。边距和间距是整张图的百分比。删掉一层时，勾选下面的选项才会自动重排。",
+        "Lay the layers out in rows and columns. Margins and gaps are percentages of the whole graph. After a layer is deleted, layers are rearranged only when the option below is on."
+    ));
+    labeled(ui, sciplot_core::tr!("行", "Rows"), rows);
+    labeled(ui, sciplot_core::tr!("列", "Columns"), cols);
+    egui::ComboBox::from_id_salt("layer-align")
+        .selected_text(align.label())
+        .show_ui(ui, |ui| {
+            for item in sciplot_core::LayerAlign::all() {
+                ui.selectable_value(align, *item, item.label());
+            }
+        });
+    labeled(ui, sciplot_core::tr!("左边距 %", "Left margin %"), margin_left);
+    labeled(ui, sciplot_core::tr!("右边距 %", "Right margin %"), margin_right);
+    labeled(ui, sciplot_core::tr!("上边距 %", "Top margin %"), margin_top);
+    labeled(ui, sciplot_core::tr!("下边距 %", "Bottom margin %"), margin_bottom);
+    labeled(ui, sciplot_core::tr!("水平间距 %", "Horizontal gap %"), gap_x);
+    labeled(ui, sciplot_core::tr!("垂直间距 %", "Vertical gap %"), gap_y);
+    ui.checkbox(
+        auto_rearrange,
+        sciplot_core::tr!("删除图层后自动重排", "Rearrange automatically after a layer is deleted"),
+    );
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if action_button(ui, sciplot_core::t("应用")) {
+            let arrangement = crate::app::arrangement_from_fields(
+                rows,
+                cols,
+                *align,
+                margin_left,
+                margin_right,
+                margin_top,
+                margin_bottom,
+                gap_x,
+                gap_y,
+                *auto_rearrange,
+            );
+            app.arrange_graph(graph, arrangement);
+            stay = false;
+        }
+        if ui.button(sciplot_core::t("关闭")).clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn insert_layer_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    graph: sciplot_core::GraphId,
+    source: &mut sciplot_core::GraphId,
+) -> bool {
+    let others: Vec<(sciplot_core::GraphId, String)> = app
+        .project
+        .graphs
+        .iter()
+        .filter(|item| item.id != graph)
+        .map(|item| (item.id, item.name.clone()))
+        .collect();
+    if others.is_empty() {
+        ui.label(sciplot_core::tr!(
+            "项目里没有另一张图可以插入。",
+            "There is no other graph to insert."
+        ));
+        return button_closes(ui, sciplot_core::t("关闭"));
+    }
+    if !others.iter().any(|(id, _)| *id == *source) {
+        *source = others[0].0;
+    }
+    let selected = others
+        .iter()
+        .find(|(id, _)| *id == *source)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_default();
+    ui.label(sciplot_core::tr!(
+        "把选中的图的每个图层追加到当前图，再按当前网格重排。",
+        "Append every layer of the selected graph, then rearrange with the current grid."
+    ));
+    egui::ComboBox::from_id_salt("insert-graph")
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for (id, name) in &others {
+                ui.selectable_value(source, *id, name);
+            }
+        });
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if action_button(ui, sciplot_core::tr!("插入", "Insert")) {
+            app.insert_graph_as_layers(graph, *source);
+            stay = false;
+        }
+        if ui.button(sciplot_core::t("取消")).clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_graph_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    all: bool,
+    format: &mut sciplot_plot::ExportFormat,
+    path: &mut String,
+    dpi: &mut String,
+    quality: &mut String,
+    transparent: &mut bool,
+    paper: &mut sciplot_plot::Paper,
+    orientation: &mut sciplot_plot::PageOrientation,
+    fit_paper: &mut bool,
+) -> bool {
+    ui.label(if all {
+        sciplot_core::tr!(
+            "把项目里每张图写到这个文件夹，一张图一个文件。",
+            "Write every graph in the project into this folder, one file each."
+        )
+    } else {
+        sciplot_core::tr!("导出当前图。", "Export the current graph.")
+    });
+    egui::ComboBox::from_id_salt("export-format")
+        .selected_text(format.label())
+        .show_ui(ui, |ui| {
+            for item in sciplot_plot::ExportFormat::all() {
+                if ui.selectable_value(format, *item, item.label()).clicked() && !all {
+                    *path = replace_known_extension(path, item.extension());
+                }
+            }
+        });
+    labeled(ui, sciplot_core::t("路径"), path);
+    labeled(ui, sciplot_core::tr!("分辨率 (DPI)", "Resolution (DPI)"), dpi);
+    if format.supports_quality() {
+        labeled(ui, sciplot_core::tr!("质量 (1–100)", "Quality (1–100)"), quality);
+    }
+    if format.supports_transparency() {
+        ui.checkbox(transparent, sciplot_core::tr!("透明背景", "Transparent background"));
+    }
+    egui::ComboBox::from_id_salt("export-paper")
+        .selected_text(paper.label())
+        .show_ui(ui, |ui| {
+            for item in sciplot_plot::Paper::all() {
+                ui.selectable_value(paper, *item, item.label());
+            }
+        });
+    egui::ComboBox::from_id_salt("export-orient")
+        .selected_text(orientation.label())
+        .show_ui(ui, |ui| {
+            for item in sciplot_plot::PageOrientation::all() {
+                ui.selectable_value(orientation, *item, item.label());
+            }
+        });
+    ui.checkbox(
+        fit_paper,
+        sciplot_core::tr!("按纸张尺寸出图", "Fit to paper size"),
+    );
+    ui.label(sciplot_core::tr!(
+        "EPS 和 PDF 始终按纸张和方向排版。透明背景用于 PNG、XPM 和 SVG。JPEG 使用上面的质量。",
+        "EPS and PDF always use the paper size and orientation. Transparency applies to PNG, XPM, and SVG. JPEG uses the quality above."
+    ));
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if action_button(ui, sciplot_core::tr!("导出", "Export")) {
+            let options = crate::app::options_from_fields(
+                *format,
+                dpi,
+                quality,
+                *transparent,
+                *paper,
+                *orientation,
+                *fit_paper,
+            );
+            let ids = graphs_for(app, all);
+            match app.export_graphs_to(&ids, std::path::Path::new(path), &options, all) {
+                Ok(_) => stay = false,
+                Err(err) => app.status = err,
+            }
+        }
+        if ui.button(sciplot_core::t("取消")).clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn print_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    all: bool,
+    path: &mut String,
+    dpi: &mut String,
+    paper: &mut sciplot_plot::Paper,
+    orientation: &mut sciplot_plot::PageOrientation,
+) -> bool {
+    ui.label(sciplot_core::tr!(
+        "打印写成 PDF。没有系统打印机时，这个文件就是打印结果。",
+        "Print writes a PDF. Without a system printer, that file is the printout."
+    ));
+    ui.label(if all {
+        sciplot_core::tr!("打印项目里的全部图形，每张一页。", "Print every graph, one page each.")
+    } else {
+        sciplot_core::tr!("打印当前图形。", "Print the current graph.")
+    });
+    labeled(ui, sciplot_core::t("路径"), path);
+    labeled(ui, sciplot_core::tr!("分辨率 (DPI)", "Resolution (DPI)"), dpi);
+    egui::ComboBox::from_id_salt("print-paper")
+        .selected_text(paper.label())
+        .show_ui(ui, |ui| {
+            for item in sciplot_plot::Paper::all() {
+                ui.selectable_value(paper, *item, item.label());
+            }
+        });
+    egui::ComboBox::from_id_salt("print-orient")
+        .selected_text(orientation.label())
+        .show_ui(ui, |ui| {
+            for item in sciplot_plot::PageOrientation::all() {
+                ui.selectable_value(orientation, *item, item.label());
+            }
+        });
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        if action_button(ui, sciplot_core::tr!("打印", "Print")) {
+            let options = crate::app::options_from_fields(
+                sciplot_plot::ExportFormat::Pdf,
+                dpi,
+                "90",
+                false,
+                *paper,
+                *orientation,
+                true,
+            );
+            let ids = graphs_for(app, all);
+            match app.print_graphs_to(&ids, std::path::Path::new(path), &options) {
+                Ok(()) => stay = false,
+                Err(err) => app.status = err,
+            }
+        }
+        if ui.button(sciplot_core::t("取消")).clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn template_file_dialog(
+    app: &mut SciPlotApp,
+    ui: &mut egui::Ui,
+    save: bool,
+    graph: sciplot_core::GraphId,
+    path: &mut String,
+) -> bool {
+    ui.label(sciplot_core::tr!(
+        "SciPlot 模板是 .sptpl。它记下画布大小、字体、颜色和文字标注，打开后是一张空图，再用「添加曲线」填数据。曲线样式和刻度不在模板里。这不是 SciDAVis 的 .qpt。",
+        "A SciPlot template is a .sptpl. It stores canvas size, fonts, colors, and text labels, then opens as an empty graph to fill with Add curve. Curve styles and ticks are not stored. This is not a SciDAVis .qpt."
+    ));
+    labeled(ui, sciplot_core::t("路径"), path);
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        let label = if save {
+            sciplot_core::tr!("保存", "Save")
+        } else {
+            sciplot_core::tr!("打开", "Open")
+        };
+        if action_button(ui, label) {
+            let file = std::path::Path::new(path);
+            let result = if save {
+                app.save_graph_template(graph, file).map(|_| ())
+            } else {
+                app.open_graph_template(file).map(|_| ())
+            };
+            match result {
+                Ok(()) => stay = false,
+                Err(err) => app.status = err,
+            }
+        }
+        if ui.button(sciplot_core::t("取消")).clicked() {
+            stay = false;
+        }
+    });
+    stay
+}
+
+fn style_file_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, save: bool, path: &mut String) -> bool {
+    ui.label(sciplot_core::tr!(
+        "默认样式是 .spstyle，只含字体文件、字号、线型、符号、直方图箱数和颜色。之后新建的图和曲线会用它。它和图形模板不是同一种文件。",
+        "A default style is a .spstyle. It stores the font file, sizes, line, symbol, histogram bins, and colors used by new graphs and new curves. It is not a graph template."
+    ));
+    labeled(ui, sciplot_core::t("路径"), path);
+    let mut stay = true;
+    ui.horizontal(|ui| {
+        let label = if save {
+            sciplot_core::tr!("保存", "Save")
+        } else {
+            sciplot_core::tr!("打开", "Open")
+        };
+        if action_button(ui, label) {
+            let file = std::path::Path::new(path);
+            let result = if save {
+                app.save_style_file(file)
+            } else {
+                app.load_style_file(file)
+            };
+            match result {
+                Ok(()) => {
+                    if save {
+                        app.status = sciplot_core::tr!(
+                            "已导出默认样式。这不是图形模板。",
+                            "Exported the default style. This is not a graph template."
+                        )
+                        .into();
+                    } else if !app.reload_font(ui.ctx()) {
+                        app.prefs.font_path.clear();
+                        let _ = crate::prefs::save(&app.prefs);
+                        app.reload_font(ui.ctx());
+                        app.status = sciplot_core::t("找不到指定字体，已改用自动字体并保存其余设置").into();
+                    }
+                    stay = false;
+                }
+                Err(err) => app.status = err,
+            }
+        }
+        if ui.button(sciplot_core::t("取消")).clicked() {
+            stay = false;
+        }
+    });
+    stay
 }

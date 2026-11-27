@@ -3176,9 +3176,11 @@ dependencies = [
  "ab_glyph",
  "base64",
  "egui",
+ "image",
  "png 0.17.16",
  "sciplot-core",
  "tiny-skia",
+ "ttf-parser",
 ]
 
 [[package]]

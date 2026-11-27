@@ -37,6 +37,9 @@ pub struct ToolOutput {
     /// 打开或保存之后，项目文件的路径。
     pub project_path: Option<String>,
     pub replaced_project: bool,
+    /// PNG、SVG 以外的导出字节，例如 JPEG、PDF、EPS。
+    pub file: Option<Vec<u8>>,
+    pub mime: Option<String>,
 }
 
 impl ToolOutput {
@@ -57,12 +60,24 @@ impl ToolOutput {
             open_table: false,
             project_path: None,
             replaced_project: false,
+            file: None,
+            mime: None,
         }
     }
 }
 
 pub fn readonly(name: &str) -> bool {
-    matches!(name, "get_project" | "render_graph" | "save_project")
+    matches!(
+        name,
+        "get_project"
+            | "render_graph"
+            | "save_project"
+            | "export_all_graphs"
+            | "print_graphs"
+            | "save_graph_template"
+            | "save_default_style"
+            | "load_default_style"
+    )
 }
 
 pub fn list() -> Vec<ToolSpec> {
@@ -215,15 +230,121 @@ pub fn list() -> Vec<ToolSpec> {
         ),
         spec(
             "render_graph",
-            "把图渲染成 PNG 或 SVG。format 默认 png。Render a graph to PNG or SVG.",
+            "把图渲染成 PNG、SVG、EPS、PDF、JPEG、BMP、PBM、PGM、PPM、XBM 或 XPM。format 默认 png。可给 dpi、quality、transparent、paper、orientation、fit_paper。Render a graph. Default format is png.",
             props(&[
                 ("graph", id_prop("图形名称或 id。Graph name or id.")),
-                ("format", string("png 或 svg，默认 png。")),
-                ("width", json!({"type": "number", "description": "像素宽，默认 1100。Width in pixels, default 1100."})),
-                ("height", json!({"type": "number", "description": "像素高，默认 720。Height in pixels, default 720."})),
+                ("format", string("png、svg、eps、pdf、jpeg、bmp、pbm、pgm、ppm、xbm、xpm。默认 png。")),
+                ("width", json!({"type": "number", "description": "像素宽。不填时 PNG/SVG 仍是 1100×720。Width in pixels."})),
+                ("height", json!({"type": "number", "description": "像素高。Height in pixels."})),
+                ("dpi", json!({"type": "number", "description": "分辨率，默认 144。Resolution, default 144."})),
+                ("quality", json!({"type": "number", "description": "JPEG 质量 1–100，默认 90。JPEG quality."})),
+                ("transparent", json!({"type": "boolean", "description": "透明背景，用于 PNG、XPM、SVG。Transparent background for PNG, XPM, and SVG."})),
+                ("paper", string("A3、A4、A5、Letter、Legal。默认 A4。")),
+                ("orientation", string("portrait 或 landscape。纵向或横向。")),
+                ("fit_paper", json!({"type": "boolean", "description": "位图按纸张尺寸。EPS 和 PDF 始终按纸张。Fit bitmaps to the paper."})),
                 ("path", string("可选，把文件写到这个路径。Optional file path.")),
             ]),
             &["graph"],
+        ),
+        spec(
+            "plot_panel",
+            "按 SciDAVis 面板预设画图：vertical2、horizontal2、grid4、stacked、stacked_histogram。Plot a table with a panel preset.",
+            props(&[
+                ("table", id_prop("表格名称或 id。Table name or id.")),
+                ("preset", string("vertical2、horizontal2、grid4、stacked 或 stacked_histogram。")),
+            ]),
+            &["table", "preset"],
+        ),
+        spec(
+            "arrange_layers",
+            "按行、列、对齐和边距重排图层。边距和间距是相对整张图的比例，大于 1 时按百分比。Arrange layers.",
+            props(&[
+                ("graph", id_prop("图形名称或 id。Graph name or id.")),
+                ("rows", json!({"type": "integer"})),
+                ("cols", json!({"type": "integer"})),
+                ("align", string("left、center 或 right。")),
+                ("margin_left", json!({"type": "number"})),
+                ("margin_right", json!({"type": "number"})),
+                ("margin_top", json!({"type": "number"})),
+                ("margin_bottom", json!({"type": "number"})),
+                ("gap_x", json!({"type": "number"})),
+                ("gap_y", json!({"type": "number"})),
+                ("auto_rearrange", json!({"type": "boolean", "description": "删除图层后是否自动重排。Rearrange after a layer is deleted."})),
+            ]),
+            &["graph"],
+        ),
+        spec(
+            "copy_layer",
+            "复制一个图层。layer 从 1 开始，默认 1。Copy a layer. layer is 1-based.",
+            props(&[
+                ("graph", id_prop("图形名称或 id。Graph name or id.")),
+                ("layer", json!({"type": "integer", "description": "从 1 开始的图层序号。1-based layer index."})),
+            ]),
+            &["graph"],
+        ),
+        spec(
+            "insert_graph_layer",
+            "把另一张图的图层追加到当前图，再按网格重排。Insert another graph as new layers.",
+            props(&[
+                ("graph", id_prop("要接收图层的图。Destination graph.")),
+                ("source", id_prop("被插入的图。Source graph.")),
+            ]),
+            &["graph", "source"],
+        ),
+        spec(
+            "export_all_graphs",
+            "把项目里每张图导出到一个文件夹。格式和选项与 render_graph 相同。Export every graph into a folder.",
+            props(&[
+                ("path", string("文件夹路径。Directory path.")),
+                ("format", string("png、svg、eps、pdf、jpeg、bmp、pbm、pgm、ppm、xbm、xpm。默认 png。")),
+                ("dpi", json!({"type": "number"})),
+                ("quality", json!({"type": "number"})),
+                ("transparent", json!({"type": "boolean"})),
+                ("paper", string("A3、A4、A5、Letter、Legal。")),
+                ("orientation", string("portrait 或 landscape。")),
+                ("fit_paper", json!({"type": "boolean"})),
+            ]),
+            &["path"],
+        ),
+        spec(
+            "print_graphs",
+            "把当前图或全部图打印成多页 PDF。没有系统打印机时这个 PDF 就是打印结果。Print the current graph or every graph to a PDF.",
+            props(&[
+                ("path", string("PDF 路径。PDF path.")),
+                ("graph", id_prop("all 为 false 时要打印的图。默认第一张。Graph to print when all is false.")),
+                ("all", json!({"type": "boolean", "description": "为 true 时每张图一页。默认 false，只打印 graph。One page per graph when true."})),
+                ("dpi", json!({"type": "number"})),
+                ("paper", string("A3、A4、A5、Letter、Legal。默认 A4。")),
+                ("orientation", string("portrait 或 landscape。")),
+            ]),
+            &["path"],
+        ),
+        spec(
+            "save_graph_template",
+            "把图存成 SciPlot 模板 .sptpl。不含曲线和刻度。不是 SciDAVis 的 .qpt。Save a graph template.",
+            props(&[
+                ("graph", id_prop("图形名称或 id。Graph name or id.")),
+                ("path", string(".sptpl 路径。Path.")),
+            ]),
+            &["graph", "path"],
+        ),
+        spec(
+            "open_graph_template",
+            "打开 .sptpl 模板，新建一张空图。Open a .sptpl template as an empty graph.",
+            props(&[("path", string(".sptpl 路径。Path."))]),
+            &["path"],
+        ),
+        spec(
+            "save_default_style",
+            "把本机默认样式存成 .spstyle，不含语言和 API。这不是图形模板。Save the default style.",
+            props(&[("path", string(".spstyle 路径。Path."))]),
+            &["path"],
+        ),
+        spec(
+            "load_default_style",
+            "从 .spstyle 读入默认样式，之后新建的图和曲线会用它。Load a default style.",
+            props(&[("path", string(".spstyle 路径。Path."))]),
+            &["path"],
         ),
         spec(
             "open_project",
@@ -267,7 +388,8 @@ fn id_prop(description: &str) -> Value {
 pub fn dispatch(
     project: &mut Project,
     font: Option<&GlyphFont>,
-    prefs: &Prefs,
+    faces: &[&[u8]],
+    prefs: &mut Prefs,
     name: &str,
     args: &Value,
 ) -> Result<ToolOutput, String> {
@@ -289,7 +411,17 @@ pub fn dispatch(
         "plot_table_3d" => plot_table_3d(project, prefs, obj),
         "signal_columns" => signal_columns(project, prefs, obj),
         "find_intersections" => find_intersections(project, obj),
-        "render_graph" => render_graph(project, font, obj),
+        "render_graph" => render_graph(project, font, faces, obj),
+        "plot_panel" => plot_panel(project, prefs, obj),
+        "arrange_layers" => arrange_layers(project, obj),
+        "copy_layer" => copy_layer(project, obj),
+        "insert_graph_layer" => insert_graph_layer(project, obj),
+        "export_all_graphs" => export_all_graphs(project, font, faces, obj),
+        "print_graphs" => print_graphs(project, faces, obj),
+        "save_graph_template" => save_graph_template(project, obj),
+        "open_graph_template" => open_graph_template(project, obj),
+        "save_default_style" => save_default_style(prefs, obj),
+        "load_default_style" => load_default_style(prefs, obj),
         "open_project" => open_project(project, obj),
         "save_project" => save_project(project, obj),
         other => Err(sciplot_core::trf!("未知工具：{name}", "Unknown tool: {name}", name = other)),
@@ -356,9 +488,20 @@ fn graph_json(graph: &sciplot_core::Graph) -> Value {
         "id": graph.id.raw(),
         "name": graph.name,
         "surface": graph.surface.is_some(),
-        "layers": graph.layers.iter().enumerate().map(|(index, layer)| json!({
+            "arrangement": {
+                "rows": graph.arrangement.rows,
+                "cols": graph.arrangement.cols,
+                "align": match graph.arrangement.align {
+                    sciplot_core::LayerAlign::Left => "left",
+                    sciplot_core::LayerAlign::Center => "center",
+                    sciplot_core::LayerAlign::Right => "right",
+                },
+                "auto_rearrange": graph.arrangement.auto_rearrange,
+            },
+            "layers": graph.layers.iter().enumerate().map(|(index, layer)| json!({
             "index": index + 1,
             "title": layer.title,
+            "frame": {"x": layer.frame.x, "y": layer.frame.y, "w": layer.frame.w, "h": layer.frame.h},
             "x_axis": axis_json(&layer.x_axis),
             "y_axis": axis_json(&layer.y_axis),
             "legend": {
@@ -931,44 +1074,397 @@ fn find_intersections(project: &mut Project, args: &Map<String, Value>) -> Resul
     Ok(output)
 }
 
-fn render_graph(project: &Project, font: Option<&GlyphFont>, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+fn render_graph(
+    project: &Project,
+    font: Option<&GlyphFont>,
+    faces: &[&[u8]],
+    args: &Map<String, Value>,
+) -> Result<ToolOutput, String> {
     let graph_id = find_graph(project, req(args, "graph")?)?;
     let graph = project.graph(graph_id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
-    let format = args.get("format").and_then(Value::as_str).unwrap_or("png").to_ascii_lowercase();
-    let width = args.get("width").and_then(Value::as_f64).unwrap_or(1100.0).clamp(64.0, 4096.0) as f32;
-    let height = args.get("height").and_then(Value::as_f64).unwrap_or(720.0).clamp(64.0, 4096.0) as f32;
-    let scene = sciplot_plot::render(project, graph, &[], width, height, 1.0);
+    let format_text = args.get("format").and_then(Value::as_str).unwrap_or("png");
+    let format = sciplot_plot::ExportFormat::parse(format_text).ok_or_else(|| {
+        sciplot_core::trf!(
+            "不认识的图片格式 {format}",
+            "Unknown image format {format}",
+            format = format_text
+        )
+    })?;
+    let legacy = matches!(format, sciplot_plot::ExportFormat::Png | sciplot_plot::ExportFormat::Svg)
+        && !args.contains_key("dpi")
+        && !args.contains_key("paper")
+        && !args.contains_key("transparent")
+        && !args.contains_key("orientation")
+        && !args.contains_key("fit_paper")
+        && !args.contains_key("quality");
     let name = graph.name.clone();
+    if legacy {
+        let width = args.get("width").and_then(Value::as_f64).unwrap_or(1100.0).clamp(64.0, 4096.0) as f32;
+        let height = args.get("height").and_then(Value::as_f64).unwrap_or(720.0).clamp(64.0, 4096.0) as f32;
+        let scene = sciplot_plot::render(project, graph, &[], width, height, 1.0);
+        let notes = scene.notes.clone();
+        let mut output = ToolOutput::new(
+            sciplot_core::trf!("已渲染「{name}」。", "Rendered \"{name}\".", name = name),
+            json!({"graph_id": graph_id.raw(), "name": name, "notes": notes, "format": format.extension()}),
+        );
+        output.graph = Some(graph_id);
+        match format {
+            sciplot_plot::ExportFormat::Png => {
+                let png = sciplot_plot::to_png(&scene, font)?;
+                if let Some(path) = args.get("path").and_then(Value::as_str) {
+                    write_bytes(Path::new(path), &png)?;
+                }
+                output.png = Some(png);
+            }
+            _ => {
+                let svg = sciplot_plot::to_svg(&scene);
+                if let Some(path) = args.get("path").and_then(Value::as_str) {
+                    write_bytes(Path::new(path), svg.as_bytes())?;
+                }
+                output.svg = Some(svg);
+            }
+        }
+        return Ok(output);
+    }
+    let options = export_options(format, args);
+    let scene = scene_for_export(project, graph, &options, args);
     let notes = scene.notes.clone();
+    let bytes = sciplot_plot::export_scene(&scene, font, faces, &options)?;
+    if let Some(path) = args.get("path").and_then(Value::as_str) {
+        write_bytes(Path::new(path), &bytes)?;
+    }
     let mut output = ToolOutput::new(
         sciplot_core::trf!("已渲染「{name}」。", "Rendered \"{name}\".", name = name),
-        json!({"graph_id": graph_id.raw(), "name": name, "notes": notes, "format": format.clone()}),
+        json!({
+            "graph_id": graph_id.raw(),
+            "name": name,
+            "notes": notes,
+            "format": format.extension(),
+            "mime": format.mime(),
+            "paper": options.paper.name(),
+            "orientation": options.orientation.name(),
+            "dpi": options.dpi,
+            "transparent": options.transparent,
+            "quality": options.quality,
+        }),
     );
     output.graph = Some(graph_id);
-    match format.as_str() {
-        "png" => {
-            let png = sciplot_plot::to_png(&scene, font)?;
-            if let Some(path) = args.get("path").and_then(Value::as_str) {
-                write_bytes(Path::new(path), &png)?;
-            }
-            output.png = Some(png);
-        }
-        "svg" => {
-            let svg = sciplot_plot::to_svg(&scene);
-            if let Some(path) = args.get("path").and_then(Value::as_str) {
-                write_bytes(Path::new(path), svg.as_bytes())?;
-            }
-            output.svg = Some(svg);
-        }
-        other => {
-            return Err(sciplot_core::trf!(
-                "图片格式用 png 或 svg，不能是 {format}",
-                "Image format must be png or svg, not {format}",
-                format = other
-            ));
+    match format {
+        sciplot_plot::ExportFormat::Png => output.png = Some(bytes),
+        sciplot_plot::ExportFormat::Svg => output.svg = Some(String::from_utf8_lossy(&bytes).into_owned()),
+        _ => {
+            output.mime = Some(format.mime().to_string());
+            output.file = Some(bytes);
         }
     }
     Ok(output)
+}
+
+fn plot_panel(project: &mut Project, prefs: &Prefs, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let table = find_table(project, req(args, "table")?)?;
+    let preset_text = req_str(args, "preset")?;
+    let preset = sciplot_core::PanelPreset::parse(&preset_text).ok_or_else(|| {
+        sciplot_core::trf!("不认识的面板 {name}", "Unknown panel {name}", name = preset_text)
+    })?;
+    let id = project.plot_panel(table, preset)?;
+    prefs.apply_new_graph(project, id);
+    let graph = project.graph(id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
+    let frames: Vec<_> = graph
+        .layers
+        .iter()
+        .map(|layer| json!({"x": layer.frame.x, "y": layer.frame.y, "w": layer.frame.w, "h": layer.frame.h}))
+        .collect();
+    let mut output = ToolOutput::new(
+        sciplot_core::trf!("已新建{label}", "Created {label}", label = preset.label()),
+        json!({
+            "graph_id": id.raw(),
+            "name": graph.name,
+            "layers": graph.layers.len(),
+            "preset": preset_text,
+            "frames": frames,
+        }),
+    );
+    output.graph = Some(id);
+    output.open_graph = true;
+    Ok(output)
+}
+
+fn arrange_layers(project: &mut Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let id = find_graph(project, req(args, "graph")?)?;
+    let graph = project.graph_mut(id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
+    if let Some(value) = args.get("rows").and_then(Value::as_u64) {
+        graph.arrangement.rows = value as u32;
+    }
+    if let Some(value) = args.get("cols").and_then(Value::as_u64) {
+        graph.arrangement.cols = value as u32;
+    }
+    if let Some(text) = args.get("align").and_then(Value::as_str) {
+        if let Some(align) = sciplot_core::LayerAlign::parse(text) {
+            graph.arrangement.align = align;
+        }
+    }
+    if let Some(value) = fraction_arg(args.get("margin_left")) {
+        graph.arrangement.margin_left = value;
+    }
+    if let Some(value) = fraction_arg(args.get("margin_right")) {
+        graph.arrangement.margin_right = value;
+    }
+    if let Some(value) = fraction_arg(args.get("margin_top")) {
+        graph.arrangement.margin_top = value;
+    }
+    if let Some(value) = fraction_arg(args.get("margin_bottom")) {
+        graph.arrangement.margin_bottom = value;
+    }
+    if let Some(value) = fraction_arg(args.get("gap_x")) {
+        graph.arrangement.gap_x = value;
+    }
+    if let Some(value) = fraction_arg(args.get("gap_y")) {
+        graph.arrangement.gap_y = value;
+    }
+    if let Some(value) = args.get("auto_rearrange").and_then(Value::as_bool) {
+        graph.arrangement.auto_rearrange = value;
+    }
+    graph.reflow_layers();
+    let frames: Vec<_> = graph
+        .layers
+        .iter()
+        .map(|layer| json!({"x": layer.frame.x, "y": layer.frame.y, "w": layer.frame.w, "h": layer.frame.h}))
+        .collect();
+    Ok(ToolOutput::new(
+        sciplot_core::tr!("已排列图层", "Arranged the layers"),
+        json!({"graph_id": id.raw(), "frames": frames, "auto_rearrange": graph.arrangement.auto_rearrange}),
+    ))
+}
+
+fn copy_layer(project: &mut Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let id = find_graph(project, req(args, "graph")?)?;
+    let layer = args.get("layer").and_then(Value::as_u64).unwrap_or(1).saturating_sub(1) as usize;
+    let at = project.graph_mut(id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?.duplicate_layer(layer)?;
+    let count = project.graph(id).map(|graph| graph.layers.len()).unwrap_or(0);
+    Ok(ToolOutput::new(
+        sciplot_core::tr!("已复制图层", "Copied the layer"),
+        json!({"graph_id": id.raw(), "layer": at + 1, "layers": count}),
+    ))
+}
+
+fn insert_graph_layer(project: &mut Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let id = find_graph(project, req(args, "graph")?)?;
+    let source = find_graph(project, req(args, "source")?)?;
+    if id == source {
+        return Err(sciplot_core::tr!("请选择另一张图", "Choose a different graph").into());
+    }
+    let copied = project.graph(source).cloned().ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
+    let added = project
+        .graph_mut(id)
+        .ok_or_else(|| sciplot_core::t("找不到图形").to_string())?
+        .insert_graph_layers(&copied)?;
+    Ok(ToolOutput::new(
+        sciplot_core::tr!("已把另一张图插入为图层", "Inserted the other graph as new layers"),
+        json!({"graph_id": id.raw(), "added": added}),
+    ))
+}
+
+fn export_all_graphs(
+    project: &Project,
+    font: Option<&GlyphFont>,
+    faces: &[&[u8]],
+    args: &Map<String, Value>,
+) -> Result<ToolOutput, String> {
+    if project.graphs.is_empty() {
+        return Err(sciplot_core::t("没有可导出的图形").into());
+    }
+    let format = sciplot_plot::ExportFormat::parse(args.get("format").and_then(Value::as_str).unwrap_or("png"))
+        .ok_or_else(|| sciplot_core::t("不认识的图片格式").to_string())?;
+    let options = export_options(format, args);
+    let dir_text = req_str(args, "path")?;
+    let dir = Path::new(&dir_text);
+    std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+    let mut files = Vec::new();
+    let mut used = std::collections::HashSet::new();
+    for graph in &project.graphs {
+        let scene = scene_for_export(project, graph, &options, args);
+        let bytes = sciplot_plot::export_scene(&scene, font, faces, &options)?;
+        let file = unique_named(dir, &graph.name, format.extension(), &mut used);
+        write_bytes(&file, &bytes)?;
+        files.push(file.display().to_string());
+    }
+    Ok(ToolOutput::new(
+        sciplot_core::trf!("已导出 {n} 个文件", "Exported {n} files", n = files.len()),
+        json!({"files": files, "format": format.extension(), "mime": format.mime()}),
+    ))
+}
+
+fn print_graphs(project: &Project, faces: &[&[u8]], args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let ids: Vec<GraphId> = if all {
+        project.graphs.iter().map(|graph| graph.id).collect()
+    } else if let Some(key) = args.get("graph").filter(|value| !value.is_null()) {
+        vec![find_graph(project, key)?]
+    } else {
+        project.graphs.first().map(|graph| graph.id).into_iter().collect()
+    };
+    if ids.is_empty() {
+        return Err(sciplot_core::t("没有可打印的图形").into());
+    }
+    let mut options = export_options(sciplot_plot::ExportFormat::Pdf, args);
+    options.fit_paper = true;
+    let mut scenes = Vec::new();
+    for id in &ids {
+        let graph = project.graph(*id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
+        scenes.push(scene_for_export(project, graph, &options, args));
+    }
+    let bytes = sciplot_plot::print_pdf(&scenes, faces, &options)?;
+    let path = req_str(args, "path")?;
+    write_bytes(Path::new(&path), &bytes)?;
+    let (page_w, page_h) = sciplot_plot::page_points(&options);
+    let mut output = ToolOutput::new(
+        sciplot_core::trf!(
+            "已打印 {n} 张图到 {path}（PDF，{w:.0}×{h:.0} 点）。本机没有打印机时就写这个文件。",
+            "Printed {n} graphs to {path} (PDF, {w:.0}×{h:.0} pt). Without a printer, this file is the printout.",
+            n = ids.len(),
+            path = path,
+            w = page_w,
+            h = page_h
+        ),
+        json!({
+            "path": path,
+            "pages": ids.len(),
+            "paper": options.paper.name(),
+            "orientation": options.orientation.name(),
+            "mime": "application/pdf",
+        }),
+    );
+    output.file = Some(bytes);
+    output.mime = Some("application/pdf".into());
+    Ok(output)
+}
+
+fn save_graph_template(project: &Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let id = find_graph(project, req(args, "graph")?)?;
+    let graph = project.graph(id).ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
+    let path = req_str(args, "path")?;
+    let json_text = sciplot_core::GraphTemplate::from_graph(graph, 960.0, 640.0).to_json()?;
+    write_bytes(Path::new(&path), json_text.as_bytes())?;
+    Ok(ToolOutput::new(
+        sciplot_core::trf!(
+            "已保存模板 {path}。这是 SciPlot 的 .sptpl，不是 SciDAVis 的 .qpt。",
+            "Saved template {path}. This is a SciPlot .sptpl, not a SciDAVis .qpt.",
+            path = path
+        ),
+        json!({"path": path, "format": sciplot_core::TEMPLATE_FORMAT}),
+    ))
+}
+
+fn open_graph_template(project: &mut Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let path = req_str(args, "path")?;
+    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let template = sciplot_core::GraphTemplate::from_json(&text)?;
+    let id = project.add_template(&template);
+    let name = project.graph(id).map(|graph| graph.name.clone()).unwrap_or_default();
+    let mut output = ToolOutput::new(
+        sciplot_core::tr!(
+            "已从模板新建空图。用「添加曲线」填数据。曲线样式和刻度不在模板里。",
+            "Created an empty graph from the template. Use Add curve to fill it. Curve styles and ticks are not in the template."
+        ),
+        json!({"graph_id": id.raw(), "name": name, "path": path}),
+    );
+    output.graph = Some(id);
+    output.open_graph = true;
+    Ok(output)
+}
+
+fn save_default_style(prefs: &Prefs, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let path = req_str(args, "path")?;
+    let text = prefs.style_json()?;
+    write_bytes(Path::new(&path), text.as_bytes())?;
+    Ok(ToolOutput::new(
+        sciplot_core::tr!("已导出默认样式。这不是图形模板。", "Exported the default style. This is not a graph template."),
+        json!({"path": path, "format": crate::prefs::STYLE_FORMAT}),
+    ))
+}
+
+fn load_default_style(prefs: &mut Prefs, args: &Map<String, Value>) -> Result<ToolOutput, String> {
+    let path = req_str(args, "path")?;
+    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    prefs.apply_style_json(&text)?;
+    let _ = crate::prefs::save(prefs);
+    Ok(ToolOutput::new(
+        sciplot_core::tr!(
+            "已打开默认样式。之后新建的图和曲线会用它。这不是图形模板。",
+            "Loaded the default style. New graphs and curves will use it. This is not a graph template."
+        ),
+        json!({"path": path, "title_size": prefs.title_size, "format": crate::prefs::STYLE_FORMAT}),
+    ))
+}
+
+fn export_options(format: sciplot_plot::ExportFormat, args: &Map<String, Value>) -> sciplot_plot::ExportOptions {
+    let mut options = sciplot_plot::ExportOptions {
+        format,
+        dpi: args.get("dpi").and_then(Value::as_f64).unwrap_or(144.0) as f32,
+        quality: args.get("quality").and_then(Value::as_u64).unwrap_or(90) as u8,
+        transparent: args.get("transparent").and_then(Value::as_bool).unwrap_or(false),
+        paper: args
+            .get("paper")
+            .and_then(Value::as_str)
+            .and_then(sciplot_plot::Paper::parse)
+            .unwrap_or(sciplot_plot::Paper::A4),
+        orientation: args
+            .get("orientation")
+            .and_then(Value::as_str)
+            .and_then(sciplot_plot::PageOrientation::parse)
+            .unwrap_or(sciplot_plot::PageOrientation::Portrait),
+        fit_paper: args.get("fit_paper").and_then(Value::as_bool).unwrap_or(matches!(
+            format,
+            sciplot_plot::ExportFormat::Eps | sciplot_plot::ExportFormat::Pdf
+        )),
+    };
+    options = options.clamped();
+    options
+}
+
+fn scene_for_export(
+    project: &Project,
+    graph: &sciplot_core::Graph,
+    options: &sciplot_plot::ExportOptions,
+    args: &Map<String, Value>,
+) -> sciplot_plot::Scene {
+    let (mut width, mut height) = sciplot_plot::pixel_size(options);
+    if let Some(value) = args.get("width").and_then(Value::as_f64) {
+        width = value.clamp(64.0, 8000.0) as f32;
+    }
+    if let Some(value) = args.get("height").and_then(Value::as_f64) {
+        height = value.clamp(64.0, 8000.0) as f32;
+    }
+    let scale = options.dpi.clamp(36.0, 600.0) / 96.0;
+    sciplot_plot::render(project, graph, &[], width, height, scale)
+}
+
+fn fraction_arg(value: Option<&Value>) -> Option<f32> {
+    let number = value?.as_f64()? as f32;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    Some(if number > 1.0 { number / 100.0 } else { number }.clamp(0.0, 0.45))
+}
+
+fn unique_named(dir: &Path, stem: &str, ext: &str, used: &mut std::collections::HashSet<String>) -> std::path::PathBuf {
+    let cleaned: String = stem
+        .chars()
+        .map(|ch| if "\\/:*?\"<>|".contains(ch) { '_' } else { ch })
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.');
+    let cleaned = if cleaned.is_empty() { "graph" } else { cleaned };
+    let mut name = format!("{cleaned}.{ext}");
+    let mut n = 2;
+    while used.contains(&name) || dir.join(&name).exists() {
+        name = format!("{cleaned}_{n}.{ext}");
+        n += 1;
+        if n > 10_000 {
+            break;
+        }
+    }
+    used.insert(name.clone());
+    dir.join(name)
 }
 
 fn open_project(project: &mut Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
@@ -1431,8 +1927,8 @@ mod tests {
     use super::*;
 
     fn run(project: &mut Project, name: &str, args: Value) -> ToolOutput {
-        let prefs = Prefs::default();
-        dispatch(project, None, &prefs, name, &args).unwrap_or_else(|err| panic!("{name}: {err}"))
+        let mut prefs = Prefs::default();
+        dispatch(project, None, &[], &mut prefs, name, &args).unwrap_or_else(|err| panic!("{name}: {err}"))
     }
 
     #[test]
@@ -1457,10 +1953,12 @@ mod tests {
         );
         assert!(plotted.open_graph);
         let graph = plotted.graph.unwrap();
+        let mut prefs = Prefs::default();
         let rendered = dispatch(
             &mut project,
             None,
-            &Prefs::default(),
+            &[],
+            &mut prefs,
             "render_graph",
             &json!({"graph": graph.raw(), "format": "png", "width": 480, "height": 320}),
         )
@@ -1472,7 +1970,8 @@ mod tests {
         let err = dispatch(
             &mut project,
             None,
-            &Prefs::default(),
+            &[],
+            &mut prefs,
             "rename_column",
             &json!({"table": "实验", "column": "t", "name": "读数"}),
         )
@@ -1484,5 +1983,146 @@ mod tests {
             json!({"table": "实验", "column": "读数", "expr": "col(\"t\")*3"}),
         );
         assert_eq!(project.tables[0].columns[1].numbers[0], Some(3.0));
+    }
+
+    #[test]
+    fn batch4_tools_cover_panels_export_print_template_and_style() {
+        let names: Vec<_> = list().into_iter().map(|tool| tool.name).collect();
+        for name in [
+            "plot_panel",
+            "arrange_layers",
+            "copy_layer",
+            "insert_graph_layer",
+            "export_all_graphs",
+            "print_graphs",
+            "save_graph_template",
+            "open_graph_template",
+            "save_default_style",
+            "load_default_style",
+        ] {
+            assert!(names.contains(&name), "{name}");
+        }
+        let mut project = Project::new("p");
+        run(
+            &mut project,
+            "create_table",
+            json!({
+                "name": "数据",
+                "columns": [
+                    {"name": "X", "values": [0, 1, 2, 3]},
+                    {"name": "A", "values": [1, 2, 1, 2]},
+                    {"name": "B", "values": [2, 1, 2, 1]},
+                    {"name": "C", "values": [0, 1, 0, 1]},
+                    {"name": "D", "values": [1, 0, 1, 0]}
+                ]
+            }),
+        );
+        let panel = run(&mut project, "plot_panel", json!({"table": "数据", "preset": "grid4"}));
+        let frames = panel.data["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 4);
+        assert!(frames[1]["x"].as_f64().unwrap() > frames[0]["x"].as_f64().unwrap());
+        assert!(frames[2]["y"].as_f64().unwrap() > frames[0]["y"].as_f64().unwrap());
+        let graph = panel.graph.unwrap();
+        let copied = run(&mut project, "copy_layer", json!({"graph": graph.raw(), "layer": 1}));
+        assert_eq!(copied.data["layers"].as_u64(), Some(5));
+        let other = run(
+            &mut project,
+            "plot_columns",
+            json!({"table": "数据", "y": ["A"], "kind": "line"}),
+        );
+        let source = other.graph.unwrap();
+        let inserted = run(
+            &mut project,
+            "insert_graph_layer",
+            json!({"graph": graph.raw(), "source": source.raw()}),
+        );
+        assert!(inserted.data["added"].as_u64().unwrap() >= 1);
+        run(
+            &mut project,
+            "arrange_layers",
+            json!({"graph": graph.raw(), "rows": 2, "cols": 1, "align": "center", "margin_left": 5, "auto_rearrange": false}),
+        );
+        let item = project.graph(graph).unwrap();
+        assert_eq!((item.arrangement.rows, item.arrangement.cols), (2, 1));
+        assert!(!item.arrangement.auto_rearrange);
+        assert!(item.layers[1].frame.y > item.layers[0].frame.y);
+        assert!((item.arrangement.margin_left - 0.05).abs() < 1e-4);
+
+        let dir = std::env::temp_dir().join(format!("sciplot-batch4-tools-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut prefs = Prefs::default();
+        let jpeg = dir.join("one.jpg");
+        let rendered = dispatch(
+            &mut project,
+            None,
+            &[],
+            &mut prefs,
+            "render_graph",
+            &json!({"graph": graph.raw(), "format": "jpeg", "quality": 30, "dpi": 36, "path": jpeg}),
+        )
+        .unwrap();
+        assert_eq!(&rendered.file.as_ref().unwrap()[..2], &[0xff, 0xd8]);
+        assert_eq!(&std::fs::read(&jpeg).unwrap()[..2], &[0xff, 0xd8]);
+        let xpm = dir.join("one.xpm");
+        let rendered = dispatch(
+            &mut project,
+            None,
+            &[],
+            &mut prefs,
+            "render_graph",
+            &json!({"graph": source.raw(), "format": "xpm", "transparent": true, "dpi": 36, "width": 240, "height": 160, "path": xpm}),
+        )
+        .unwrap();
+        let text = String::from_utf8(rendered.file.unwrap()).unwrap();
+        assert!(text.contains("/* XPM */"), "{text}");
+        assert!(text.contains("c None"), "{text}");
+        let exported = run(
+            &mut project,
+            "export_all_graphs",
+            json!({"path": dir.join("all"), "format": "bmp", "dpi": 36}),
+        );
+        let files = exported.data["files"].as_array().unwrap();
+        assert!(files.len() >= 2);
+        assert_eq!(&std::fs::read(files[0].as_str().unwrap()).unwrap()[..2], b"BM");
+        let pdf = dir.join("print.pdf");
+        let printed = run(
+            &mut project,
+            "print_graphs",
+            json!({"path": pdf, "all": true, "paper": "Letter", "orientation": "landscape", "dpi": 36}),
+        );
+        assert!(printed.data["pages"].as_u64().unwrap() >= 2);
+        let text = String::from_utf8_lossy(&std::fs::read(&pdf).unwrap()).into_owned();
+        assert!(text.starts_with("%PDF-1.4"));
+        assert!(text.contains("/MediaBox [0 0 792 612]"), "{text}");
+        assert!(text.contains("/Count"));
+        let template = dir.join("g.sptpl");
+        run(&mut project, "save_graph_template", json!({"graph": graph.raw(), "path": template}));
+        let before = project.graphs.len();
+        let opened = run(&mut project, "open_graph_template", json!({"path": template}));
+        assert_eq!(project.graphs.len(), before + 1);
+        let empty = project.graph(opened.graph.unwrap()).unwrap();
+        assert!(empty.layers.iter().all(|layer| layer.curves.is_empty()));
+        prefs.title_size = 23.0;
+        prefs.api_port = 4321;
+        let style = dir.join("style.spstyle");
+        dispatch(&mut project, None, &[], &mut prefs, "save_default_style", &json!({"path": style})).unwrap();
+        let saved = std::fs::read_to_string(&style).unwrap();
+        assert!(saved.contains("sciplot-style"));
+        assert!(!saved.contains("4321"));
+        let mut loaded = Prefs { api_port: 1111, ..Prefs::default() };
+        crate::prefs::with_prefs_io(|| {
+            let prefs_file = crate::prefs::prefs_path();
+            let backup = std::fs::read(&prefs_file).ok();
+            dispatch(&mut project, None, &[], &mut loaded, "load_default_style", &json!({"path": style})).unwrap();
+            if let Some(bytes) = backup {
+                std::fs::write(&prefs_file, bytes).unwrap();
+            } else {
+                let _ = std::fs::remove_file(&prefs_file);
+            }
+        });
+        assert!((loaded.title_size - 23.0).abs() < 1e-4);
+        assert_eq!(loaded.api_port, 1111);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -517,6 +517,13 @@ fn plot_table_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, table: TableId) {
             }
         }
     });
+    ui.menu_button(sciplot_core::tr!("面板", "Panel"), |ui| {
+        for preset in sciplot_core::PanelPreset::all() {
+            if clicked_menu(ui, preset.label()) {
+                app.plot_panel(table, *preset);
+            }
+        }
+    });
 }
 
 fn selected_plot_column(app: &SciPlotApp, table: TableId) -> usize {
@@ -734,28 +741,26 @@ fn layer_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: us
         app.dialog = Some(function_dialog(None, 0, true));
     }
     if clicked_menu(ui, sciplot_core::t("新建图层")) {
-        app.edit(sciplot_core::t("新建图层"), |project| {
-            let graph = project
-                .graph_mut(graph)
-                .ok_or(sciplot_core::t("找不到图形"))?;
-            graph.layers.push(sciplot_core::Layer::default());
-            graph.reflow_layers();
-            Ok(())
-        });
+        app.add_graph_layer(graph);
+    }
+    if clicked_menu(ui, sciplot_core::tr!("复制图层", "Copy layer")) {
+        app.duplicate_graph_layer(graph, layer);
+    }
+    if clicked_menu(ui, sciplot_core::tr!("插入其他图形…", "Insert another graph…")) {
+        let source = app
+            .project
+            .graphs
+            .iter()
+            .find(|item| item.id != graph)
+            .map(|item| item.id)
+            .unwrap_or(graph);
+        app.dialog = Some(Dialog::InsertLayer { graph, source });
+    }
+    if clicked_menu(ui, sciplot_core::tr!("排列图层…", "Arrange layers…")) {
+        app.dialog = Some(crate::app::arrange_dialog(app, graph));
     }
     if clicked_menu(ui, sciplot_core::t("删除图层")) {
-        app.edit(sciplot_core::t("删除图层"), |project| {
-            let graph = project
-                .graph_mut(graph)
-                .ok_or(sciplot_core::t("找不到图形"))?;
-            if graph.layers.len() <= 1 {
-                return Err(sciplot_core::t("至少保留一个图层").into());
-            }
-            let index = layer.min(graph.layers.len() - 1);
-            graph.layers.remove(index);
-            graph.reflow_layers();
-            Ok(())
-        });
+        app.delete_graph_layer(graph, layer);
     }
     let curve = app
         .project
@@ -1078,6 +1083,13 @@ fn view_items(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
 }
 
 fn export_items(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId) {
+    if clicked_menu(ui, sciplot_core::tr!("导出图形…", "Export graph…")) {
+        app.open_tab(Tab::Graph(graph));
+        crate::app::open_batch4(app, crate::app::Batch4Action::ExportCurrent);
+    }
+    if clicked_menu(ui, sciplot_core::tr!("导出全部图形…", "Export all graphs…")) {
+        crate::app::open_batch4(app, crate::app::Batch4Action::ExportAll);
+    }
     if clicked_menu(ui, sciplot_core::t("导出 PNG…")) {
         app.open_tab(Tab::Graph(graph));
         crate::app::start_file(app, PathAction::ExportPng, "144");

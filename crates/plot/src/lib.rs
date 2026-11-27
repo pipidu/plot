@@ -2,6 +2,7 @@
 
 mod color;
 mod contour;
+mod export;
 mod interact;
 mod paint;
 mod png_image;
@@ -12,10 +13,14 @@ mod scene;
 mod spline;
 mod surface;
 mod svg;
+mod vector;
 
+pub use export::{
+    export_scene, page_points, pixel_size, print_pdf, ExportFormat, ExportOptions, PageOrientation, Paper,
+};
 pub use interact::{data_to_screen, nearest_curve, nearest_point, pan_limits, screen_to_data, zoom_limits, CurveHit, NearestPoint};
 pub use paint::{paint, PLOT_FONT_FAMILY};
-pub use raster::{prepare_font, to_png, to_rgba, GlyphFont};
+pub use raster::{prepare_font, to_png, to_png_with, to_rgba, to_rgba_with, GlyphFont};
 pub use render::render;
 pub use scene::{LayerFrame, LayerView, LegendHit, Prim, Scene};
 pub use svg::{to_svg, SVG_FONT};

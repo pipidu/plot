@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use egui_dock::{DockArea, DockState, TabViewer};
@@ -6,12 +6,13 @@ use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
     demo_project, export_csv_with, import_csv_files, import_csv_with, tr, AnnotationKind, CsvDelimiter,
     CsvEncoding, CsvHeader, CsvImportOptions, CsvLayout, CurveKind, DataSource, DecimalMark, Graph, GraphId,
-    History, MatrixId, NoteId, NumericFormat, Project, SortMode, SurfaceMode, SurfaceSource,
-    TableId,
+    GraphTemplate, History, LayerAlign, LayerArrangement, MatrixId, NoteId, NumericFormat, PanelPreset, Project,
+    SortMode, SurfaceMode, SurfaceSource, TableId,
 };
 use sciplot_plot::{
-    data_to_screen, nearest_curve, nearest_point, pan_limits, render, screen_to_data, to_png,
-    to_rgba, to_svg, zoom_limits, LayerFrame, LayerView, Scene,
+    data_to_screen, export_scene, nearest_curve, nearest_point, page_points, pan_limits, pixel_size, print_pdf, render,
+    screen_to_data, to_png, to_rgba, to_svg, zoom_limits, ExportFormat, ExportOptions, LayerFrame, LayerView,
+    PageOrientation, Paper, Scene,
 };
 
 use crate::dialogs;
@@ -524,6 +525,63 @@ pub enum Dialog {
         path: String,
     },
     Update(crate::update::UpdateView),
+    ArrangeLayers {
+        graph: GraphId,
+        rows: String,
+        cols: String,
+        align: LayerAlign,
+        margin_left: String,
+        margin_right: String,
+        margin_top: String,
+        margin_bottom: String,
+        gap_x: String,
+        gap_y: String,
+        auto_rearrange: bool,
+    },
+    InsertLayer {
+        graph: GraphId,
+        source: GraphId,
+    },
+    ExportGraph {
+        all: bool,
+        format: ExportFormat,
+        path: String,
+        dpi: String,
+        quality: String,
+        transparent: bool,
+        paper: Paper,
+        orientation: PageOrientation,
+        fit_paper: bool,
+    },
+    Print {
+        all: bool,
+        path: String,
+        dpi: String,
+        paper: Paper,
+        orientation: PageOrientation,
+    },
+    TemplateFile {
+        save: bool,
+        graph: GraphId,
+        path: String,
+    },
+    StyleFile {
+        save: bool,
+        path: String,
+    },
+}
+
+/// 文件菜单和设置菜单里这一批命令。菜单和测试走同一个入口。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Batch4Action {
+    ExportCurrent,
+    ExportAll,
+    PrintCurrent,
+    PrintAll,
+    SaveTemplate,
+    OpenTemplate,
+    SaveStyle,
+    LoadStyle,
 }
 
 #[derive(Clone)]
@@ -869,6 +927,11 @@ impl SciPlotApp {
             .map(|g| g.layers.len())
             .unwrap_or(1);
         self.active_layer.min(n.saturating_sub(1))
+    }
+
+    /// 图窗口左上角的图层按钮调用这里。
+    pub(crate) fn set_active_layer(&mut self, index: usize) {
+        self.active_layer = index;
     }
 
     pub fn save_current(&mut self) -> bool {
@@ -1313,10 +1376,25 @@ impl SciPlotApp {
             }
         }
         let font = fonts::plot_glyphs(&self.fonts);
-        let prefs = self.prefs.clone();
+        let owned_faces = self.font_faces();
+        let face_refs: Vec<&[u8]> = owned_faces.iter().map(Vec::as_slice).collect();
+        if name == "load_default_style" || name == "save_default_style" {
+            let output = crate::api::dispatch(&mut self.project, font.as_ref(), &face_refs, &mut self.prefs, name, &args)?;
+            if name == "load_default_style" {
+                self.reload_font_silent();
+            }
+            if let Some(line) = output.text.lines().next() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    self.status = line.to_string();
+                }
+            }
+            return Ok(output);
+        }
+        let mut prefs = self.prefs.clone();
         // 打开文件和菜单里的「打开」一样：换掉整个项目并清空撤销，避免撤销后路径仍指向新文件。
         let output = if name == "open_project" {
-            let output = crate::api::dispatch(&mut self.project, font.as_ref(), &prefs, name, &args)?;
+            let output = crate::api::dispatch(&mut self.project, font.as_ref(), &face_refs, &mut prefs, name, &args)?;
             self.history = History::new();
             self.path = output.project_path.as_ref().map(PathBuf::from);
             self.dirty = false;
@@ -1324,7 +1402,7 @@ impl SciPlotApp {
             self.rebuild_dock(false);
             output
         } else if crate::api::readonly(name) {
-            let output = crate::api::dispatch(&mut self.project, font.as_ref(), &prefs, name, &args)?;
+            let output = crate::api::dispatch(&mut self.project, font.as_ref(), &face_refs, &mut prefs, name, &args)?;
             if name == "save_project" {
                 if let Some(path) = output.project_path.as_ref() {
                     self.path = Some(PathBuf::from(path));
@@ -1335,7 +1413,7 @@ impl SciPlotApp {
         } else {
             let tool = name.to_string();
             self.edit(sciplot_core::t("API 调用"), |project| {
-                crate::api::dispatch(project, font.as_ref(), &prefs, &tool, &args)
+                crate::api::dispatch(project, font.as_ref(), &face_refs, &mut prefs, &tool, &args)
             })
             .ok_or_else(|| self.status.clone())?
         };
@@ -1390,6 +1468,270 @@ impl SciPlotApp {
             self.open_tab(Tab::Graph(id));
             self.status = sciplot_core::trf!("已新建{}", "Created {}", kind.label());
         }
+    }
+
+    pub(crate) fn plot_panel(&mut self, table: TableId, preset: PanelPreset) {
+        let prefs = self.prefs.clone();
+        if let Some(id) = self.edit(preset.label(), |project| {
+            let id = project.plot_panel(table, preset)?;
+            prefs.apply_new_graph(project, id);
+            Ok(id)
+        }) {
+            self.active_layer = 0;
+            self.open_tab(Tab::Graph(id));
+            self.status = sciplot_core::trf!("已新建{label}", "Created {label}", label = preset.label());
+        }
+    }
+
+    pub(crate) fn add_graph_layer(&mut self, graph: GraphId) {
+        if self
+            .edit(sciplot_core::t("新建图层"), |project| {
+                project
+                    .graph_mut(graph)
+                    .ok_or(sciplot_core::t("找不到图形"))?
+                    .add_layer();
+                Ok(())
+            })
+            .is_some()
+        {
+            self.fit_layer_views(graph);
+            self.status = sciplot_core::t("已新建图层").into();
+        }
+    }
+
+    pub(crate) fn delete_graph_layer(&mut self, graph: GraphId, layer: usize) {
+        if self
+            .edit(sciplot_core::t("删除图层"), |project| {
+                project
+                    .graph_mut(graph)
+                    .ok_or(sciplot_core::t("找不到图形"))?
+                    .remove_layer(layer)
+            })
+            .is_some()
+        {
+            self.fit_layer_views(graph);
+            self.status = sciplot_core::t("已删除图层").into();
+        }
+    }
+
+    pub(crate) fn duplicate_graph_layer(&mut self, graph: GraphId, layer: usize) {
+        if let Some(at) = self.edit(sciplot_core::tr!("复制图层", "Copy layer"), |project| {
+            project
+                .graph_mut(graph)
+                .ok_or(sciplot_core::t("找不到图形"))?
+                .duplicate_layer(layer)
+        }) {
+            if let Some(views) = self.views.get_mut(&graph) {
+                let at = at.min(views.len());
+                views.insert(at, LayerView::default());
+            }
+            self.set_active_layer(at);
+            self.status = sciplot_core::tr!("已复制图层", "Copied the layer").into();
+        }
+    }
+
+    pub(crate) fn insert_graph_as_layers(&mut self, graph: GraphId, source: GraphId) {
+        if graph == source {
+            self.status = sciplot_core::tr!("请选择另一张图", "Choose a different graph").into();
+            return;
+        }
+        let copied = self.project.graph(source).cloned();
+        let Some(copied) = copied else {
+            self.status = sciplot_core::t("找不到图形").into();
+            return;
+        };
+        if self
+            .edit(sciplot_core::tr!("插入图层", "Insert layer"), |project| {
+                project
+                    .graph_mut(graph)
+                    .ok_or(sciplot_core::t("找不到图形"))?
+                    .insert_graph_layers(&copied)
+                    .map(|_| ())
+            })
+            .is_some()
+        {
+            self.fit_layer_views(graph);
+            self.status = sciplot_core::tr!("已把另一张图插入为图层", "Inserted the other graph as new layers").into();
+        }
+    }
+
+    pub(crate) fn arrange_graph(&mut self, graph: GraphId, arrangement: LayerArrangement) {
+        if self
+            .edit(sciplot_core::tr!("排列图层", "Arrange layers"), |project| {
+                let graph = project.graph_mut(graph).ok_or(sciplot_core::t("找不到图形"))?;
+                graph.arrangement = arrangement;
+                graph.reflow_layers();
+                Ok(())
+            })
+            .is_some()
+        {
+            self.status = sciplot_core::tr!("已排列图层", "Arranged the layers").into();
+        }
+    }
+
+    fn fit_layer_views(&mut self, graph: GraphId) {
+        let n = self.project.graph(graph).map(|item| item.layers.len()).unwrap_or(0);
+        let views = self.views.entry(graph).or_default();
+        if views.len() > n {
+            views.truncate(n);
+        } else {
+            views.resize(n, LayerView::default());
+        }
+    }
+
+    fn font_faces(&self) -> Vec<Vec<u8>> {
+        let mut faces = vec![self.fonts.latin.clone()];
+        if self.fonts.cjk != self.fonts.latin {
+            faces.push(self.fonts.cjk.clone());
+        }
+        faces
+    }
+
+    fn scene_for_export(&self, id: GraphId, options: &ExportOptions) -> Option<Scene> {
+        let graph = self.project.graph(id)?.clone();
+        let views = self.views.get(&id).cloned().unwrap_or_default();
+        let (width, height) = pixel_size(options);
+        let scale = options.dpi.clamp(36.0, 600.0) / 96.0;
+        Some(render(&self.project, &graph, &views, width, height, scale))
+    }
+
+    pub(crate) fn export_graphs_to(
+        &mut self,
+        ids: &[GraphId],
+        path: &Path,
+        options: &ExportOptions,
+        as_directory: bool,
+    ) -> Result<Vec<PathBuf>, String> {
+        if ids.is_empty() {
+            return Err(sciplot_core::t("没有可导出的图形").into());
+        }
+        let options = options.clamped();
+        let owned = self.font_faces();
+        let faces: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        let glyphs = fonts::plot_glyphs(&self.fonts);
+        let mut written = Vec::new();
+        if as_directory {
+            std::fs::create_dir_all(path).map_err(|err| err.to_string())?;
+            let mut used = HashSet::new();
+            for id in ids {
+                let scene = self
+                    .scene_for_export(*id, &options)
+                    .ok_or_else(|| sciplot_core::t("没有可导出的图形").to_string())?;
+                let bytes = export_scene(&scene, glyphs.as_ref(), &faces, &options)?;
+                let stem = self
+                    .project
+                    .graph(*id)
+                    .map(|graph| graph.name.clone())
+                    .unwrap_or_else(|| sciplot_core::t("图形").into());
+                let file = unique_export_path(path, &stem, options.format.extension(), &mut used);
+                std::fs::write(&file, &bytes).map_err(|err| err.to_string())?;
+                written.push(file);
+            }
+        } else {
+            let scene = self
+                .scene_for_export(ids[0], &options)
+                .ok_or_else(|| sciplot_core::t("没有可导出的图形").to_string())?;
+            let bytes = export_scene(&scene, glyphs.as_ref(), &faces, &options)?;
+            if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+            }
+            std::fs::write(path, bytes).map_err(|err| err.to_string())?;
+            written.push(path.to_path_buf());
+        }
+        if let Some(first) = written.first() {
+            self.note_dir(first);
+        }
+        self.status = sciplot_core::trf!("已导出 {n} 个文件", "Exported {n} files", n = written.len());
+        Ok(written)
+    }
+
+    pub(crate) fn print_graphs_to(&mut self, ids: &[GraphId], path: &Path, options: &ExportOptions) -> Result<(), String> {
+        if ids.is_empty() {
+            return Err(sciplot_core::t("没有可打印的图形").into());
+        }
+        let mut scenes = Vec::with_capacity(ids.len());
+        for id in ids {
+            scenes.push(
+                self.scene_for_export(*id, options)
+                    .ok_or_else(|| sciplot_core::t("没有可打印的图形").to_string())?,
+            );
+        }
+        let owned = self.font_faces();
+        let faces: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        let bytes = print_pdf(&scenes, &faces, options)?;
+        if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        std::fs::write(path, bytes).map_err(|err| err.to_string())?;
+        self.note_dir(path);
+        let (page_w, page_h) = page_points(options);
+        self.status = sciplot_core::trf!(
+            "已打印 {n} 张图到 {path}（PDF，{w:.0}×{h:.0} 点）。本机没有打印机时就写这个文件。",
+            "Printed {n} graphs to {path} (PDF, {w:.0}×{h:.0} pt). Without a printer, this file is the printout.",
+            n = ids.len(),
+            path = path.display(),
+            w = page_w,
+            h = page_h
+        );
+        Ok(())
+    }
+
+    pub(crate) fn save_graph_template(&mut self, graph: GraphId, path: &Path) -> Result<(), String> {
+        let graph = self
+            .project
+            .graph(graph)
+            .cloned()
+            .ok_or_else(|| sciplot_core::t("找不到图形").to_string())?;
+        let json = GraphTemplate::from_graph(&graph, 960.0, 640.0).to_json()?;
+        if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        std::fs::write(path, json).map_err(|err| err.to_string())?;
+        self.note_dir(path);
+        self.status = sciplot_core::trf!(
+            "已保存模板 {path}。这是 SciPlot 的 .sptpl，不是 SciDAVis 的 .qpt。",
+            "Saved template {path}. This is a SciPlot .sptpl, not a SciDAVis .qpt.",
+            path = path.display()
+        );
+        Ok(())
+    }
+
+    pub(crate) fn open_graph_template(&mut self, path: &Path) -> Result<GraphId, String> {
+        let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+        let template = GraphTemplate::from_json(&text)?;
+        let id = self
+            .edit(sciplot_core::tr!("打开模板", "Open template"), |project| Ok(project.add_template(&template)))
+            .ok_or_else(|| self.status.clone())?;
+        self.open_tab(Tab::Graph(id));
+        self.active_layer = 0;
+        self.note_dir(path);
+        self.status = sciplot_core::tr!(
+            "已从模板新建空图。用「添加曲线」填数据。曲线样式和刻度不在模板里。",
+            "Created an empty graph from the template. Use Add curve to fill it. Curve styles and ticks are not in the template."
+        )
+        .into();
+        Ok(id)
+    }
+
+    pub(crate) fn save_style_file(&self, path: &Path) -> Result<(), String> {
+        let json = self.prefs.style_json()?;
+        if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        std::fs::write(path, json).map_err(|err| err.to_string())
+    }
+
+    pub(crate) fn load_style_file(&mut self, path: &Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+        self.prefs.apply_style_json(&text)?;
+        let _ = crate::prefs::save(&self.prefs);
+        self.reload_font_silent();
+        self.status = sciplot_core::tr!(
+            "已打开默认样式。之后新建的图和曲线会用它。这不是图形模板。",
+            "Loaded the default style. New graphs and curves will use it. This is not a graph template."
+        )
+        .into();
+        Ok(())
     }
 
     fn import_image(&mut self, path: &std::path::Path) {
@@ -1826,6 +2168,12 @@ fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
             if clicked(ui, sciplot_core::t("默认样式与字体…"), "") {
                 app.dialog = Some(Dialog::Prefs(app.prefs.clone()));
             }
+            if clicked(ui, sciplot_core::tr!("导出默认样式…", "Export default style…"), "") {
+                open_batch4(app, Batch4Action::SaveStyle);
+            }
+            if clicked(ui, sciplot_core::tr!("打开默认样式…", "Open default style…"), "") {
+                open_batch4(app, Batch4Action::LoadStyle);
+            }
         });
         ui.menu_button(i18n::window(), |ui| window_menu(app, ui));
         ui.menu_button(i18n::help(), |ui| {
@@ -1906,6 +2254,181 @@ fn annotation_box(app: &SciPlotApp, graph: GraphId, cols: u32, rows: u32) -> (f6
     (x, y, w, h)
 }
 
+fn percent_text(value: f32) -> String {
+    format!("{:.1}", value * 100.0)
+}
+
+fn parse_percent(text: &str) -> f32 {
+    text.trim()
+        .trim_end_matches('%')
+        .parse::<f32>()
+        .unwrap_or(0.0)
+        .clamp(0.0, 45.0)
+        / 100.0
+}
+
+fn parse_count(text: &str, fallback: u32) -> u32 {
+    text.trim().parse::<u32>().unwrap_or(fallback).max(1)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn arrangement_from_fields(
+    rows: &str,
+    cols: &str,
+    align: LayerAlign,
+    margin_left: &str,
+    margin_right: &str,
+    margin_top: &str,
+    margin_bottom: &str,
+    gap_x: &str,
+    gap_y: &str,
+    auto_rearrange: bool,
+) -> LayerArrangement {
+    LayerArrangement {
+        rows: parse_count(rows, 1),
+        cols: parse_count(cols, 1),
+        align,
+        margin_left: parse_percent(margin_left),
+        margin_right: parse_percent(margin_right),
+        margin_top: parse_percent(margin_top),
+        margin_bottom: parse_percent(margin_bottom),
+        gap_x: parse_percent(gap_x),
+        gap_y: parse_percent(gap_y),
+        auto_rearrange,
+    }
+}
+
+pub(crate) fn arrange_dialog(app: &SciPlotApp, graph: GraphId) -> Dialog {
+    let item = app.project.graph(graph);
+    let arrangement = item
+        .map(|graph| graph.arrangement.clone())
+        .unwrap_or_default();
+    let count = item.map(|graph| graph.layers.len()).unwrap_or(1);
+    let (rows, cols) = arrangement.resolved(count);
+    Dialog::ArrangeLayers {
+        graph,
+        rows: rows.to_string(),
+        cols: cols.to_string(),
+        align: arrangement.align,
+        margin_left: percent_text(arrangement.margin_left),
+        margin_right: percent_text(arrangement.margin_right),
+        margin_top: percent_text(arrangement.margin_top),
+        margin_bottom: percent_text(arrangement.margin_bottom),
+        gap_x: percent_text(arrangement.gap_x),
+        gap_y: percent_text(arrangement.gap_y),
+        auto_rearrange: arrangement.auto_rearrange,
+    }
+}
+
+pub(crate) fn options_from_fields(
+    format: ExportFormat,
+    dpi: &str,
+    quality: &str,
+    transparent: bool,
+    paper: Paper,
+    orientation: PageOrientation,
+    fit_paper: bool,
+) -> ExportOptions {
+    ExportOptions {
+        format,
+        dpi: dpi.trim().parse().unwrap_or(144.0),
+        quality: quality.trim().parse().unwrap_or(90),
+        transparent,
+        paper,
+        orientation,
+        fit_paper,
+    }
+    .clamped()
+}
+
+fn export_dialog(app: &SciPlotApp, all: bool) -> Dialog {
+    let path = if all {
+        default_dir(app).join("sciplot-graphs").display().to_string()
+    } else {
+        default_dir(app)
+            .join(graph_file_name(app, "png"))
+            .display()
+            .to_string()
+    };
+    Dialog::ExportGraph {
+        all,
+        format: ExportFormat::Png,
+        path,
+        dpi: "144".into(),
+        quality: "90".into(),
+        transparent: false,
+        paper: Paper::A4,
+        orientation: PageOrientation::Portrait,
+        fit_paper: false,
+    }
+}
+
+fn print_dialog(app: &SciPlotApp, all: bool) -> Dialog {
+    let name = if all {
+        safe_file_name(sciplot_core::t("全部图形"), "pdf")
+    } else {
+        graph_file_name(app, "pdf")
+    };
+    Dialog::Print {
+        all,
+        path: default_dir(app).join(name).display().to_string(),
+        dpi: "144".into(),
+        paper: Paper::A4,
+        orientation: PageOrientation::Portrait,
+    }
+}
+
+fn template_dialog(app: &SciPlotApp, save: bool) -> Dialog {
+    Dialog::TemplateFile {
+        save,
+        graph: app.active_graph().unwrap_or(GraphId(0)),
+        path: default_dir(app)
+            .join(graph_file_name(app, "sptpl"))
+            .display()
+            .to_string(),
+    }
+}
+
+fn style_dialog(app: &SciPlotApp, save: bool) -> Dialog {
+    Dialog::StyleFile {
+        save,
+        path: default_dir(app)
+            .join(safe_file_name("sciplot-style", "spstyle"))
+            .display()
+            .to_string(),
+    }
+}
+
+/// 文件菜单、设置菜单和右键菜单共用。测试也调用这里，确认对话框真的会被打开。
+pub(crate) fn open_batch4(app: &mut SciPlotApp, action: Batch4Action) {
+    app.dialog = Some(match action {
+        Batch4Action::ExportCurrent => export_dialog(app, false),
+        Batch4Action::ExportAll => export_dialog(app, true),
+        Batch4Action::PrintCurrent => print_dialog(app, false),
+        Batch4Action::PrintAll => print_dialog(app, true),
+        Batch4Action::SaveTemplate => template_dialog(app, true),
+        Batch4Action::OpenTemplate => template_dialog(app, false),
+        Batch4Action::SaveStyle => style_dialog(app, true),
+        Batch4Action::LoadStyle => style_dialog(app, false),
+    });
+}
+
+fn unique_export_path(dir: &Path, stem: &str, ext: &str, used: &mut HashSet<String>) -> PathBuf {
+    let base = safe_file_name(stem, ext);
+    let mut name = base.clone();
+    let mut n = 2;
+    while used.contains(&name) || dir.join(&name).exists() {
+        let bare = base.trim_end_matches(&format!(".{ext}"));
+        name = format!("{bare}_{n}.{ext}");
+        n += 1;
+        if n > 10_000 {
+            break;
+        }
+    }
+    used.insert(name.clone());
+    dir.join(name)
+}
+
 fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     relax_menu(ui);
     if clicked(ui, sciplot_core::t("新建项目"), "Ctrl+N") {
@@ -1938,6 +2461,25 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     }
     if clicked(ui, sciplot_core::t("导出当前图形 SVG…"), "") {
         start_file(app, PathAction::ExportSvg, "");
+    }
+    if clicked(ui, sciplot_core::tr!("导出图形…", "Export graph…"), "") {
+        open_batch4(app, Batch4Action::ExportCurrent);
+    }
+    if clicked(ui, sciplot_core::tr!("导出全部图形…", "Export all graphs…"), "") {
+        open_batch4(app, Batch4Action::ExportAll);
+    }
+    if clicked(ui, sciplot_core::tr!("打印…", "Print…"), "") {
+        open_batch4(app, Batch4Action::PrintCurrent);
+    }
+    if clicked(ui, sciplot_core::tr!("打印全部图形…", "Print all plots…"), "") {
+        open_batch4(app, Batch4Action::PrintAll);
+    }
+    ui.separator();
+    if clicked(ui, sciplot_core::tr!("保存为模板…", "Save as template…"), "") {
+        open_batch4(app, Batch4Action::SaveTemplate);
+    }
+    if clicked(ui, sciplot_core::tr!("打开模板…", "Open template…"), "") {
+        open_batch4(app, Batch4Action::OpenTemplate);
     }
     ui.separator();
     ui.menu_button(sciplot_core::t("最近文件"), |ui| {
@@ -2660,6 +3202,23 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
     let surface = graph.surface.is_some();
     let mut visibility_changed = false;
     ui.horizontal_wrapped(|ui| {
+        if !surface && !graph.layers.is_empty() {
+            for index in 0..graph.layers.len() {
+                let active = app.layer_index(id) == index;
+                let mut button = egui::Button::new(format!("{}", index + 1)).min_size(egui::vec2(26.0, 22.0));
+                if active {
+                    button = button.fill(ui.visuals().selection.bg_fill);
+                }
+                if ui
+                    .add(button)
+                    .on_hover_text(sciplot_core::tr!("切换图层", "Switch layer"))
+                    .clicked()
+                {
+                    app.set_active_layer(index);
+                }
+            }
+            ui.separator();
+        }
         if !graph.layers.is_empty() && graph.surface.is_none() {
             let layer_index = app.layer_index(id);
             let curves: Vec<(String, bool)> = graph
@@ -3831,5 +4390,237 @@ mod tests {
         assert_eq!(text, "1\t10\n2\t20");
         assert!(app.cell_is_selected(id, 1, 0));
         assert!(!app.cell_is_selected(id, 0, 2));
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    fn sample_app() -> (SciPlotApp, TableId, GraphId) {
+        let mut project = Project::new("样本");
+        let table = project.new_table("数据");
+        {
+            let item = project.table_mut(table).unwrap();
+            item.columns[0].set_numbers(&[0.0, 1.0, 2.0, 3.0]);
+            item.columns[1].set_numbers(&[1.0, 0.0, 1.0, 0.0]);
+            item.add_column("C", sciplot_core::ColumnMode::Y);
+            item.columns[2].set_numbers(&[0.0, 1.0, 0.0, 1.0]);
+        }
+        let graph = project.plot_table(table, CurveKind::Line).unwrap();
+        let mut app = SciPlotApp::empty(project);
+        app.focus = Some(Tab::Graph(graph));
+        (app, table, graph)
+    }
+
+    #[test]
+    fn batch4_menus_layers_export_print_template_and_style() {
+        let (mut app, table, graph) = sample_app();
+        app.plot_panel(table, PanelPreset::Vertical2);
+        {
+            let vertical = app.project.graphs.last().unwrap();
+            assert!(vertical.layers[1].frame.y > vertical.layers[0].frame.y);
+            assert!(near(vertical.layers[0].frame.x, vertical.layers[1].frame.x));
+        }
+        app.plot_panel(table, PanelPreset::Horizontal2);
+        let horizontal = app.project.graphs.last().unwrap();
+        assert!(horizontal.layers[1].frame.x > horizontal.layers[0].frame.x);
+        app.plot_panel(table, PanelPreset::Grid4);
+        let grid = app.project.graphs.last().unwrap();
+        assert_eq!(grid.layers.len(), 4);
+        assert!(grid.layers[1].frame.x > grid.layers[0].frame.x);
+        assert!(grid.layers[2].frame.y > grid.layers[0].frame.y);
+        app.plot_panel(table, PanelPreset::Stacked);
+        let stacked = app.project.graphs.last().unwrap();
+        assert!(stacked.layers.len() >= 2);
+        assert_eq!(stacked.layers[0].x_axis.min, stacked.layers[1].x_axis.min);
+        assert!(stacked.layers[0].x_axis.label.is_empty());
+        assert!(!stacked.layers.last().unwrap().x_axis.label.is_empty());
+        app.plot_panel(table, PanelPreset::StackedHistogram);
+        let bars = app.project.graphs.last().unwrap();
+        assert_eq!(bars.layers.len(), 1);
+        assert!(bars.layers[0].curves.iter().all(|curve| curve.kind == CurveKind::StackedHistogram));
+
+        app.add_graph_layer(graph);
+        let frames = &app.project.graph(graph).unwrap().layers;
+        assert_eq!(frames.len(), 2);
+        assert!(near(frames[0].frame.w, 0.5));
+        assert!(near(frames[1].frame.x, 0.5));
+        app.set_active_layer(1);
+        assert_eq!(app.layer_index(graph), 1);
+        app.set_active_layer(99);
+        assert_eq!(app.layer_index(graph), 1);
+        app.duplicate_graph_layer(graph, 0);
+        assert_eq!(app.project.graph(graph).unwrap().layers.len(), 3);
+        assert_eq!(app.layer_index(graph), 1);
+        let source = app.project.graphs.iter().find(|item| item.id != graph).unwrap().id;
+        let before = app.project.graph(graph).unwrap().layers.len();
+        app.insert_graph_as_layers(graph, source);
+        assert!(app.project.graph(graph).unwrap().layers.len() > before);
+        app.arrange_graph(
+            graph,
+            LayerArrangement {
+                rows: 2,
+                cols: 2,
+                align: LayerAlign::Center,
+                margin_left: 0.04,
+                margin_right: 0.04,
+                margin_top: 0.04,
+                margin_bottom: 0.04,
+                gap_x: 0.02,
+                gap_y: 0.02,
+                auto_rearrange: false,
+            },
+        );
+        let (kept, last) = {
+            let arranged = app.project.graph(graph).unwrap();
+            assert!(arranged.layers[0].frame.x > 0.03);
+            assert!(!arranged.arrangement.auto_rearrange);
+            (arranged.layers[0].frame, arranged.layers.len() - 1)
+        };
+        app.delete_graph_layer(graph, last);
+        let after = app.project.graph(graph).unwrap().layers[0].frame;
+        assert!(near(after.w, kept.w) && near(after.x, kept.x));
+        let dialog = arrange_dialog(&app, graph);
+        match dialog {
+            Dialog::ArrangeLayers { auto_rearrange: false, cols, .. } => assert_eq!(cols, "2"),
+            _ => panic!("排列对话框"),
+        }
+
+        for action in [
+            Batch4Action::ExportCurrent,
+            Batch4Action::ExportAll,
+            Batch4Action::PrintCurrent,
+            Batch4Action::PrintAll,
+            Batch4Action::SaveTemplate,
+            Batch4Action::OpenTemplate,
+            Batch4Action::SaveStyle,
+            Batch4Action::LoadStyle,
+        ] {
+            open_batch4(&mut app, action);
+        }
+        match app.dialog {
+            Some(Dialog::StyleFile { save: false, .. }) => {}
+            _ => panic!("打开默认样式对话框"),
+        }
+        open_batch4(&mut app, Batch4Action::PrintAll);
+        match &app.dialog {
+            Some(Dialog::Print { all: true, paper: Paper::A4, orientation: PageOrientation::Portrait, .. }) => {}
+            _ => panic!("打印全部对话框"),
+        }
+        open_batch4(&mut app, Batch4Action::ExportAll);
+        match &app.dialog {
+            Some(Dialog::ExportGraph { all: true, format: ExportFormat::Png, .. }) => {}
+            _ => panic!("导出全部对话框"),
+        }
+
+        let dir = std::env::temp_dir().join(format!("sciplot-batch4-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ids = vec![graph];
+        let png = app
+            .export_graphs_to(
+                &ids,
+                &dir.join("one.png"),
+                &ExportOptions { dpi: 72.0, ..ExportOptions::default() },
+                false,
+            )
+            .unwrap();
+        assert_eq!(&std::fs::read(&png[0]).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+        let clear = app
+            .export_graphs_to(
+                &ids,
+                &dir.join("clear.png"),
+                &ExportOptions { dpi: 72.0, transparent: true, ..ExportOptions::default() },
+                false,
+            )
+            .unwrap();
+        let image = image::load_from_memory(&std::fs::read(&clear[0]).unwrap()).unwrap().to_rgba8();
+        assert_eq!(image.get_pixel(0, 0)[3], 0);
+        let xpm = app
+            .export_graphs_to(
+                &ids,
+                &dir.join("one.xpm"),
+                &ExportOptions { format: ExportFormat::Xpm, dpi: 36.0, transparent: true, ..ExportOptions::default() },
+                false,
+            )
+            .unwrap();
+        let text = std::fs::read_to_string(&xpm[0]).unwrap();
+        assert!(text.contains("c None"));
+        let eps = app
+            .export_graphs_to(
+                &ids,
+                &dir.join("one.eps"),
+                &ExportOptions {
+                    format: ExportFormat::Eps,
+                    paper: Paper::A5,
+                    orientation: PageOrientation::Landscape,
+                    dpi: 36.0,
+                    ..ExportOptions::default()
+                },
+                false,
+            )
+            .unwrap();
+        let text = std::fs::read_to_string(&eps[0]).unwrap();
+        assert!(text.starts_with("%!PS-Adobe-3.0 EPSF-3.0"));
+        assert!(text.contains("%%Orientation: Landscape"));
+        assert!(text.contains("A5"));
+        let all_ids: Vec<_> = app.project.graphs.iter().map(|item| item.id).collect();
+        let files = app
+            .export_graphs_to(
+                &all_ids,
+                &dir.join("all"),
+                &ExportOptions { format: ExportFormat::Ppm, dpi: 36.0, ..ExportOptions::default() },
+                true,
+            )
+            .unwrap();
+        assert_eq!(files.len(), all_ids.len());
+        assert!(std::fs::read(&files[0]).unwrap().starts_with(b"P6"));
+        app.print_graphs_to(
+            &ids,
+            &dir.join("current.pdf"),
+            &options_from_fields(ExportFormat::Pdf, "36", "90", false, Paper::A4, PageOrientation::Portrait, true),
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&std::fs::read(dir.join("current.pdf")).unwrap()).into_owned();
+        assert!(text.contains("%PDF-1.4"));
+        assert!(text.contains("/MediaBox [0 0 595 842]"));
+        assert!(text.contains("/Count 1"));
+        app.print_graphs_to(
+            &all_ids,
+            &dir.join("all.pdf"),
+            &options_from_fields(ExportFormat::Pdf, "36", "90", false, Paper::Letter, PageOrientation::Landscape, true),
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&std::fs::read(dir.join("all.pdf")).unwrap()).into_owned();
+        assert!(text.contains("/MediaBox [0 0 792 612]"));
+        assert!(text.contains(&format!("/Count {}", all_ids.len())));
+
+        let template = dir.join("graph.sptpl");
+        app.save_graph_template(graph, &template).unwrap();
+        let saved = std::fs::read_to_string(&template).unwrap();
+        assert!(saved.contains("sciplot-template"));
+        assert!(saved.contains("not a SciDAVis .qpt") || saved.contains(".qpt"));
+        let opened = app.open_graph_template(&template).unwrap();
+        assert!(app.project.graph(opened).unwrap().layers.iter().all(|layer| layer.curves.is_empty()));
+        app.prefs.title_size = 22.0;
+        app.prefs.api_port = 4545;
+        let style = dir.join("style.spstyle");
+        app.save_style_file(&style).unwrap();
+        let mut fresh = SciPlotApp::empty(Project::new("空"));
+        fresh.prefs.api_port = 2222;
+        crate::prefs::with_prefs_io(|| {
+            let prefs_file = crate::prefs::prefs_path();
+            let backup = std::fs::read(&prefs_file).ok();
+            fresh.load_style_file(&style).unwrap();
+            if let Some(bytes) = backup {
+                std::fs::write(&prefs_file, bytes).unwrap();
+            } else {
+                let _ = std::fs::remove_file(&prefs_file);
+            }
+        });
+        assert!(near(fresh.prefs.title_size, 22.0));
+        assert_eq!(fresh.prefs.api_port, 2222);
+        assert_eq!(fresh.prefs.language, app.prefs.language);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

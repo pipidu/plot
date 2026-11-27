@@ -20,6 +20,7 @@ struct Session {
     project: sciplot_core::Project,
     path: Option<PathBuf>,
     font: Option<sciplot_plot::GlyphFont>,
+    faces: Vec<Vec<u8>>,
     prefs: Prefs,
     forward: bool,
     told_forward: bool,
@@ -50,6 +51,10 @@ impl Session {
         sciplot_core::set_language(prefs.language);
         let loaded = crate::fonts::load(prefs.font_request());
         let font = crate::fonts::plot_glyphs(&loaded);
+        let mut faces = vec![loaded.latin];
+        if loaded.cjk != faces[0] {
+            faces.push(loaded.cjk);
+        }
         let (project, path) = match project {
             Some(path) => {
                 let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
@@ -61,6 +66,7 @@ impl Session {
             project,
             path,
             font,
+            faces,
             prefs,
             forward,
             told_forward: false,
@@ -138,7 +144,9 @@ impl Session {
                 return forward(&endpoint, name, arguments);
             }
         }
-        let output = tools::dispatch(&mut self.project, self.font.as_ref(), &self.prefs, name, arguments)?;
+        let faces = self.faces.clone();
+        let refs: Vec<&[u8]> = faces.iter().map(Vec::as_slice).collect();
+        let output = tools::dispatch(&mut self.project, self.font.as_ref(), &refs, &mut self.prefs, name, arguments)?;
         if !tools::readonly(name) {
             if output.replaced_project {
                 self.path = output.project_path.as_ref().map(PathBuf::from);
@@ -181,6 +189,16 @@ fn mcp_result(output: &ToolOutput, is_error: bool) -> Value {
     }
     if let Some(svg) = &output.svg {
         content.push(json!({"type": "text", "text": svg}));
+    }
+    if let Some(file) = &output.file {
+        content.push(json!({
+            "type": "text",
+            "text": format!(
+                "{} {}",
+                output.mime.as_deref().unwrap_or("application/octet-stream"),
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, file)
+            ),
+        }));
     }
     json!({"content": content, "isError": is_error})
 }

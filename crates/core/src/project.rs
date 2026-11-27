@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
-    Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, SurfaceMode, SurfaceSource, SurfaceSpec, TablePlot3D, TickKind,
-    VectorMode,
+    Curve, CurveKind, CurveStyle, DataSource, Graph, Layer, PanelPreset, SurfaceMode, SurfaceSource, SurfaceSpec,
+    TablePlot3D, TickKind, VectorMode,
 };
 use crate::matrix::Matrix;
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
@@ -121,6 +121,15 @@ impl Project {
         let id = GraphId(self.alloc());
         let name = unique_name(&self.graph_names(), name);
         self.graphs.push(Graph::new(id, name));
+        id
+    }
+
+    /// 用图形模板新建一张空图。曲线要之后再用「添加曲线」放进去。
+    pub fn add_template(&mut self, template: &crate::template::GraphTemplate) -> GraphId {
+        let id = GraphId(self.alloc());
+        let mut graph = template.into_graph(id);
+        graph.name = unique_name(&self.graph_names(), &graph.name);
+        self.graphs.push(graph);
         id
     }
 
@@ -451,6 +460,77 @@ impl Project {
                     layer.y_axis.label = y_labels[0].clone();
                 }
             }
+        }
+        Ok(graph_id)
+    }
+
+    /// SciDAVis Plot → Panel：按预设把一张表画成多层图或堆叠直方图。
+    pub fn plot_panel(&mut self, table_id: TableId, preset: PanelPreset) -> Result<GraphId, String> {
+        let kind = if preset == PanelPreset::StackedHistogram {
+            CurveKind::StackedHistogram
+        } else {
+            CurveKind::Line
+        };
+        let (table_name, x_label, x_span, curves) = {
+            let table = self.table(table_id).ok_or(crate::locale::t("找不到表格"))?;
+            let curves = curves_from_table(table, kind, VectorMode::DxDy)?;
+            let x_index = table
+                .columns
+                .iter()
+                .position(|column| column.mode == ColumnMode::X)
+                .unwrap_or(0);
+            let x_label = table
+                .columns
+                .get(x_index)
+                .map(|column| column.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "X".into());
+            (table.name.clone(), x_label, column_span(table.columns.get(x_index)), curves)
+        };
+        let layer_count = preset.layer_count(curves.len());
+        let buckets = split_curves(curves, layer_count);
+        let graph_id = self.new_graph(&format!("{table_name}-{}", preset.label()));
+        {
+            let graph = self.graph_mut(graph_id).ok_or(crate::locale::t("找不到图形"))?;
+            graph.arrangement = preset.arrangement(layer_count);
+            graph.layers.clear();
+            for bucket in buckets {
+                let title = if bucket.len() == 1 {
+                    bucket[0].name.clone()
+                } else {
+                    format!("{table_name} {}", preset.label())
+                };
+                let mut layer = Layer { title, ..Layer::default() };
+                layer.x_axis.label = x_label.clone();
+                if bucket.len() == 1 {
+                    layer.y_axis.label = bucket[0].name.clone();
+                }
+                for (offset, mut curve) in bucket.into_iter().enumerate() {
+                    curve.style = CurveStyle::from_index(offset);
+                    layer.curves.push(curve);
+                }
+                graph.layers.push(layer);
+            }
+            if graph.layers.is_empty() {
+                graph.layers.push(Layer::default());
+            }
+            if preset == PanelPreset::Stacked {
+                if let Some((min, max)) = x_span {
+                    let pad = ((max - min) * 0.02).max(1e-9);
+                    let last = graph.layers.len() - 1;
+                    for (index, layer) in graph.layers.iter_mut().enumerate() {
+                        layer.x_axis.min = Some(min - pad);
+                        layer.x_axis.max = Some(max + pad);
+                        if index != last {
+                            layer.x_axis.label.clear();
+                        }
+                    }
+                }
+            }
+            graph.reflow_layers();
+        }
+        for layer in 0..layer_count {
+            self.adopt_axis_ticks(graph_id, layer, table_id);
         }
         Ok(graph_id)
     }
@@ -852,6 +932,47 @@ fn shift_optional(slot: &mut Option<usize>, at: usize, inserted: bool) {
     }
 }
 
+fn column_span(column: Option<&crate::table::Column>) -> Option<(f64, f64)> {
+    let column = column?;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for value in &column.numbers {
+        if let Some(value) = value.filter(|value| value.is_finite()) {
+            min = min.min(value);
+            max = max.max(value);
+        }
+    }
+    if min.is_finite() && max > min {
+        Some((min, max))
+    } else {
+        None
+    }
+}
+
+fn split_curves(curves: Vec<Curve>, layers: usize) -> Vec<Vec<Curve>> {
+    let layers = layers.max(1);
+    let mut out = vec![Vec::new(); layers];
+    if curves.is_empty() {
+        return out;
+    }
+    if curves.len() <= layers {
+        for (index, curve) in curves.into_iter().enumerate() {
+            out[index].push(curve);
+        }
+        return out;
+    }
+    let count = curves.len();
+    let base = count / layers;
+    let extra = count % layers;
+    let mut start = 0;
+    for (index, bucket) in out.iter_mut().enumerate() {
+        let take = base + usize::from(index < extra);
+        bucket.extend(curves[start..start + take].iter().cloned());
+        start += take;
+    }
+    out
+}
+
 fn curves_from_table(table: &Table, kind: CurveKind, vector_mode: VectorMode) -> Result<Vec<Curve>, String> {
     if table.columns.is_empty() {
         return Err(crate::locale::t("表格没有列").into());
@@ -1136,5 +1257,63 @@ mod tests {
         assert!((matrix.get(0, 0).unwrap() - red).abs() < 1e-9);
         assert!(matrix.get(1, 0).is_none());
         assert!(matrix.get(1, 1).unwrap() > 0.0);
+    }
+
+    fn panel_table(project: &mut Project) -> crate::TableId {
+        let table = project.new_table("实验");
+        {
+            let table = project.table_mut(table).unwrap();
+            table.columns.clear();
+            table.add_numeric_column("X", ColumnMode::X, &[0.0, 1.0, 2.0, 3.0]);
+            table.add_numeric_column("A", ColumnMode::Y, &[1.0, 2.0, 1.0, 2.0]);
+            table.add_numeric_column("B", ColumnMode::Y, &[2.0, 1.0, 2.0, 1.0]);
+            table.add_numeric_column("C", ColumnMode::Y, &[0.0, 1.0, 2.0, 3.0]);
+            table.add_numeric_column("D", ColumnMode::Y, &[3.0, 2.0, 1.0, 0.0]);
+        }
+        table
+    }
+
+    #[test]
+    fn panel_presets_place_curves_in_the_documented_grids() {
+        let mut project = Project::new("p");
+        let table = panel_table(&mut project);
+        let vertical = project.plot_panel(table, PanelPreset::Vertical2).unwrap();
+        let graph = project.graph(vertical).unwrap();
+        assert_eq!(graph.layers.len(), 2);
+        assert_eq!(graph.arrangement.rows, 2);
+        assert_eq!(graph.arrangement.cols, 1);
+        assert!(graph.layers[1].frame.y > graph.layers[0].frame.y);
+        assert!(graph.layers[0].frame.w > 0.8);
+        assert_eq!(graph.layers[0].curves.len(), 2);
+        assert_eq!(graph.layers[1].curves.len(), 2);
+
+        let horizontal = project.plot_panel(table, PanelPreset::Horizontal2).unwrap();
+        let graph = project.graph(horizontal).unwrap();
+        assert_eq!((graph.arrangement.rows, graph.arrangement.cols), (1, 2));
+        assert!(graph.layers[1].frame.x > graph.layers[0].frame.x);
+
+        let four = project.plot_panel(table, PanelPreset::Grid4).unwrap();
+        let graph = project.graph(four).unwrap();
+        assert_eq!(graph.layers.len(), 4);
+        assert!(graph.layers.iter().all(|layer| layer.curves.len() == 1));
+        assert!(graph.layers[3].frame.x > graph.layers[2].frame.x);
+        assert!(graph.layers[2].frame.y > graph.layers[0].frame.y);
+
+        let stacked = project.plot_panel(table, PanelPreset::Stacked).unwrap();
+        let graph = project.graph(stacked).unwrap();
+        assert_eq!(graph.layers.len(), 4);
+        assert!(graph.layers.iter().all(|layer| layer.curves.len() == 1));
+        let x0 = graph.layers[0].x_axis.min.unwrap();
+        assert!(graph.layers.iter().all(|layer| layer.x_axis.min.unwrap() == x0));
+        assert!(graph.layers[0].x_axis.label.is_empty());
+        assert!(!graph.layers[3].x_axis.label.is_empty());
+        assert!(graph.layers[3].frame.y > graph.layers[0].frame.y);
+
+        let hist = project.plot_panel(table, PanelPreset::StackedHistogram).unwrap();
+        let graph = project.graph(hist).unwrap();
+        assert_eq!(graph.layers.len(), 1);
+        assert!(graph.layers[0].curves.iter().all(|curve| curve.kind == CurveKind::StackedHistogram));
+        assert_eq!(graph.layers[0].curves.len(), 4);
+        assert!((graph.layers[0].frame.w - 1.0).abs() < 1e-4);
     }
 }
