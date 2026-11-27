@@ -33,22 +33,48 @@ pub fn pan_limits(frame: &LayerFrame, dx: f32, dy: f32) -> Option<((f64, f64), (
 }
 
 pub fn screen_to_data(frame: &LayerFrame, px: f32, py: f32) -> Option<(f64, f64)> {
+    screen_to_data_on(frame, px, py, false, false)
+}
+
+pub fn screen_to_data_on(frame: &LayerFrame, px: f32, py: f32, x_top: bool, y_right: bool) -> Option<(f64, f64)> {
     if frame.plot.w < 1.0 || frame.plot.h < 1.0 {
         return None;
     }
+    let (xmin, xmax, xscale, xinv) = if x_top {
+        (frame.x2_min, frame.x2_max, frame.x2_scale, frame.x2_inverted)
+    } else {
+        (frame.x_min, frame.x_max, frame.x_scale, frame.x_inverted)
+    };
+    let (ymin, ymax, yscale, yinv) = if y_right {
+        (frame.y2_min, frame.y2_max, frame.y2_scale, frame.y2_inverted)
+    } else {
+        (frame.y_min, frame.y_max, frame.y_scale, frame.y_inverted)
+    };
     let mut ux = ((px - frame.plot.x) / frame.plot.w) as f64;
     let mut uy = (1.0 - (py - frame.plot.y) / frame.plot.h) as f64;
-    if frame.x_inverted {
+    if xinv {
         ux = 1.0 - ux;
     }
-    if frame.y_inverted {
+    if yinv {
         uy = 1.0 - uy;
     }
-    let x0 = forward(frame.x_scale, frame.x_min)?;
-    let x1 = forward(frame.x_scale, frame.x_max)?;
-    let y0 = forward(frame.y_scale, frame.y_min)?;
-    let y1 = forward(frame.y_scale, frame.y_max)?;
-    Some((inverse(frame.x_scale, x0 + (x1 - x0) * ux)?, inverse(frame.y_scale, y0 + (y1 - y0) * uy)?))
+    let x0 = forward(xscale, xmin)?;
+    let x1 = forward(xscale, xmax)?;
+    let y0 = forward(yscale, ymin)?;
+    let y1 = forward(yscale, ymax)?;
+    Some((inverse(xscale, x0 + (x1 - x0) * ux)?, inverse(yscale, y0 + (y1 - y0) * uy)?))
+}
+
+/// 按像素平移一根轴。`vertical` 为真时和原来的左轴一样，正的 dy 使范围增大。
+pub fn pan_axis(scale: AxisScale, min: f64, max: f64, inverted: bool, delta_px: f32, span: f32, vertical: bool) -> Option<(f64, f64)> {
+    let a = forward(scale, min)?;
+    let b = forward(scale, max)?;
+    let mut shift = delta_px as f64 / span.max(1.0) as f64 * (b - a);
+    if inverted {
+        shift = -shift;
+    }
+    let signed = if vertical { shift } else { -shift };
+    Some((inverse(scale, a + signed)?, inverse(scale, b + signed)?))
 }
 
 #[derive(Clone, Debug)]

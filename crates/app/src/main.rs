@@ -7,6 +7,7 @@ mod image_io;
 mod context;
 mod dialogs;
 mod fonts;
+mod help_text;
 mod i18n;
 mod ops;
 mod prefs;

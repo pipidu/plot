@@ -168,6 +168,7 @@ impl LayerTemplate {
             .map(|(index, label)| crate::graph::Annotation {
                 id: (index as u64) + 1,
                 kind: label.to_kind(),
+                ..crate::graph::Annotation::default()
             })
             .collect();
         let mut layer = Layer {
@@ -312,6 +313,7 @@ mod tests {
                 size: 13.0,
                 color: [10, 20, 30, 255],
             },
+            ..Default::default()
         });
         graph.layers[0].annotations.push(Annotation {
             id: 8,
@@ -321,6 +323,7 @@ mod tests {
                 label: "交点".into(),
                 color: [1, 2, 3, 255],
             },
+            ..Default::default()
         });
         let template = GraphTemplate::from_graph(&graph, 960.0, 640.0);
         let json = template.to_json().unwrap();

@@ -1,9 +1,10 @@
-//! `.splot`、压缩包，以及和 SciDAVis `.sciprj` 的有限交换。
+//! `.splot`、压缩包，以及和 SciDAVis `.sciprj` 的交换。
 //!
 //! `.splot` 仍是 `FORMAT_VERSION = 1` 的 JSON。`.splot.gz` 是同一份 JSON 的 gzip。
-//! `.sciprj` / `.sciprj.gz` 是下面这个 XML 子集，不是 SciDAVis 2.9 的逐字节副本：
-//! 表格列、矩阵数值、备注、日志、文件夹，以及按表名引用的曲线。
-//! 单元格公式、线型、三维图和标注不在交换范围内。Origin 文件只读，见 `origin`。
+//! 写出的 `.sciprj` / `.sciprj.gz` 仍是下面这个 XML 子集。
+//! 读入时，若文件以 `SciDAVis x.y.z project file` 或 QtiPlot 的同一句式开头，
+//! 则按官方项目格式打开（见 `official`）。官方文件没有单元格公式；
+//! 打开后不要写回原路径。Origin 文件只读，见 `origin`。
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -344,7 +345,32 @@ fn kind_name(kind: CurveKind) -> &'static str {
 }
 
 fn load_sciprj_str(text: &str) -> Result<Project, String> {
+    if crate::official::is_official(text) {
+        return crate::official::load_official(text);
+    }
     load_sciprj_root(parse_xml(text)?)
+}
+
+/// Origin 和官方 SciDAVis / QtiPlot 项目不能当成本程序的保存路径。
+pub fn detach_save_path(name: &str, bytes: &[u8]) -> bool {
+    if ProjectFormat::from_name(name) == Some(ProjectFormat::Origin) {
+        return true;
+    }
+    let Some(format) = ProjectFormat::from_name(name) else {
+        return false;
+    };
+    if !matches!(format, ProjectFormat::Sciprj | ProjectFormat::SciprjGz) {
+        return false;
+    }
+    let text = if format == ProjectFormat::SciprjGz {
+        match gunzip(bytes) {
+            Ok(raw) => String::from_utf8_lossy(&raw).into_owned(),
+            Err(_) => return false,
+        }
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    crate::official::is_official(&text)
 }
 
 fn load_sciprj_root(root: XmlElem) -> Result<Project, String> {

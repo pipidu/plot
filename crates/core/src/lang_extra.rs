@@ -1,10 +1,14 @@
 //! 简体中文和英语以外的界面语言。
 //! 这里覆盖菜单、项目树、脚本和文件夹这些会一直看见的句子。
-//! 没有收录的句子先用英文对照，英文也没有时仍显示简体中文。
+//! 没有收录的短句先用英文对照，英文也没有时仍显示简体中文。
+//! 带参数的状态栏句子在 `lang_formats`，没有收录时留简体中文。
 
 use crate::Language;
 
 pub fn phrase(language: Language, zh: &str) -> Option<&'static str> {
+    if let Some(text) = batch6(language, zh) {
+        return Some(text);
+    }
     let table: &[(&str, &str)] = match language {
         Language::ZhHant => ZH_HANT,
         Language::De => DE,
@@ -395,3 +399,122 @@ const PT_BR: &[(&str, &str)] = &[
     ("删除文件夹", "Excluir pasta"),
     ("默认样式与字体…", "Estilo e fonte padrão…"),
 ];
+
+fn batch6(language: Language, zh: &str) -> Option<&'static str> {
+const ZHHANT: &[(&str, &str)] = &[
+            ("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。", "除法得到小數：1/2 等於 0.5，並且 1 等於 1.0。"),
+            ("绘图向导…", "繪圖精靈…"),
+            ("第 1 步：选择或新建数据", "第 1 步：選擇或新增資料"),
+            ("第 2 步：图型和列", "第 2 步：圖型和欄"),
+            ("第 3 步：确认并绘图", "第 3 步：確認並繪圖"),
+            ("下一步", "下一步"),
+            ("上一步", "上一步"),
+            ("已按向导绘图", "已依精靈繪圖"),
+            ("列数", "欄數"),
+            ("行数", "列數"),
+            ("还没有表格，请新建一张。", "還沒有表格，請新增一張。"),
+            ("X 列", "X 欄"),
+            ("Y 列", "Y 欄"),
+        ];
+const DE: &[(&str, &str)] = &[
+            ("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。", "Division ergibt eine Dezimalzahl: 1/2 ist 0,5, und 1 ist gleich 1,0."),
+            ("绘图向导…", "Diagrammassistent…"),
+            ("第 1 步：选择或新建数据", "Schritt 1: Daten wählen oder anlegen"),
+            ("第 2 步：图型和列", "Schritt 2: Diagrammtyp und Spalten"),
+            ("第 3 步：确认并绘图", "Schritt 3: bestätigen und zeichnen"),
+            ("下一步", "Weiter"),
+            ("上一步", "Zurück"),
+            ("已按向导绘图", "Mit dem Assistenten gezeichnet"),
+            ("列数", "Spalten"),
+            ("行数", "Zeilen"),
+            ("还没有表格，请新建一张。", "Es gibt noch keine Tabelle. Legen Sie eine an."),
+            ("X 列", "X-Spalte"),
+            ("Y 列", "Y-Spalten"),
+        ];
+const FR: &[(&str, &str)] = &[
+            ("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。", "La division donne un nombre décimal : 1/2 vaut 0,5, et 1 est égal à 1,0."),
+            ("绘图向导…", "Assistant de tracé…"),
+            ("第 1 步：选择或新建数据", "Étape 1 : choisir ou créer les données"),
+            ("第 2 步：图型和列", "Étape 2 : type de tracé et colonnes"),
+            ("第 3 步：确认并绘图", "Étape 3 : confirmer et tracer"),
+            ("下一步", "Suivant"),
+            ("上一步", "Précédent"),
+            ("已按向导绘图", "Tracé avec l'assistant"),
+            ("列数", "Colonnes"),
+            ("行数", "Lignes"),
+            ("还没有表格，请新建一张。", "Il n'y a pas encore de tableau. Créez-en un."),
+            ("X 列", "Colonne X"),
+            ("Y 列", "Colonnes Y"),
+        ];
+const RU: &[(&str, &str)] = &[
+            ("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。", "Деление даёт дробное число: 1/2 равно 0,5, и 1 равно 1,0."),
+            ("绘图向导…", "Мастер диаграмм…"),
+            ("第 1 步：选择或新建数据", "Шаг 1: выбрать или создать данные"),
+            ("第 2 步：图型和列", "Шаг 2: тип графика и столбцы"),
+            ("第 3 步：确认并绘图", "Шаг 3: подтвердить и построить"),
+            ("下一步", "Далее"),
+            ("上一步", "Назад"),
+            ("已按向导绘图", "График построен мастером"),
+            ("列数", "Столбцы"),
+            ("行数", "Строки"),
+            ("还没有表格，请新建一张。", "Таблицы ещё нет. Создайте её."),
+            ("X 列", "Столбец X"),
+            ("Y 列", "Столбцы Y"),
+        ];
+const ES: &[(&str, &str)] = &[
+            ("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。", "La división da un decimal: 1/2 es 0,5, y 1 es igual a 1,0."),
+            ("绘图向导…", "Asistente de gráficos…"),
+            ("第 1 步：选择或新建数据", "Paso 1: elegir o crear datos"),
+            ("第 2 步：图型和列", "Paso 2: tipo de gráfico y columnas"),
+            ("第 3 步：确认并绘图", "Paso 3: confirmar y dibujar"),
+            ("下一步", "Siguiente"),
+            ("上一步", "Atrás"),
+            ("已按向导绘图", "Dibujado con el asistente"),
+            ("列数", "Columnas"),
+            ("行数", "Filas"),
+            ("还没有表格，请新建一张。", "Todavía no hay una tabla. Cree una."),
+            ("X 列", "Columna X"),
+            ("Y 列", "Columnas Y"),
+        ];
+const CS: &[(&str, &str)] = &[
+            ("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。", "Dělení dává desetinné číslo: 1/2 je 0,5 a 1 se rovná 1,0."),
+            ("绘图向导…", "Průvodce grafem…"),
+            ("第 1 步：选择或新建数据", "Krok 1: vybrat nebo vytvořit data"),
+            ("第 2 步：图型和列", "Krok 2: typ grafu a sloupce"),
+            ("第 3 步：确认并绘图", "Krok 3: potvrdit a vykreslit"),
+            ("下一步", "Další"),
+            ("上一步", "Zpět"),
+            ("已按向导绘图", "Vykresleno průvodcem"),
+            ("列数", "Sloupce"),
+            ("行数", "Řádky"),
+            ("还没有表格，请新建一张。", "Tabulka ještě není. Vytvořte ji."),
+            ("X 列", "Sloupec X"),
+            ("Y 列", "Sloupce Y"),
+        ];
+const PTBR: &[(&str, &str)] = &[
+            ("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。", "A divisão dá um decimal: 1/2 é 0,5, e 1 é igual a 1,0."),
+            ("绘图向导…", "Assistente de gráfico…"),
+            ("第 1 步：选择或新建数据", "Passo 1: escolher ou criar dados"),
+            ("第 2 步：图型和列", "Passo 2: tipo de gráfico e colunas"),
+            ("第 3 步：确认并绘图", "Passo 3: confirmar e desenhar"),
+            ("下一步", "Avançar"),
+            ("上一步", "Voltar"),
+            ("已按向导绘图", "Desenhado pelo assistente"),
+            ("列数", "Colunas"),
+            ("行数", "Linhas"),
+            ("还没有表格，请新建一张。", "Ainda não há uma tabela. Crie uma."),
+            ("X 列", "Coluna X"),
+            ("Y 列", "Colunas Y"),
+        ];
+    let table: &[(&str, &str)] = match language {
+        Language::ZhHant => ZHHANT,
+        Language::De => DE,
+        Language::Fr => FR,
+        Language::Ru => RU,
+        Language::Es => ES,
+        Language::Cs => CS,
+        Language::PtBr => PTBR,
+        Language::Zh | Language::En => return None,
+    };
+    table.iter().find(|(key, _)| *key == zh).map(|(_, text)| *text)
+}

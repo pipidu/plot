@@ -271,6 +271,11 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             vector_mode,
         } => style_dialog(app, ui, *graph, *layer, *curve, style, name, axes, vector_mode),
         Dialog::Wizard {
+            step,
+            create_new,
+            new_name,
+            new_cols,
+            new_rows,
             table,
             x,
             y,
@@ -278,7 +283,22 @@ fn ui_of(app: &mut SciPlotApp, ui: &mut egui::Ui, dialog: &mut Dialog) -> bool {
             vector_mode,
             third,
             fourth,
-        } => wizard_dialog(app, ui, *table, x, y, kind, vector_mode, third, fourth),
+        } => wizard_dialog(
+            app,
+            ui,
+            step,
+            create_new,
+            new_name,
+            new_cols,
+            new_rows,
+            table,
+            x,
+            y,
+            kind,
+            vector_mode,
+            third,
+            fourth,
+        ),
         Dialog::Errors {
             graph,
             layer,
@@ -929,7 +949,7 @@ fn formula(
             ));
         }
     }
-    ui.label(sciplot_core::t("整数除法会截断，需要小数时写成 1.0/2。"));
+    ui.label(sciplot_core::t("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。"));
     ui.text_edit_singleline(expr);
     if !error.is_empty() {
         ui.colored_label(egui::Color32::from_rgb(176, 32, 32), error.as_str());
@@ -1840,6 +1860,8 @@ fn text_ann(
             return true;
         };
         let text = text.clone();
+        let x_top = app.ann_x_top;
+        let y_right = app.ann_y_right;
         app.edit(sciplot_core::t("文本标注"), |project| {
             push_annotation(
                 project,
@@ -1852,6 +1874,8 @@ fn text_ann(
                     size: 14.0,
                     color: [20, 20, 20, 255],
                 },
+                x_top,
+                y_right,
             )
         });
         app.status = sciplot_core::t("已添加文本").into();
@@ -1906,8 +1930,10 @@ fn arrow_ann(
                 color,
             }
         };
+        let x_top = app.ann_x_top;
+        let y_right = app.ann_y_right;
         app.edit(sciplot_core::t("标注"), |project| {
-            push_annotation(project, graph, layer, kind.clone())
+            push_annotation(project, graph, layer, kind.clone(), x_top, y_right)
         });
         app.status = sciplot_core::t("已添加标注").into();
         return false;
@@ -2708,7 +2734,12 @@ fn range_dialog(
 fn wizard_dialog(
     app: &mut SciPlotApp,
     ui: &mut egui::Ui,
-    table: sciplot_core::TableId,
+    step: &mut usize,
+    create_new: &mut bool,
+    new_name: &mut String,
+    new_cols: &mut String,
+    new_rows: &mut String,
+    table: &mut sciplot_core::TableId,
     x: &mut usize,
     y: &mut Vec<bool>,
     kind: &mut CurveKind,
@@ -2716,9 +2747,59 @@ fn wizard_dialog(
     third: &mut usize,
     fourth: &mut usize,
 ) -> bool {
+    ui.label(match *step {
+        0 => sciplot_core::tr!("第 1 步：选择或新建数据", "Step 1: choose or create data"),
+        1 => sciplot_core::tr!("第 2 步：图型和列", "Step 2: plot type and columns"),
+        _ => sciplot_core::tr!("第 3 步：确认并绘图", "Step 3: confirm and plot"),
+    });
+    if *step == 0 {
+        ui.checkbox(create_new, sciplot_core::tr!("新建表格", "Create a new table"));
+        if *create_new {
+            labeled(ui, sciplot_core::t("名称"), new_name);
+            labeled(ui, sciplot_core::tr!("列数", "Columns"), new_cols);
+            labeled(ui, sciplot_core::tr!("行数", "Rows"), new_rows);
+        } else if app.project.tables.is_empty() {
+            ui.label(sciplot_core::tr!("还没有表格，请新建一张。", "There is no table yet. Create one."));
+            *create_new = true;
+        } else {
+            let names: Vec<(sciplot_core::TableId, String)> = app.project.tables.iter().map(|item| (item.id, item.name.clone())).collect();
+            let selected = names.iter().find(|(id, _)| *id == *table).map(|(_, name)| name.clone()).unwrap_or_else(|| names[0].1.clone());
+            if !names.iter().any(|(id, _)| *id == *table) {
+                *table = names[0].0;
+            }
+            ui.label(sciplot_core::t("表格"));
+            egui::ComboBox::from_id_salt("wizard-table")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (id, name) in &names {
+                        ui.selectable_value(table, *id, name);
+                    }
+                });
+        }
+        if action_button(ui, sciplot_core::tr!("下一步", "Next")) {
+            if *create_new {
+                let cols = new_cols.parse::<usize>().unwrap_or(0).clamp(2, 32);
+                let rows = new_rows.parse::<usize>().unwrap_or(0).clamp(1, 1_000_000);
+                let name = new_name.clone();
+                if let Some(id) = app.edit(sciplot_core::tr!("绘图向导", "Plot wizard"), |project| {
+                    prepare_wizard_table(project, &name, cols, rows)
+                }) {
+                    *table = id;
+                    sync_wizard_columns(app, *table, x, y, third, fourth);
+                    *step = 1;
+                }
+            } else if app.project.table(*table).is_some() {
+                sync_wizard_columns(app, *table, x, y, third, fourth);
+                *step = 1;
+            } else {
+                app.status = sciplot_core::t("找不到表格").into();
+            }
+        }
+        return !ui.button(sciplot_core::t("取消")).clicked();
+    }
     let columns: Vec<String> = app
         .project
-        .table(table)
+        .table(*table)
         .map(|item| item.columns.iter().map(|column| column.name.clone()).collect())
         .unwrap_or_default();
     if columns.is_empty() {
@@ -2773,6 +2854,18 @@ fn wizard_dialog(
             ui.checkbox(&mut y[index], name);
         }
     }
+    if *step == 1 {
+        if action_button(ui, sciplot_core::tr!("下一步", "Next")) {
+            *step = 2;
+        }
+        if ui.button(sciplot_core::tr!("上一步", "Back")).clicked() {
+            *step = 0;
+        }
+        return !ui.button(sciplot_core::t("取消")).clicked();
+    }
+    let table_name = app.project.table(*table).map(|item| item.name.clone()).unwrap_or_default();
+    ui.label(sciplot_core::trf!("表格：{}", "Table: {}", table_name));
+    ui.label(sciplot_core::trf!("图型：{}", "Plot: {}", kind.label()));
     if action_button(ui, sciplot_core::t("绘制")) {
         let picked: Vec<usize> = if *kind == CurveKind::Vector {
             let y_index = y.iter().position(|on| *on).unwrap_or(0);
@@ -2784,8 +2877,9 @@ fn wizard_dialog(
         let mode = *vector_mode;
         let x = *x;
         let prefs = app.prefs.clone();
+        let table_id = *table;
         if let Some(id) = app.edit(sciplot_core::tr!("绘图向导", "Plot wizard"), |project| {
-            let id = project.plot_picked(table, kind, mode, x, &picked)?;
+            let id = project.plot_picked(table_id, kind, mode, x, &picked)?;
             prefs.apply_new_graph(project, id);
             Ok(id)
         }) {
@@ -2794,7 +2888,70 @@ fn wizard_dialog(
             return false;
         }
     }
+    if ui.button(sciplot_core::tr!("上一步", "Back")).clicked() {
+        *step = 1;
+        return true;
+    }
     !ui.button(sciplot_core::t("取消")).clicked()
+}
+
+pub(crate) fn prepare_wizard_table(
+    project: &mut sciplot_core::Project,
+    name: &str,
+    cols: usize,
+    rows: usize,
+) -> Result<sciplot_core::TableId, String> {
+    let cols = cols.clamp(2, 32);
+    let rows = rows.clamp(1, 1_000_000);
+    let id = project.new_table(name);
+    let table = project.table_mut(id).ok_or(sciplot_core::t("找不到表格"))?;
+    while table.columns.len() < cols {
+        let index = table.columns.len();
+        let mode = if index == 0 {
+            sciplot_core::ColumnMode::X
+        } else {
+            sciplot_core::ColumnMode::Y
+        };
+        table.add_column(sciplot_core::column_letter(index), mode);
+    }
+    while table.columns.len() > cols {
+        table.columns.pop();
+    }
+    table.ensure_rows(rows);
+    Ok(id)
+}
+
+fn sync_wizard_columns(
+    app: &SciPlotApp,
+    table: sciplot_core::TableId,
+    x: &mut usize,
+    y: &mut Vec<bool>,
+    third: &mut usize,
+    fourth: &mut usize,
+) {
+    let Some(table) = app.project.table(table) else {
+        return;
+    };
+    let columns = &table.columns;
+    if columns.is_empty() {
+        return;
+    }
+    *x = columns
+        .iter()
+        .position(|column| column.mode == sciplot_core::ColumnMode::X)
+        .unwrap_or(0)
+        .min(columns.len() - 1);
+    y.resize(columns.len(), false);
+    for (index, column) in columns.iter().enumerate() {
+        y[index] = index != *x && (column.mode == sciplot_core::ColumnMode::Y || column.mode == sciplot_core::ColumnMode::Z);
+    }
+    if !y.iter().any(|on| *on) {
+        if let Some(index) = (0..columns.len()).find(|index| *index != *x) {
+            y[index] = true;
+        }
+    }
+    *third = (*third).min(columns.len() - 1);
+    *fourth = (*fourth).min(columns.len() - 1);
 }
 
 fn column_combo(ui: &mut egui::Ui, salt: &str, label: &str, index: &mut usize, columns: &[String]) {
@@ -3215,6 +3372,8 @@ pub(crate) fn push_annotation(
     graph: sciplot_core::GraphId,
     layer: usize,
     kind: AnnotationKind,
+    x_top: bool,
+    y_right: bool,
 ) -> Result<(), String> {
     let id = project.alloc_annotation_id();
     let layer = project
@@ -3223,7 +3382,12 @@ pub(crate) fn push_annotation(
         .layers
         .get_mut(layer)
         .ok_or(sciplot_core::t("找不到图层"))?;
-    layer.annotations.push(Annotation { id, kind });
+    layer.annotations.push(Annotation {
+        id,
+        kind,
+        x_top,
+        y_right,
+    });
     Ok(())
 }
 

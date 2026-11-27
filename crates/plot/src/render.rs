@@ -28,10 +28,12 @@ struct Item {
     pie_start: f32,
     pie_size: f32,
     pie_pattern: FillPattern,
+    pie_explode: f32,
     whisker: WhiskerMode,
     whisker_pct: f64,
     box_mean: bool,
     box_outliers: bool,
+    box_notch: bool,
 }
 
 struct LegendEntry {
@@ -125,10 +127,12 @@ fn render_layer(
                 pie_start: curve.style.pie_start_deg,
                 pie_size: curve.style.pie_size,
                 pie_pattern: curve.style.pie_pattern,
+                pie_explode: curve.style.pie_explode,
                 whisker: curve.style.whisker,
                 whisker_pct: curve.style.whisker_percentile,
                 box_mean: curve.style.box_mean,
                 box_outliers: curve.style.box_outliers,
+                box_notch: curve.style.box_notch,
             }),
             Err(err) => scene.notes.push(format!("{}：{err}", curve.name)),
         }
@@ -292,10 +296,28 @@ fn render_layer(
         }
     }
 
-    let (x_min, x_max, x_note) = finish_range(&bottom, &layer.x_axis, view.x_min, view.x_max);
-    let (y_min, y_max, y_note) = finish_range(&left_range, &layer.y_axis, view.y_min, view.y_max);
-    let (x2_min, x2_max, x2_note) = finish_range(&top_range, &layer.x_top, None, None);
-    let (y2_min, y2_max, y2_note) = finish_range(&right_range, &layer.y_right, None, None);
+    let polar_only = !items.is_empty() && items.iter().all(|item| item.kind == CurveKind::Polar);
+    let any_polar = items.iter().any(|item| item.kind == CurveKind::Polar);
+    let (mut x_min, mut x_max, x_note) = finish_range(&bottom, &layer.x_axis, view.x_min, view.x_max);
+    let (mut y_min, mut y_max, y_note) = finish_range(&left_range, &layer.y_axis, view.y_min, view.y_max);
+    let (x2_min, x2_max, x2_note) = finish_range(&top_range, &layer.x_top, view.x2_min, view.x2_max);
+    let (y2_min, y2_max, y2_note) = finish_range(&right_range, &layer.y_right, view.y2_min, view.y2_max);
+    if polar_only
+        && layer.x_axis.min.is_none()
+        && layer.x_axis.max.is_none()
+        && layer.y_axis.min.is_none()
+        && layer.y_axis.max.is_none()
+        && view.x_min.is_none()
+        && view.x_max.is_none()
+        && view.y_min.is_none()
+        && view.y_max.is_none()
+    {
+        let radius = polar_radius(&items);
+        x_min = -radius;
+        x_max = radius;
+        y_min = -radius;
+        y_max = radius;
+    }
     push_note(scene, x_note);
     push_note(scene, y_note);
     if show_top {
@@ -328,7 +350,12 @@ fn render_layer(
 
     push_rect(scene, plot.x, plot.y, plot.w, plot.h, Some([252, 252, 252, 255]), None);
     if !only_pie {
-        draw_grid(scene, &frame, &layer.x_axis, &layer.y_axis, category_x.is_some(), category_y.is_some());
+        if polar_only || any_polar {
+            draw_polar_grid(scene, &frame, scale, polar_only);
+        }
+        if !polar_only {
+            draw_grid(scene, &frame, layer, category_x.is_some(), category_y.is_some());
+        }
     }
 
     let mut box_slot = 0.0;
@@ -397,6 +424,7 @@ fn render_layer(
             category_x.as_deref(),
             category_y.as_deref(),
             scale,
+            polar_only,
         );
     }
     if !layer.title.is_empty() {
@@ -661,7 +689,9 @@ fn map_on(frame: &LayerFrame, x: f64, y: f64, x_top: bool, y_right: bool) -> Opt
     Some((frame.plot.x + ux * frame.plot.w, frame.plot.y + frame.plot.h - uy * frame.plot.h))
 }
 
-fn draw_grid(scene: &mut Scene, frame: &LayerFrame, x_axis: &Axis, y_axis: &Axis, cat_x: bool, cat_y: bool) {
+fn draw_grid(scene: &mut Scene, frame: &LayerFrame, layer: &sciplot_core::Layer, cat_x: bool, cat_y: bool) {
+    let x_axis = &layer.x_axis;
+    let y_axis = &layer.y_axis;
     if x_axis.major_grid && !cat_x {
         for tick in axis_ticks(scene, x_axis, frame.x_min, frame.x_max) {
             if !tick.major {
@@ -704,6 +734,80 @@ fn draw_grid(scene: &mut Scene, frame: &LayerFrame, x_axis: &Axis, y_axis: &Axis
             }
         }
     }
+    if frame.show_top && layer.x_top.major_grid && !cat_x {
+        for tick in axis_ticks(scene, &layer.x_top, frame.x2_min, frame.x2_max) {
+            if !tick.major {
+                continue;
+            }
+            if let Some((px, _)) = map_on(frame, tick.value, frame.y_min, true, false) {
+                vline(scene, frame, px, [210, 210, 210, 255], 1.0);
+            }
+        }
+    }
+    if frame.show_right && layer.y_right.major_grid && !cat_y {
+        for tick in axis_ticks(scene, &layer.y_right, frame.y2_min, frame.y2_max) {
+            if !tick.major {
+                continue;
+            }
+            if let Some((_, py)) = map_on(frame, frame.x_min, tick.value, false, true) {
+                hline(scene, frame, py, [210, 210, 210, 255], 1.0);
+            }
+        }
+    }
+}
+
+fn polar_radius(items: &[Item]) -> f64 {
+    let mut radius = 0.0_f64;
+    for item in items {
+        for (x, y) in item.series.x.iter().zip(&item.series.y) {
+            if x.is_finite() && y.is_finite() {
+                radius = radius.max(x.hypot(*y));
+            }
+        }
+    }
+    (radius * 1.08).max(1e-6)
+}
+
+fn draw_polar_grid(scene: &mut Scene, frame: &LayerFrame, scale: f32, label_angles: bool) {
+    let Some((cx, cy)) = map_xy(frame, 0.0, 0.0) else { return };
+    let reach = frame.x_max.abs().max(frame.x_min.abs()).max(frame.y_max.abs()).max(frame.y_min.abs());
+    if !reach.is_finite() || reach <= 0.0 {
+        return;
+    }
+    for step in 1..=4 {
+        let r = reach * step as f64 / 4.0;
+        let Some((px, _)) = map_xy(frame, r, 0.0) else { continue };
+        let radius = (px - cx).abs();
+        if radius < 1.0 {
+            continue;
+        }
+        scene.primitives.push(Prim::Circle {
+            x: cx,
+            y: cy,
+            r: radius,
+            fill: None,
+            stroke: Some(([186, 186, 186, 255], 1.0)),
+        });
+    }
+    for deg in (0..360).step_by(30) {
+        let rad = (deg as f64).to_radians();
+        let Some((px, py)) = map_xy(frame, reach * rad.cos(), reach * rad.sin()) else { continue };
+        line(scene, cx, cy, px, py, [176, 176, 176, 255], 1.0, Dash::Solid);
+        if label_angles && deg % 90 == 0 {
+            let label = format!("{deg}°");
+            text(
+                scene,
+                px,
+                py,
+                &label,
+                11.0 * scale,
+                [40, 40, 40, 255],
+                HAlign::Center,
+                VAlign::Center,
+                false,
+            );
+        }
+    }
 }
 
 fn minor_parts(axis: &Axis) -> usize {
@@ -723,7 +827,11 @@ fn draw_axis_decor(
     category_x: Option<&[(f64, String)]>,
     category_y: Option<&[(f64, String)]>,
     scale: f32,
+    polar_only: bool,
 ) {
+    if polar_only {
+        return;
+    }
     let tick = 5.0 * scale;
     if let Some(labels) = category_x {
         for (x, label) in labels {
@@ -1460,7 +1568,29 @@ fn draw_box(scene: &mut Scene, frame: &LayerFrame, item: &Item, slot: f64) {
     };
     let half = 0.28;
     let fill = item.fill.unwrap_or(with_alpha(item.color, 80));
-    if let (Some(a), Some(b)) = (map_item(frame, item, slot - half, q1), map_item(frame, item, slot + half, q3)) {
+    if item.box_notch {
+        let n = (values.len() as f64).max(1.0);
+        let notch = (1.57 * iqr / n.sqrt()).clamp(0.0, (iqr * 0.5).max(0.0));
+        let waist_lo = (med - notch).clamp(q1.min(q3), q1.max(q3));
+        let waist_hi = (med + notch).clamp(q1.min(q3), q1.max(q3));
+        let inset = half * 0.35;
+        let data = [
+            (slot - half, q1),
+            (slot - half, waist_lo),
+            (slot - half + inset, med),
+            (slot - half, waist_hi),
+            (slot - half, q3),
+            (slot + half, q3),
+            (slot + half, waist_hi),
+            (slot + half - inset, med),
+            (slot + half, waist_lo),
+            (slot + half, q1),
+        ];
+        let pts: Vec<(f32, f32)> = data.iter().filter_map(|(x, y)| map_item(frame, item, *x, *y)).collect();
+        if pts.len() == data.len() {
+            scene.primitives.push(Prim::Polygon { pts, fill });
+        }
+    } else if let (Some(a), Some(b)) = (map_item(frame, item, slot - half, q1), map_item(frame, item, slot + half, q3)) {
         let rx = a.0.min(b.0);
         let ry = a.1.min(b.1);
         push_rect(scene, rx, ry, (b.0 - a.0).abs(), (b.1 - a.1).abs(), Some(fill), Some((item.color, item.width)));
@@ -1526,19 +1656,22 @@ fn draw_pie(scene: &mut Scene, plot: PxRect, item: &Item, legend: &mut Vec<Legen
     for (index, (value, label)) in values.iter().enumerate() {
         let sweep = (*value / total) as f32 * std::f32::consts::TAU;
         let color = palette_color(index);
-        let mut poly = vec![(cx, cy)];
+        let mid = angle + sweep * 0.5;
+        let explode = item.pie_explode.clamp(0.0, 0.8);
+        let ox = mid.cos() * explode * radius;
+        let oy = mid.sin() * explode * radius;
+        let mut poly = vec![(cx + ox, cy + oy)];
         let steps = ((sweep.abs() * 18.0).ceil() as usize).clamp(2, 48);
         for step in 0..=steps {
             let t = angle + sweep * step as f32 / steps as f32;
-            poly.push((cx + t.cos() * radius, cy + t.sin() * radius));
+            poly.push((cx + ox + t.cos() * radius, cy + oy + t.sin() * radius));
         }
         scene.primitives.push(Prim::Polygon { pts: poly, fill: color });
-        hatch_sector(scene, cx, cy, radius, angle, sweep, item.pie_pattern, color);
-        let mid = angle + sweep * 0.5;
+        hatch_sector(scene, cx + ox, cy + oy, radius, angle, sweep, item.pie_pattern, color);
         text(
             scene,
-            cx + mid.cos() * radius * 0.62,
-            cy + mid.sin() * radius * 0.62,
+            cx + ox + mid.cos() * radius * 0.62,
+            cy + oy + mid.sin() * radius * 0.62,
             &format_number(*value),
             11.0 * scale,
             [255, 255, 255, 255],
@@ -1633,32 +1766,36 @@ fn draw_vectors(scene: &mut Scene, frame: &LayerFrame, item: &Item) {
     }
 }
 
+fn map_ann(frame: &LayerFrame, annotation: &sciplot_core::Annotation, x: f64, y: f64) -> Option<(f32, f32)> {
+    map_on(frame, x, y, annotation.x_top, annotation.y_right)
+}
+
 fn draw_annotation(scene: &mut Scene, frame: &LayerFrame, annotation: &sciplot_core::Annotation, scale: f32) {
     use sciplot_core::AnnotationKind;
     match &annotation.kind {
         AnnotationKind::Text { x, y, text: label, size, color } => {
-            if let Some((px, py)) = map_xy(frame, *x, *y) {
+            if let Some((px, py)) = map_ann(frame, annotation, *x, *y) {
                 text(scene, px, py, label, *size * scale, *color, HAlign::Left, VAlign::Bottom, false);
             }
         }
         AnnotationKind::Arrow { x1, y1, x2, y2, color } => {
-            if let (Some(a), Some(b)) = (map_xy(frame, *x1, *y1), map_xy(frame, *x2, *y2)) {
+            if let (Some(a), Some(b)) = (map_ann(frame, annotation, *x1, *y1), map_ann(frame, annotation, *x2, *y2)) {
                 line(scene, a.0, a.1, b.0, b.1, *color, 1.4 * scale, Dash::Solid);
                 arrow_head(scene, a, b, *color, 9.0 * scale);
             }
         }
         AnnotationKind::Line { x1, y1, x2, y2, color } => {
-            if let (Some(a), Some(b)) = (map_xy(frame, *x1, *y1), map_xy(frame, *x2, *y2)) {
+            if let (Some(a), Some(b)) = (map_ann(frame, annotation, *x1, *y1), map_ann(frame, annotation, *x2, *y2)) {
                 line(scene, a.0, a.1, b.0, b.1, *color, 1.4 * scale, Dash::Solid);
             }
         }
         AnnotationKind::TimeStamp { x, y, text: label, size, color } => {
-            if let Some((px, py)) = map_xy(frame, *x, *y) {
+            if let Some((px, py)) = map_ann(frame, annotation, *x, *y) {
                 text(scene, px, py, label, *size * scale, *color, HAlign::Left, VAlign::Bottom, false);
             }
         }
         AnnotationKind::Image { x, y, w, h, png_base64 } => {
-            if let (Some(a), Some(b)) = (map_xy(frame, *x, *y + *h), map_xy(frame, *x + *w, *y)) {
+            if let (Some(a), Some(b)) = (map_ann(frame, annotation, *x, *y + *h), map_ann(frame, annotation, *x + *w, *y)) {
                 let rx = a.0.min(b.0);
                 let ry = a.1.min(b.1);
                 let rw = (a.0 - b.0).abs().max(1.0);
@@ -1680,7 +1817,7 @@ fn draw_annotation(scene: &mut Scene, frame: &LayerFrame, annotation: &sciplot_c
             }
         }
         AnnotationKind::Marker { x, y, label, color } => {
-            if let Some((px, py)) = map_xy(frame, *x, *y) {
+            if let Some((px, py)) = map_ann(frame, annotation, *x, *y) {
                 scene.primitives.push(Prim::Circle {
                     x: px,
                     y: py,

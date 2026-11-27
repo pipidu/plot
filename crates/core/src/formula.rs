@@ -1,21 +1,19 @@
 //! 列公式与拟合表达式。
 //!
-//! 语法是 evalexpr：`+ - * / % ^`、括号、比较运算。
+//! 求值器是本 crate 的 `expr`：所有数值都是 `f64`，`1/2` 等于 0.5，`1==1.0` 为真。
+//! 不再使用 evalexpr（11.3.1 的整数除法和严格相等，12 及以上是 AGPL）。
 //! 另外注册了 SciDAVis / muParser 风格的函数名：`sin(x)`、`ln(x)`、`log(x)`（以 10 为底）。
 //! 列公式里可以用 `col("列名")`、`col("A")`（列名优先，没有同名列时才按字母列标）、`col(1)`（从 1 开始的位置）、`cell("A", 行号)`、`i`（从 1 开始的行号），以及 `tablecol("表","列")` 读另一张表的同一行。
-//! 某一格还可以有自己的公式，算的时候盖过这一列的公式。
-//! 整数相除会截断，需要小数时写成 `1.0/2`。
-//! 分支不走 evalexpr 的函数调用：`if(条件, 真, 假)` 和 `条件 ? 真 : 假` 只计算选中的一边，也可以写成缩进的 `if / elif / else`。
+//! 某一格还可以有自己的公式，算的时候盖过这一列的公式。套用列公式不会清掉这些单元格公式。
+//! 重算按依赖排序，每个公式只算一次；有环时按列号、行号各算一次，不迭代到不动点。
+//! `if(条件, 真, 假)`、`条件 ? 真 : 假` 和缩进的 `if / elif / else` 只计算被选中的一边。
 //! 以 `python:` 开头的列公式交给内嵌脚本引擎；脚本引擎没装上时会报错，普通公式不受影响。
+//! 备注求值会先清掉线程里的列上下文，备注里的 `col()` / `cell()` / `tablecol()` 不会读到上一张表的最后一行。
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use evalexpr::{
-    build_operator_tree, ContextWithMutableFunctions, ContextWithMutableVariables, EvalexprError,
-    Function, HashMapContext, Node, Value,
-};
-
+use crate::expr::{self, Host, Value};
 use crate::table::{ColumnType, Table};
 
 struct ColumnStore {
@@ -30,7 +28,7 @@ thread_local! {
     });
     static TABLES: RefCell<HashMap<String, ColumnStore>> = RefCell::new(HashMap::new());
     static ROW: Cell<usize> = const { Cell::new(0) };
-    static MATH: RefCell<Option<HashMapContext>> = const { RefCell::new(None) };
+    static NOTE: Cell<bool> = const { Cell::new(false) };
 }
 
 const FUNCTIONS: &[&str] = &[
@@ -39,7 +37,7 @@ const FUNCTIONS: &[&str] = &[
     "sign", "pow", "min", "max", "cbrt", "col", "cell", "tablecol", "if", "elif", "else",
 ];
 
-/// 以 `python:` 或 `#python` 开头的列公式交给脚本引擎，不在 evalexpr 里算。
+/// 以 `python:` 或 `#python` 开头的列公式交给脚本引擎，不走表达式引擎。
 pub fn is_python_formula(formula: &str) -> bool {
     let trimmed = formula.trim();
     trimmed.starts_with("python:") || trimmed.starts_with("#python")
@@ -68,7 +66,7 @@ fn python_column(table: &Table, formula: &str, others: &[Table]) -> Result<EvalC
 }
 
 pub struct CompiledExpr {
-    tree: Node,
+    expr: expr::Expr,
 }
 
 impl CompiledExpr {
@@ -77,12 +75,13 @@ impl CompiledExpr {
         if expr.is_empty() {
             return Err(crate::locale::t("表达式为空").to_string());
         }
-        let tree = build_operator_tree(expr).map_err(|err| err.to_string())?;
-        Ok(Self { tree })
+        Ok(Self {
+            expr: expr::compile(expr)?,
+        })
     }
 
     pub fn eval(&self, vars: &[(&str, f64)]) -> Result<f64, String> {
-        eval_tree(&self.tree, vars)
+        eval_compiled(&self.expr, vars)?.as_number()
     }
 }
 
@@ -161,7 +160,7 @@ pub fn eval_column_with(table: &Table, formula: &str, others: &[Table]) -> Resul
     })
 }
 
-/// 把公式结果写回列，并记下公式文本。这一列上的单元格公式会被清掉。
+/// 把公式结果写回列，并记下公式文本。这一列上已有的单元格公式会留下来，并在列公式之后重新计算。
 pub fn apply_formula(table: &mut Table, column: usize, formula: &str) -> Result<EvalColumn, String> {
     apply_formula_with(table, column, formula, &[])
 }
@@ -174,17 +173,37 @@ pub fn apply_formula_with(table: &mut Table, column: usize, formula: &str, other
     }
     let n = evaluated.values.len();
     table.ensure_rows(n.max(table.nrows()));
+    let saved = table.columns[column].cell_formulas.clone();
     table.columns[column].ty = ColumnType::Numeric;
     let texts: Vec<String> = evaluated
         .values
         .iter()
         .map(|value| value.map(|number| table.columns[column].format_value(number)).unwrap_or_default())
         .collect();
-    let col = &mut table.columns[column];
-    col.formula = formula.to_string();
-    col.numbers = evaluated.values.clone();
-    col.texts = texts;
-    col.cell_formulas = vec![String::new(); n];
+    {
+        let col = &mut table.columns[column];
+        col.formula = formula.to_string();
+        col.numbers = evaluated.values.clone();
+        col.texts = texts;
+        let mut formulas = saved;
+        formulas.resize(n, String::new());
+        col.cell_formulas = formulas;
+    }
+    publish(table, others);
+    for row in 0..n {
+        let raw = table.columns[column].cell_formula(row).trim().to_string();
+        if raw.is_empty() {
+            continue;
+        }
+        let expr = raw.trim_start_matches('=').trim().to_string();
+        table.columns[column].cell_formulas[row] = expr.clone();
+        if expr.is_empty() || is_python_formula(&expr) {
+            continue;
+        }
+        let mut report = RecalcReport::default();
+        write_evaluated(&mut table.columns[column], row, eval_stored(&expr, row), &mut report);
+        publish(table, others);
+    }
     Ok(evaluated)
 }
 
@@ -195,30 +214,43 @@ pub struct RecalcReport {
     pub first_error: Option<String>,
 }
 
-/// 从左到右只走一轮。每一列先写列公式（已有单元格公式的格子跳过），再写这一列的单元格公式。
-/// 因此右边的列公式能读到左边在同一轮里刚算出来的单元格公式。不是迭代求解：左边看不到右边这一轮的新值。
-/// 套用列公式仍会清掉该列的单元格公式。`tablecol` 能读 `others`。
+/// 按依赖各算一次。右边的列公式能读到左边刚算完的单元格公式；左边引用右边时也会先算右边。
+/// 不是不动点迭代：互相引用时按列号、行号各算一次，并记一条警告。
+/// 套用列公式不会清掉单元格公式。`tablecol` 读 `others` 里已经发布的值。
 pub fn recalculate_table(table: &mut Table, others: &[Table]) -> RecalcReport {
     let mut report = RecalcReport::default();
     let rows = table.nrows();
     publish(table, others);
-    for index in 0..table.columns.len() {
-        let formula = table.columns[index].formula.trim().to_string();
-        if !formula.is_empty() {
-            if is_python_formula(&formula) {
+    let plan = schedule(table, rows);
+    if plan.cycle {
+        report.warnings += 1;
+        if report.first_error.is_none() {
+            report.first_error = Some(
+                crate::tr!(
+                    "公式互相引用，已按列号和行号各计算一次。",
+                    "Formulas refer to each other. Each one was evaluated once, in column and row order."
+                )
+                .into(),
+            );
+        }
+    }
+    for node in plan.order {
+        match node.kind {
+            NodeKind::Python => {
+                let formula = table.columns[node.col].formula.trim().to_string();
                 match python_column(table, &formula, others) {
                     Ok(evaluated) => {
                         for row in 0..rows {
-                            if !table.columns[index].cell_formula(row).trim().is_empty() {
+                            if !table.columns[node.col].cell_formula(row).trim().is_empty() {
                                 continue;
                             }
-                            let value = evaluated
-                                .values
-                                .get(row)
-                                .copied()
-                                .flatten()
-                                .ok_or_else(|| evaluated.first_error.clone().unwrap_or_else(|| crate::locale::t("公式没有得到有限数值").into()));
-                            write_evaluated(&mut table.columns[index], row, value, &mut report);
+                            let value = evaluated.values.get(row).copied().flatten().ok_or_else(|| {
+                                evaluated
+                                    .first_error
+                                    .clone()
+                                    .unwrap_or_else(|| crate::locale::t("公式没有得到有限数值").into())
+                            });
+                            write_evaluated(&mut table.columns[node.col], row, value, &mut report);
                         }
                         if evaluated.warnings > 0 {
                             if let Some(err) = &evaluated.first_error {
@@ -229,46 +261,293 @@ pub fn recalculate_table(table: &mut Table, others: &[Table]) -> RecalcReport {
                     Err(err) => note_formula_error(&mut report, &err),
                 }
                 publish(table, others);
-            } else if let Err(err) = compile_guard(&formula) {
-                note_formula_error(&mut report, &err);
-            } else {
-                for row in 0..rows {
-                    if !table.columns[index].cell_formula(row).trim().is_empty() {
-                        continue;
-                    }
-                    write_evaluated(&mut table.columns[index], row, eval_stored(&formula, row), &mut report);
+            }
+            NodeKind::Cell { formula } => {
+                if is_python_formula(&formula) {
+                    note_formula_error(
+                        &mut report,
+                        crate::tr!(
+                            "单元格公式请用 if() 或三元运算符，不要写 python:。",
+                            "Cell formulas use if() or ? :, not a python: block."
+                        ),
+                    );
+                    continue;
                 }
+                write_evaluated(&mut table.columns[node.col], node.row, eval_stored(&formula, node.row), &mut report);
                 publish(table, others);
             }
-        }
-        for row in 0..rows {
-            let raw = table.columns[index].cell_formula(row).trim().to_string();
-            if raw.is_empty() {
-                continue;
-            }
-            let expr = raw.trim_start_matches('=').trim().to_string();
-            table.columns[index].cell_formulas[row] = expr.clone();
-            if expr.is_empty() {
-                continue;
-            }
-            if is_python_formula(&expr) {
-                note_formula_error(
-                    &mut report,
-                    crate::tr!(
-                        "单元格公式请用 if() 或三元运算符，不要写 python:。",
-                        "Cell formulas use if() or ? :, not a python: block."
-                    ),
-                );
-                continue;
-            }
-            write_evaluated(&mut table.columns[index], row, eval_stored(&expr, row), &mut report);
-            publish(table, others);
         }
     }
     report
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct NodeKey {
+    col: usize,
+    row: u32,
+}
+
+struct WorkNode {
+    col: usize,
+    row: usize,
+    kind: NodeKind,
+}
+
+enum NodeKind {
+    Cell { formula: String },
+    Python,
+}
+
+struct Plan {
+    order: Vec<WorkNode>,
+    cycle: bool,
+}
+
+fn schedule(table: &Table, rows: usize) -> Plan {
+    let mut nodes: Vec<(NodeKey, NodeKind)> = Vec::new();
+    let mut index_of: HashMap<NodeKey, usize> = HashMap::new();
+    for (col, column) in table.columns.iter().enumerate() {
+        let formula = column.formula.trim();
+        if is_python_formula(formula) {
+            let key = NodeKey { col, row: u32::MAX };
+            index_of.insert(key, nodes.len());
+            nodes.push((key, NodeKind::Python));
+        }
+        for row in 0..rows {
+            let cell = column.cell_formula(row).trim().trim_start_matches('=').trim();
+            if !cell.is_empty() {
+                let key = NodeKey { col, row: row as u32 };
+                index_of.insert(key, nodes.len());
+                nodes.push((key, NodeKind::Cell { formula: cell.to_string() }));
+            } else if !formula.is_empty() && !is_python_formula(formula) {
+                let key = NodeKey { col, row: row as u32 };
+                index_of.insert(key, nodes.len());
+                nodes.push((key, NodeKind::Cell { formula: formula.to_string() }));
+            }
+        }
+    }
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    let mut indegree = vec![0usize; nodes.len()];
+    for (at, (key, kind)) in nodes.iter().enumerate() {
+        let formula = match kind {
+            NodeKind::Cell { formula } => formula.as_str(),
+            NodeKind::Python => table.columns[key.col].formula.trim(),
+        };
+        let row = if key.row == u32::MAX { 0 } else { key.row as usize };
+        for (dep_col, dep_row) in formula_deps(formula, row, table) {
+            let dep_key = if is_python_formula(table.columns[dep_col].formula.trim())
+                && table.columns[dep_col].cell_formula(dep_row).trim().is_empty()
+            {
+                NodeKey { col: dep_col, row: u32::MAX }
+            } else {
+                NodeKey {
+                    col: dep_col,
+                    row: dep_row as u32,
+                }
+            };
+            if dep_key == *key {
+                continue;
+            }
+            if let Some(&dep) = index_of.get(&dep_key) {
+                if !edges[dep].contains(&at) {
+                    edges[dep].push(at);
+                    indegree[at] += 1;
+                }
+            }
+        }
+    }
+    let mut ready: Vec<usize> = indegree.iter().enumerate().filter(|(_, degree)| **degree == 0).map(|(index, _)| index).collect();
+    ready.sort_by_key(|index| nodes[*index].0);
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    while !ready.is_empty() {
+        let index = ready.remove(0);
+        if !seen.insert(index) {
+            continue;
+        }
+        order.push(index);
+        let mut next = Vec::new();
+        for &child in &edges[index] {
+            indegree[child] = indegree[child].saturating_sub(1);
+            if indegree[child] == 0 {
+                next.push(child);
+            }
+        }
+        ready.extend(next);
+        ready.sort_by_key(|index| nodes[*index].0);
+        ready.dedup();
+    }
+    let cycle = order.len() < nodes.len();
+    if cycle {
+        let mut rest: Vec<usize> = (0..nodes.len()).filter(|index| !seen.contains(index)).collect();
+        rest.sort_by_key(|index| nodes[*index].0);
+        order.extend(rest);
+    }
+    Plan {
+        order: order
+            .into_iter()
+            .map(|index| {
+                let (key, kind) = &nodes[index];
+                WorkNode {
+                    col: key.col,
+                    row: if key.row == u32::MAX { 0 } else { key.row as usize },
+                    kind: match kind {
+                        NodeKind::Python => NodeKind::Python,
+                        NodeKind::Cell { formula } => NodeKind::Cell { formula: formula.clone() },
+                    },
+                }
+            })
+            .collect(),
+        cycle,
+    }
+}
+
+fn formula_deps(expr: &str, row: usize, table: &Table) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                if chars[i] == '\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if is_ident_start(chars[i]) {
+            let start = i;
+            i += 1;
+            while i < chars.len() && is_ident_continue(chars[i]) {
+                i += 1;
+            }
+            let name: String = chars[start..i].iter().collect();
+            let mut j = i;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '(' && matches!(name.as_str(), "col" | "cell") {
+                if let Some((args, next)) = split_call_args(&chars, j) {
+                    push_dep(&name, &args, row, table, &mut out);
+                    i = next;
+                    continue;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn split_call_args(chars: &[char], open: usize) -> Option<(Vec<String>, usize)> {
+    let mut depth = 0i32;
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut i = open;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '(' {
+            depth += 1;
+            if depth > 1 {
+                current.push(ch);
+            }
+        } else if ch == ')' {
+            depth -= 1;
+            if depth == 0 {
+                args.push(current.trim().to_string());
+                return Some((args, i + 1));
+            }
+            current.push(ch);
+        } else if ch == ',' && depth == 1 {
+            args.push(current.trim().to_string());
+            current.clear();
+        } else if ch == '"' {
+            current.push(ch);
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                current.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    current.push(chars[i]);
+                }
+                i += 1;
+            }
+            if i < chars.len() {
+                current.push('"');
+            }
+        } else {
+            current.push(ch);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn push_dep(name: &str, args: &[String], row: usize, table: &Table, out: &mut Vec<(usize, usize)>) {
+    if name == "col" {
+        let Some(arg) = args.first() else { return };
+        if let Some(col) = resolve_col_arg(arg, table) {
+            if row < table.nrows() {
+                out.push((col, row));
+            }
+        }
+    } else if name == "cell" && args.len() >= 2 {
+        if let (Some(col), Some(target)) = (resolve_col_arg(&args[0], table), parse_row_arg(&args[1])) {
+            if target < table.nrows() {
+                out.push((col, target));
+            }
+        }
+    }
+}
+
+fn resolve_col_arg(arg: &str, table: &Table) -> Option<usize> {
+    let arg = arg.trim();
+    if let Some(text) = arg.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+        if let Some(index) = table.columns.iter().position(|column| column.name == text) {
+            return Some(index);
+        }
+        return letter_index(text).filter(|index| *index < table.columns.len());
+    }
+    let number: f64 = arg.parse().ok()?;
+    if number < 1.0 {
+        return None;
+    }
+    let index = (number as usize).saturating_sub(1);
+    (index < table.columns.len()).then_some(index)
+}
+
+fn parse_row_arg(arg: &str) -> Option<usize> {
+    let number: f64 = arg.trim().trim_matches('"').parse().ok()?;
+    if number < 1.0 {
+        return None;
+    }
+    Some((number as usize) - 1)
+}
+
 /// 结束编辑一个格子。公式模式，或以 `=` 开头的文本，写成这一格自己的公式并立刻计算。
+/// 公式栏提交。以 `=` 开头的文本写成单元格公式并立刻重算；否则写成单元格的值并清掉这一格的公式。
+pub fn apply_formula_bar(table: &mut Table, column: usize, row: usize, text: &str, others: &[Table]) -> Result<(), String> {
+    if column >= table.columns.len() {
+        return Err(crate::locale::t("列不存在").into());
+    }
+    table.ensure_rows(row + 1);
+    let trimmed = text.trim();
+    if trimmed.starts_with('=') {
+        table.columns[column].set_cell_formula_raw(row, trimmed);
+        commit_cell(table, column, row, true, others)
+    } else {
+        if row < table.columns[column].cell_formulas.len() {
+            table.columns[column].cell_formulas[row].clear();
+        }
+        table.columns[column].set_text(row, trimmed);
+        commit_cell(table, column, row, false, others)
+    }
+}
+
 pub fn commit_cell(table: &mut Table, column: usize, row: usize, formula_mode: bool, others: &[Table]) -> Result<(), String> {
     if column >= table.columns.len() {
         return Err(crate::locale::t("列不存在").into());
@@ -521,140 +800,75 @@ fn format_coeff(v: f64) -> String {
         .to_string()
 }
 
-fn eval_tree(tree: &Node, vars: &[(&str, f64)]) -> Result<f64, String> {
-    eval_tree_value(tree, vars)?.as_number().map_err(|err| err.to_string())
+struct FormulaHost<'a> {
+    vars: &'a [(&'a str, f64)],
+}
+
+impl Host for FormulaHost<'_> {
+    fn var(&mut self, name: &str) -> Result<Value, String> {
+        if let Some((_, value)) = self.vars.iter().find(|(key, _)| *key == name) {
+            return Ok(Value::Number(*value));
+        }
+        match name {
+            "pi" => Ok(Value::Number(std::f64::consts::PI)),
+            "e" => Ok(Value::Number(std::f64::consts::E)),
+            _ => Err(expr::unknown_variable(name)),
+        }
+    }
+
+    fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        if NOTE.with(|note| note.get()) && matches!(name, "col" | "cell" | "tablecol") {
+            return Err(crate::tr!(
+                "备注里不能使用 col()、cell() 或 tablecol()。",
+                "Notes cannot use col(), cell(), or tablecol()."
+            )
+            .into());
+        }
+        if let Some(value) = expr::builtin_math(name, args) {
+            return value;
+        }
+        match name {
+            "col" => Ok(Value::Number(col_value(args)?)),
+            "cell" => Ok(Value::Number(cell_value(args)?)),
+            "tablecol" => Ok(Value::Number(tablecol_value(args)?)),
+            _ => Err(expr::unknown_function(name)),
+        }
+    }
+}
+
+fn eval_compiled(expr: &expr::Expr, vars: &[(&str, f64)]) -> Result<Value, String> {
+    let mut host = FormulaHost { vars };
+    expr::eval(expr, &mut host)
 }
 
 pub(crate) fn eval_with_vars(expr: &str, vars: &[(&str, f64)]) -> Result<Value, String> {
-    let tree = build_operator_tree(expr).map_err(|err| err.to_string())?;
-    eval_tree_value(&tree, vars)
+    let compiled = expr::compile(expr.trim())?;
+    eval_compiled(&compiled, vars)
 }
 
-fn eval_tree_value(tree: &Node, vars: &[(&str, f64)]) -> Result<Value, String> {
-    MATH.with(|slot| {
-        let mut borrowed = slot.borrow_mut();
-        if borrowed.is_none() {
-            *borrowed = Some(math_context());
-        }
-        let ctx = borrowed.as_mut().unwrap();
-        ctx.clear_variables();
-        ctx.set_value("pi".to_string(), Value::Float(std::f64::consts::PI))
-            .map_err(|err| err.to_string())?;
-        ctx.set_value("e".to_string(), Value::Float(std::f64::consts::E))
-            .map_err(|err| err.to_string())?;
-        for (name, value) in vars {
-            ctx.set_value((*name).to_string(), Value::Float(*value))
-                .map_err(|err| err.to_string())?;
-        }
-        tree.eval_with_context(ctx).map_err(|err| err.to_string())
-    })
-}
-
-fn math_context() -> HashMapContext {
-    let mut ctx = HashMapContext::new();
-    type Unary = fn(f64) -> f64;
-    let unary: &[(&str, Unary)] = &[
-        ("sin", f64::sin),
-        ("cos", f64::cos),
-        ("tan", f64::tan),
-        ("asin", f64::asin),
-        ("acos", f64::acos),
-        ("atan", f64::atan),
-        ("sinh", f64::sinh),
-        ("cosh", f64::cosh),
-        ("tanh", f64::tanh),
-        ("asinh", f64::asinh),
-        ("acosh", f64::acosh),
-        ("atanh", f64::atanh),
-        ("exp", f64::exp),
-        ("ln", f64::ln),
-        ("log", f64::log10),
-        ("log10", f64::log10),
-        ("log2", f64::log2),
-        ("sqrt", f64::sqrt),
-        ("abs", f64::abs),
-        ("floor", f64::floor),
-        ("ceil", f64::ceil),
-        ("round", f64::round),
-        ("cbrt", f64::cbrt),
-        ("sign", signum),
-    ];
-    for &(name, func) in unary {
-        ctx.set_function(name.to_string(), Function::new(move |arg| unary_call(arg, func)))
-            .expect("register unary");
-    }
-    ctx.set_function(
-        "atan2".to_string(),
-        Function::new(|arg| {
-            let (y, x) = two_numbers(arg)?;
-            Ok(Value::Float(y.atan2(x)))
-        }),
-    )
-    .expect("atan2");
-    ctx.set_function(
-        "hypot".to_string(),
-        Function::new(|arg| {
-            let (a, b) = two_numbers(arg)?;
-            Ok(Value::Float(a.hypot(b)))
-        }),
-    )
-    .expect("hypot");
-    ctx.set_function(
-        "pow".to_string(),
-        Function::new(|arg| {
-            let (a, b) = two_numbers(arg)?;
-            Ok(Value::Float(a.powf(b)))
-        }),
-    )
-    .expect("pow");
-    ctx.set_function("col".to_string(), Function::new(col_fn))
-        .expect("col");
-    ctx.set_function("cell".to_string(), Function::new(cell_fn))
-        .expect("cell");
-    ctx.set_function("tablecol".to_string(), Function::new(tablecol_fn))
-        .expect("tablecol");
-    ctx
-}
-
-fn signum(v: f64) -> f64 {
-    if v > 0.0 {
-        1.0
-    } else if v < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
-}
-
-fn unary_call(arg: &Value, func: fn(f64) -> f64) -> Result<Value, EvalexprError> {
-    Ok(Value::Float(func(arg.as_number()?)))
-}
-
-fn two_numbers(arg: &Value) -> Result<(f64, f64), EvalexprError> {
-    let tuple = arg.as_fixed_len_tuple(2)?;
-    Ok((tuple[0].as_number()?, tuple[1].as_number()?))
-}
-
-fn col_fn(arg: &Value) -> Result<Value, EvalexprError> {
+fn col_value(args: &[Value]) -> Result<f64, String> {
     let row = ROW.with(|row| row.get());
-    if let Ok(name) = arg.as_string() {
-        return Ok(Value::Float(lookup_name(&name, row)));
+    match args {
+        [Value::Str(name)] => Ok(lookup_name(name, row)),
+        [other] => Ok(lookup_index(index_from_value(other)?, row)),
+        _ => Err("expected 1 argument".into()),
     }
-    let index = index_from_value(arg)?;
-    Ok(Value::Float(lookup_index(index, row)))
 }
 
-fn tablecol_fn(arg: &Value) -> Result<Value, EvalexprError> {
-    let tuple = arg.as_fixed_len_tuple(2)?;
-    let table = tuple[0].as_string()?;
-    let row = ROW.with(|row| row.get());
-    let value = if let Ok(name) = tuple[1].as_string() {
-        lookup_foreign(&table, Some(name.as_str()), None, row)
-    } else {
-        let index = index_from_value(&tuple[1])?;
-        lookup_foreign(&table, None, Some(index), row)
+fn tablecol_value(args: &[Value]) -> Result<f64, String> {
+    if args.len() != 2 {
+        return Err("expected 2 arguments".into());
+    }
+    let Value::Str(table) = &args[0] else {
+        return Err("expected value of type number".into());
     };
-    Ok(Value::Float(value))
+    let row = ROW.with(|row| row.get());
+    let value = if let Value::Str(name) = &args[1] {
+        lookup_foreign(table, Some(name.as_str()), None, row)
+    } else {
+        lookup_foreign(table, None, Some(index_from_value(&args[1])?), row)
+    };
+    Ok(value)
 }
 
 fn lookup_foreign(table: &str, name: Option<&str>, index: Option<usize>, row: usize) -> f64 {
@@ -682,24 +896,25 @@ fn lookup_foreign(table: &str, name: Option<&str>, index: Option<usize>, row: us
     })
 }
 
-fn cell_fn(arg: &Value) -> Result<Value, EvalexprError> {
-    let tuple = arg.as_fixed_len_tuple(2)?;
-    let row_number = tuple[1].as_number()?;
+fn cell_value(args: &[Value]) -> Result<f64, String> {
+    if args.len() != 2 {
+        return Err("expected 2 arguments".into());
+    }
+    let row_number = args[1].as_number()?;
     if row_number < 1.0 {
-        return Ok(Value::Float(f64::NAN));
+        return Ok(f64::NAN);
     }
     let row = (row_number as usize).saturating_sub(1);
-    if let Ok(name) = tuple[0].as_string() {
-        return Ok(Value::Float(lookup_name(&name, row)));
+    if let Value::Str(name) = &args[0] {
+        return Ok(lookup_name(name, row));
     }
-    let index = index_from_value(&tuple[0])?;
-    Ok(Value::Float(lookup_index(index, row)))
+    Ok(lookup_index(index_from_value(&args[0])?, row))
 }
 
-fn index_from_value(arg: &Value) -> Result<usize, EvalexprError> {
+fn index_from_value(arg: &Value) -> Result<usize, String> {
     let number = arg.as_number()?;
     if number < 1.0 {
-        return Err(EvalexprError::CustomMessage(crate::locale::t("列号从 1 开始").to_string()));
+        return Err(crate::locale::t("列号从 1 开始").to_string());
     }
     Ok((number as usize) - 1)
 }
@@ -1034,7 +1249,23 @@ pub struct NoteRun {
 
 /// 用现有公式引擎逐行求值。`名字 = 表达式` 会记住这个数，后面的行可以用它。
 /// 空行、`#` 和 `//` 跳过。这里没有表格，也不能跑 Python。
+/// 进入之前会清掉线程里的列上下文，所以刚算完一张表再跑备注，`col()` 不会读到那张表的最后一行。
 pub fn eval_note(text: &str) -> NoteRun {
+    NOTE.with(|note| note.set(true));
+    COLS.with(|cols| {
+        *cols.borrow_mut() = ColumnStore {
+            names: HashMap::new(),
+            values: Vec::new(),
+        };
+    });
+    TABLES.with(|tables| tables.borrow_mut().clear());
+    ROW.with(|row| row.set(0));
+    let run = eval_note_body(text);
+    NOTE.with(|note| note.set(false));
+    run
+}
+
+fn eval_note_body(text: &str) -> NoteRun {
     let mut lines = Vec::new();
     let mut vars: Vec<(String, f64)> = Vec::new();
     for (index, raw) in text.lines().enumerate() {
@@ -1291,13 +1522,67 @@ mod tests {
         let report = recalculate_table(&mut table, &[]);
         assert!(report.first_error.is_none(), "{:?}", report.first_error);
         assert_eq!(table.columns[1].numbers[0], Some(10.0));
-        assert_eq!(table.columns[0].numbers[0], Some(6.0));
+        assert_eq!(table.columns[0].numbers[0], Some(11.0));
+
+        table.columns[0].formula.clear();
+        table.columns[0].set_cell_formula_raw(0, "col(\"B\")+1");
+        table.columns[1].formula.clear();
+        table.columns[1].set_cell_formula_raw(0, "10");
+        table.columns[0].numbers[0] = Some(0.0);
+        table.columns[1].numbers[0] = Some(0.0);
+        let report = recalculate_table(&mut table, &[]);
+        assert!(report.first_error.is_none(), "{:?}", report.first_error);
+        assert_eq!(table.columns[1].numbers[0], Some(10.0));
+        assert_eq!(table.columns[0].numbers[0], Some(11.0));
+
+        let saved = table.columns[1].cell_formula(0).to_string();
+        apply_formula(&mut table, 1, "col(\"A\")").unwrap();
+        assert_eq!(table.columns[1].cell_formula(0), saved);
+        assert_eq!(table.columns[1].numbers[0], Some(10.0));
     }
 
     #[test]
-    fn branching_is_lazy_and_integer_division_stays() {
-        assert_eq!(CompiledExpr::compile("1/2").unwrap().eval(&[]).unwrap(), 0.0);
+    fn formula_bar_keeps_other_cell_formulas() {
+        let mut table = Table::new(TableId(1), "t");
+        table.columns.clear();
+        table.add_numeric_column("A", ColumnMode::X, &[1.0, 2.0]);
+        table.add_column("B", ColumnMode::Y);
+        table.columns[1].set_cell_formula_raw(0, "col(\"A\")+3");
+        table.columns[1].set_cell_formula_raw(1, "9");
+        apply_formula_bar(&mut table, 1, 0, "=col(\"A\")*10", &[]).unwrap();
+        assert_eq!(table.columns[1].cell_formula(0), "col(\"A\")*10");
+        assert_eq!(table.columns[1].numbers[0], Some(10.0));
+        assert_eq!(table.columns[1].cell_formula(1), "9");
+        apply_formula(&mut table, 1, "col(\"A\")").unwrap();
+        assert_eq!(table.columns[1].cell_formula(0), "col(\"A\")*10");
+        assert_eq!(table.columns[1].numbers[0], Some(10.0));
+        assert_eq!(table.columns[1].cell_formula(1), "9");
+        assert_eq!(table.columns[1].numbers[1], Some(9.0));
+    }
+
+    #[test]
+    fn note_does_not_read_the_previous_table_row() {
+        let mut table = Table::new(TableId(1), "t");
+        table.columns.clear();
+        table.add_numeric_column("A", ColumnMode::X, &[1.0, 2.0, 7.0]);
+        table.add_column("B", ColumnMode::Y);
+        apply_formula(&mut table, 1, "col(\"A\")+1").unwrap();
+        assert_eq!(table.columns[1].numbers[2], Some(8.0));
+        let run = eval_note("col(\"A\")\n1+1\n");
+        assert_eq!(run.lines.len(), 2);
+        assert!(!run.lines[0].ok, "{}", run.lines[0].output);
+        assert_ne!(run.lines[0].output.trim(), "7");
+        assert!(run.lines[0].output.contains("备注") || run.lines[0].output.contains("col"), "{}", run.lines[0].output);
+        assert!(run.lines[1].ok, "{}", run.lines[1].output);
+        assert_eq!(run.lines[1].output, "2");
+    }
+
+    #[test]
+    fn branching_is_lazy_and_division_is_real() {
+        assert!((CompiledExpr::compile("1/2").unwrap().eval(&[]).unwrap() - 0.5).abs() < 1e-12);
         assert!((CompiledExpr::compile("1.0/2").unwrap().eval(&[]).unwrap() - 0.5).abs() < 1e-12);
+        assert_eq!(CompiledExpr::compile("1==1.0").unwrap().eval(&[]).unwrap(), 1.0);
+        assert_eq!(CompiledExpr::compile("1!=1.0").unwrap().eval(&[]).unwrap(), 0.0);
 
         let mut table = Table::new(TableId(1), "t");
         table.columns.clear();
@@ -1313,7 +1598,7 @@ mod tests {
         assert_eq!(table.columns[1].numbers[1], Some(4.0));
 
         apply_formula(&mut table, 1, "if(1, 1, 2)/2").unwrap();
-        assert_eq!(table.columns[1].numbers[0], Some(0.0));
+        assert!((table.columns[1].numbers[0].unwrap() - 0.5).abs() < 1e-12);
 
         let block = "if col(\"A\") > 1:\n    col(\"A\")\nelif col(\"A\") < 1:\n    7\nelse:\n    1/0\n";
         apply_formula(&mut table, 1, block).unwrap();

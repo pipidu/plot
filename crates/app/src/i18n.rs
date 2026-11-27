@@ -37,7 +37,7 @@ const FORMULA_HELP_ZH: &str = "\
 表达式规则：用普通的算式写列公式和拟合公式。
 
 运算：+  -  *  /  %  ^（乘方）和括号。
-两个整数相除只会得到整数，需要小数时写成 1.0/2。
+求值器是 SciPlot 自己的表达式引擎，所有数都是小数。1/2 等于 0.5，1 和 1.0 相等。
 
 函数：sin cos tan asin acos atan atan2 sinh cosh tanh
       exp ln log（以 10 为底）log10 log2 sqrt abs
@@ -45,7 +45,7 @@ const FORMULA_HELP_ZH: &str = "\
 
 常数：pi、e。函数曲线里自变量是 x。参数曲线用 t，x(t) 和 y(t) 在「函数曲线」里分别填写。极坐标用 theta、t 或 x 表示弧度角。曲面公式里是 x 和 y。
 
-同一遍重算从左到右进行：右边的列公式能读到左边已经算完的单元格公式。它不会来回迭代。给整列套上公式时，这一列自己的单元格公式会被清掉。
+重算按列之间的依赖排一次序，每个公式只算一遍，不迭代到不动点。右边的列可以读到左边已经算完的单元格公式。有环时按列号、行号各算一次，并记一条警告。套用列公式不会清掉这一列已经有的单元格公式。表格上方的公式栏直接改当前格：以 = 开头的是单元格公式，否则写入数值并清掉这一格自己的公式。
 
 列公式还可以用：
   col(\"列名\")、col(\"A\")（按列名；没有同名列时才按字母列标）
@@ -58,18 +58,18 @@ const FORMULA_HELP_ZH: &str = "\
 
 例如：sin(col(\"X\")) * 2
 
-列公式可以分支。if(条件, 为真时, 为假时) 和 条件 ? 为真时 : 为假时 只计算选中的一边。也可以写成缩进的 if / elif / else。两个整数相除仍然截断。
+列公式可以分支。if(条件, 为真时, 为假时) 和 条件 ? 为真时 : 为假时 只计算选中的一边。也可以写成缩进的 if / elif / else。1/2 仍然是 0.5。
 
 以 python: 开头的列公式用程序内的 Python 子集逐行计算，可以用 col()、cell()、tablecol()、i 和 row。
 
-备注有两种算法。「运行备注」仍是逐行公式：`名字 = 表达式` 会记住这个数，空行、# 和 // 会跳过，这里不能用 col()。「执行脚本」运行程序内的 Python 子集，可以建表、画图、拟合和导出。这不是完整的 CPython。
+备注有两种算法。「运行备注」仍是逐行公式：`名字 = 表达式` 会记住这个数，空行、# 和 // 会跳过。这里不能用 col()。先重算表格再运行备注时，col()、cell() 和 tablecol() 不会读到上一张表的最后一行，而是报错。「执行脚本」运行程序内的解释器，可以建表、画图、拟合和导出。这不是 CPython。
 ";
 
 const FORMULA_HELP_EN: &str = "\
 Expressions: write column formulas and fit formulas as ordinary arithmetic.
 
 Operators: +  -  *  /  %  ^ (power) and parentheses.
-Dividing two integers truncates. Write 1.0/2 when you need a fraction.
+The evaluator is SciPlot's own expression engine. Every number is a decimal, so 1/2 is 0.5 and 1 equals 1.0.
 
 Functions: sin cos tan asin acos atan atan2 sinh cosh tanh
            exp ln log (base 10) log10 log2 sqrt abs
@@ -77,7 +77,7 @@ Functions: sin cos tan asin acos atan atan2 sinh cosh tanh
 
 Constants: pi and e. Function curves use x. A parametric curve uses t; enter x(t) and y(t) in the function dialog. A polar curve uses theta, t, or x for the angle in radians. Surfaces use x and y.
 
-One recalculation walks left to right: a column formula can read cell formulas in columns to its left that were just computed. It does not iterate. Applying a column formula still clears that column's own cell formulas.
+Recalculation orders formulas by their column dependencies and evaluates each one once. It does not iterate to a fixed point. A column on the right can read cell formulas to its left that were just computed. A cycle is evaluated once, in column and row order, and recorded as a warning. Applying a column formula keeps that column's existing cell formulas. The formula bar above the table edits the current cell: text that starts with = is a cell formula; otherwise the value is written and that cell's own formula is cleared.
 
 Column formulas can also use:
   col(\"name\"), col(\"A\") (the column of that name; a letter only when no column has it)
@@ -90,31 +90,45 @@ A cell can have its own formula, which overrides the column formula. Formula edi
 
 Example: sin(col(\"X\")) * 2
 
-Column formulas can branch. if(condition, when true, when false) and condition ? when true : when false evaluate only the chosen side. An indented if / elif / else block works too. Dividing two integers still truncates.
+Column formulas can branch. if(condition, when true, when false) and condition ? when true : when false evaluate only the chosen side. An indented if / elif / else block works too. 1/2 is still 0.5.
 
 A column formula that starts with python: is evaluated row by row by the built-in Python subset. It can use col(), cell(), tablecol(), i, and row.
 
-A note has two runners. Run note still evaluates one formula per line: `name = expression` remembers the number, and blank lines, #, and // are skipped. That runner cannot use col(). Run script executes the built-in Python subset, which can create tables, plot, fit, and export. It is not a full CPython.
+A note has two runners. Run note still evaluates one formula per line: `name = expression` remembers the number, and blank lines, #, and // are skipped. That runner cannot use col(). After a table recalculation, col(), cell(), and tablecol() in a note do not read the previous table's last row; they report an error. Run script executes the built-in interpreter, which can create tables, plot, fit, and export. It is not CPython.
 ";
 
 pub fn script_help() -> String {
-    sciplot_core::tr!(
-        "脚本菜单和备注里的「执行脚本」使用程序内的 Python 子集，不是 CPython。\n\
-可以写 if/elif/else、for、while、def、列表和 table()/graph()/newTable()/plot()/Fit。\n\
-import math 和 from sciplot import * 不用写也会有这些函数。\n\
-脚本里的 / 是真除法，// 是向下取整。列公式里不带 python: 的 / 仍按整数截断。\n\
-newTable(名字, 列数, 行数)，setCell 和 setColName 的序号从 1 开始。",
-        "The Scripting menu and Run script in a note use the built-in Python subset, not CPython.\n\
-You can write if/elif/else, for, while, def, lists, and table()/graph()/newTable()/plot()/Fit.\n\
-import math and from sciplot import * are optional; those names are already available.\n\
-In a script, / is true division and // floors. A column formula without the python: prefix still truncates integer division.\n\
-newTable(name, columns, rows). setCell and setColName are numbered from 1."
-    )
-    .to_string()
+    match sciplot_core::language() {
+        sciplot_core::Language::Zh => SCRIPT_HELP_ZH.to_string(),
+        sciplot_core::Language::En => SCRIPT_HELP_EN.to_string(),
+        other => crate::help_text::script(other).to_string(),
+    }
 }
 
-pub fn formula_help() -> &'static str {
-    sciplot_core::translate(FORMULA_HELP_ZH, FORMULA_HELP_EN)
+const SCRIPT_HELP_ZH: &str = "\
+脚本菜单和备注里的「执行脚本」使用程序内的解释器，不是 CPython。\n\
+没有嵌入 CPython：Windows 发行包在 Linux 上用 mingw 交叉编译，PyO3 需要 libpython；再为三个平台带上标准库既放不进发行包，也会要求用户另外安装 Python。RustPython 的工具链高于本仓库声明的 1.81。\n\
+可以写 if/elif/else、for、while、def、列表、字典、类、try/except，以及 table()/graph()/newTable()/plot()/Fit。\n\
+import math、statistics、random、json 和 from sciplot import * 会装上这些名字。不认识的 import 会报错。\n\
+脚本里的 / 是真除法，// 是向下取整。列公式的 1/2 也是 0.5。\n\
+newTable(名字, 列数, 行数)。setCell 和 setColName 的序号从 1 开始。\n\
+常用方法还有列名、公式、importASCII、exportASCII、坐标轴标题、saveProject，以及 tableList/graphList。";
+
+const SCRIPT_HELP_EN: &str = "\
+The Scripting menu and Run script in a note use the built-in interpreter, not CPython.\n\
+CPython is not embedded. The Windows package is cross-compiled with mingw, and PyO3 needs libpython. Shipping a standard library for three platforms would not fit the release, and linking dynamically would make users install Python themselves. RustPython's toolchain is newer than this repo's declared 1.81.\n\
+You can write if/elif/else, for, while, def, lists, dicts, classes, try/except, and table()/graph()/newTable()/plot()/Fit.\n\
+import math, statistics, random, json, and from sciplot import * install those names. An unknown import is an error.\n\
+In a script, / is true division and // floors. A column formula's 1/2 is also 0.5.\n\
+newTable(name, columns, rows). setCell and setColName are numbered from 1.\n\
+Other common methods cover column names, formulas, importASCII, exportASCII, axis titles, saveProject, and tableList/graphList.";
+
+pub fn formula_help() -> String {
+    match sciplot_core::language() {
+        sciplot_core::Language::Zh => FORMULA_HELP_ZH.to_string(),
+        sciplot_core::Language::En => FORMULA_HELP_EN.to_string(),
+        other => crate::help_text::formula(other).to_string(),
+    }
 }
 
 const ABOUT_ZH: &str = "\
@@ -123,9 +137,9 @@ const ABOUT_ZH: &str = "\
 表格、矩阵、多种二维图、三维曲面、拟合、微积分、插值、平滑、FFT，
 以及曲线/折线求交点（可限制 X 区间，也可与水平线、竖直线求交）。
 
-项目可以存成 .splot 或压缩的 .splot.gz，也可以交换 .sciprj / .sciprj.gz 的一个子集。一部分 Origin 项目可以打开。图形可以导出 PNG、SVG 和 PDF。
+项目可以存成 .splot 或压缩的 .splot.gz。SciPlot 自己的 .sciprj 可以往返；官方 SciDAVis 项目也能打开，保存时另存为 .splot，不会覆盖原文件。Origin 可以读入数值、文本和日期列，不能写回去。图形可以导出 PNG、SVG 和 PDF。透明背景对 PNG、XPM 和 SVG 生效。EPS 和 PDF 里的图像标注带上像素。
 
-发布页有 Windows、Linux，以及未签名的 macOS 程序。
+发布页有 Windows、Linux，以及未签名、未公证的 macOS 程序（Apple Silicon，和未在 Intel 硬件上运行过的 x86_64 包）。没有 Apple Developer 证书。
 ";
 
 const ABOUT_EN: &str = "\
@@ -135,13 +149,17 @@ Tables, matrices, many two-dimensional plots, three-dimensional surfaces, fittin
 calculus, interpolation, smoothing, FFT, and intersections of curves or polylines
 (an X range, a horizontal line, or a vertical line).
 
-A project can be saved as .splot or compressed .splot.gz, and a subset of .sciprj / .sciprj.gz can be exchanged. Some Origin projects can be opened. Graphs export to PNG, SVG, and PDF.
+A project can be saved as .splot or compressed .splot.gz. SciPlot's own .sciprj round-trips. Official SciDAVis projects open too; saving writes a .splot and does not overwrite the original. Origin files can be read, including text and date columns, and cannot be written back. Graphs export to PNG, SVG, and PDF. A transparent background applies to PNG, XPM, and SVG. Image annotations in EPS and PDF keep their pixels.
 
-Releases include Windows, Linux, and an unsigned macOS program.
+Releases include Windows, Linux, and an unsigned, unnotarized macOS program (Apple Silicon, plus an x86_64 package that was not run on Intel hardware). There is no Apple Developer certificate.
 ";
 
-pub fn about() -> &'static str {
-    sciplot_core::translate(ABOUT_ZH, ABOUT_EN)
+pub fn about() -> String {
+    match sciplot_core::language() {
+        sciplot_core::Language::Zh => ABOUT_ZH.to_string(),
+        sciplot_core::Language::En => ABOUT_EN.to_string(),
+        other => crate::help_text::about(other).to_string(),
+    }
 }
 
 const AI_HELP_ZH: &str = "\
@@ -193,5 +211,9 @@ On Windows, set command to the full path of sciplot.exe. Standard output is rese
 ";
 
 pub fn ai_help() -> String {
-    sciplot_core::translate(AI_HELP_ZH, AI_HELP_EN).to_string()
+    match sciplot_core::language() {
+        sciplot_core::Language::Zh => AI_HELP_ZH.to_string(),
+        sciplot_core::Language::En => AI_HELP_EN.to_string(),
+        other => crate::help_text::ai(other).to_string(),
+    }
 }

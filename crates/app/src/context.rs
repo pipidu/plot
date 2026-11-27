@@ -35,6 +35,9 @@ pub(crate) fn section_matrices(app: &mut SciPlotApp, ui: &mut egui::Ui) {
 }
 
 pub(crate) fn section_graphs(app: &mut SciPlotApp, ui: &mut egui::Ui) {
+    if clicked_menu(ui, sciplot_core::t("绘图向导…")) {
+        app.dialog = Some(open_wizard_start(app));
+    }
     if clicked_menu(ui, sciplot_core::t("函数曲线…")) {
         app.dialog = Some(function_dialog(None, 0, false));
     }
@@ -600,6 +603,11 @@ fn open_wizard(app: &SciPlotApp, table: TableId) -> Dialog {
     let third = numeric.first().copied().unwrap_or(0);
     let fourth = numeric.get(1).copied().unwrap_or(third);
     Dialog::Wizard {
+        step: 1,
+        create_new: false,
+        new_name: sciplot_core::t("表格").into(),
+        new_cols: "2".into(),
+        new_rows: "10".into(),
         table,
         x,
         y,
@@ -607,6 +615,31 @@ fn open_wizard(app: &SciPlotApp, table: TableId) -> Dialog {
         vector_mode: sciplot_core::VectorMode::DxDy,
         third,
         fourth,
+    }
+}
+
+pub(crate) fn open_wizard_start(app: &SciPlotApp) -> Dialog {
+    if let Some(table) = app.project.tables.first() {
+        let mut dialog = open_wizard(app, table.id);
+        if let Dialog::Wizard { step, .. } = &mut dialog {
+            *step = 0;
+        }
+        dialog
+    } else {
+        Dialog::Wizard {
+            step: 0,
+            create_new: true,
+            new_name: sciplot_core::t("表格").into(),
+            new_cols: "2".into(),
+            new_rows: "10".into(),
+            table: TableId(0),
+            x: 0,
+            y: vec![false, true],
+            kind: CurveKind::Line,
+            vector_mode: sciplot_core::VectorMode::DxDy,
+            third: 0,
+            fourth: 0,
+        }
     }
 }
 
@@ -725,6 +758,36 @@ fn curve_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: us
 
 fn annotation_menu(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: usize, id: u64) {
     ui.label(sciplot_core::t("标注"));
+    let bound = app
+        .project
+        .graph(graph)
+        .and_then(|item| item.layers.get(layer))
+        .and_then(|item| item.annotations.iter().find(|annotation| annotation.id == id))
+        .map(|annotation| (annotation.x_top, annotation.y_right));
+    if let Some((x_top, y_right)) = bound {
+        if clicked_menu(ui, if x_top { sciplot_core::t("改用下轴") } else { sciplot_core::t("改用上轴") }) {
+            app.edit(sciplot_core::t("标注坐标轴"), |project| {
+                let annotation = project
+                    .graph_mut(graph)
+                    .and_then(|item| item.layers.get_mut(layer))
+                    .and_then(|item| item.annotations.iter_mut().find(|annotation| annotation.id == id))
+                    .ok_or(sciplot_core::t("没有这个标注"))?;
+                annotation.x_top = !x_top;
+                Ok(())
+            });
+        }
+        if clicked_menu(ui, if y_right { sciplot_core::t("改用左轴") } else { sciplot_core::t("改用右轴") }) {
+            app.edit(sciplot_core::t("标注坐标轴"), |project| {
+                let annotation = project
+                    .graph_mut(graph)
+                    .and_then(|item| item.layers.get_mut(layer))
+                    .and_then(|item| item.annotations.iter_mut().find(|annotation| annotation.id == id))
+                    .ok_or(sciplot_core::t("没有这个标注"))?;
+                annotation.y_right = !y_right;
+                Ok(())
+            });
+        }
+    }
     if clicked_menu(ui, sciplot_core::t("删除")) {
         app.selected_ann = Some((graph, layer, id));
         app.edit(sciplot_core::t("删除标注"), |project| {
@@ -956,6 +1019,12 @@ fn layer_format(app: &mut SciPlotApp, ui: &mut egui::Ui, graph: GraphId, layer: 
                 h: frame.h.to_string(),
             });
         }
+    }
+    if clicked_menu(ui, if app.ann_x_top { sciplot_core::t("新标注：上轴（开）") } else { sciplot_core::t("新标注：上轴（关）") }) {
+        app.ann_x_top = !app.ann_x_top;
+    }
+    if clicked_menu(ui, if app.ann_y_right { sciplot_core::t("新标注：右轴（开）") } else { sciplot_core::t("新标注：右轴（关）") }) {
+        app.ann_y_right = !app.ann_y_right;
     }
     if clicked_menu(ui, sciplot_core::t("文本标注…")) {
         app.dialog = Some(Dialog::TextAnn {

@@ -18,12 +18,15 @@ mod vector;
 pub use export::{
     export_scene, page_points, pixel_size, print_pdf, ExportFormat, ExportOptions, PageOrientation, Paper,
 };
-pub use interact::{data_to_screen, nearest_curve, nearest_point, pan_limits, screen_to_data, zoom_limits, CurveHit, NearestPoint};
+pub use interact::{
+    data_to_screen, data_to_screen_on, nearest_curve, nearest_point, pan_axis, pan_limits, screen_to_data, screen_to_data_on,
+    zoom_limits, CurveHit, NearestPoint,
+};
 pub use paint::{paint, PLOT_FONT_FAMILY};
 pub use raster::{prepare_font, to_png, to_png_with, to_rgba, to_rgba_with, GlyphFont};
 pub use render::render;
 pub use scene::{LayerFrame, LayerView, LegendHit, Prim, Scene};
-pub use svg::{to_svg, SVG_FONT};
+pub use svg::{to_svg, to_svg_transparent, SVG_FONT};
 
 #[cfg(test)]
 mod tests {
@@ -431,6 +434,7 @@ mod tests {
                     size: 12.0,
                     color: [0, 0, 0, 255],
                 },
+                ..Default::default()
             });
             let png = {
                 let mut buf = Vec::new();
@@ -449,6 +453,7 @@ mod tests {
                     h: 0.3,
                     png_base64: png,
                 },
+                ..Default::default()
             });
         }
         let graph = project.graph(graph_id).unwrap();
@@ -460,5 +465,224 @@ mod tests {
         assert!(svg.contains("data:image/png;base64,"), "{svg}");
         assert!(svg.contains("right"), "{svg}");
         assert!(svg.contains("<polyline"), "{svg}");
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Circle { .. })), "mixed polar still draws rings");
+    }
+
+    #[test]
+    fn polar_function_uses_polar_axes() {
+        let mut project = Project::new("p");
+        let graph_id = project.new_graph("极坐标");
+        {
+            let layer = &mut project.graph_mut(graph_id).unwrap().layers[0];
+            layer.curves.push(sciplot_core::Curve {
+                name: "r".into(),
+                kind: CurveKind::Polar,
+                source: sciplot_core::DataSource::Polar {
+                    expr: "2".into(),
+                    theta_min: 0.0,
+                    theta_max: std::f64::consts::TAU,
+                    samples: 32,
+                },
+                ..sciplot_core::Curve::default()
+            });
+        }
+        let graph = project.graph(graph_id).unwrap();
+        let scene = render(&project, graph, &[], 640.0, 480.0, 1.0);
+        let labels: Vec<&str> = scene
+            .primitives
+            .iter()
+            .filter_map(|prim| match prim {
+                Prim::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.iter().any(|text| text.contains("0°")), "{labels:?}");
+        assert!(labels.iter().any(|text| text.contains("90°")), "{labels:?}");
+        assert!(!labels.iter().any(|text| *text == "x" || *text == "y"), "{labels:?}");
+        assert!(scene.primitives.iter().any(|prim| matches!(prim, Prim::Circle { .. })));
+        let span_x = scene.layers[0].x_max - scene.layers[0].x_min;
+        let span_y = scene.layers[0].y_max - scene.layers[0].y_min;
+        assert!((span_x - span_y).abs() < 1e-6, "{span_x} {span_y}");
+        assert!(scene.layers[0].x_min < 0.0 && scene.layers[0].y_min < 0.0);
+    }
+
+    #[test]
+    fn exploded_pie_and_notched_box_change_geometry() {
+        let pie = |explode: f32| {
+            let (mut project, id) = plot_xy(CurveKind::Pie);
+            {
+                let curve = &mut project.graph_mut(id).unwrap().layers[0].curves[0];
+                curve.style.pie_explode = explode;
+            }
+            let graph = project.graph(id).unwrap();
+            render(&project, graph, &[], 640.0, 480.0, 1.0)
+        };
+        let solid = pie(0.0);
+        let exploded = pie(0.35);
+        let center = |scene: &Scene| {
+            scene
+                .primitives
+                .iter()
+                .find_map(|prim| match prim {
+                    Prim::Polygon { pts, .. } if pts.len() > 4 => Some(pts[0]),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let a = center(&solid);
+        let b = center(&exploded);
+        assert!((a.0 - b.0).hypot(a.1 - b.1) > 8.0, "{a:?} {b:?}");
+
+        let boxed = |notch: bool| {
+            let (mut project, id) = plot_xy(CurveKind::BoxPlot);
+            {
+                let curve = &mut project.graph_mut(id).unwrap().layers[0].curves[0];
+                curve.style.box_notch = notch;
+            }
+            let graph = project.graph(id).unwrap();
+            render(&project, graph, &[], 640.0, 480.0, 1.0)
+        };
+        let plain = boxed(false);
+        let notched = boxed(true);
+        assert!(plain.primitives.iter().any(|prim| matches!(prim, Prim::Rect { .. })));
+        assert!(!plain.primitives.iter().any(|prim| matches!(prim, Prim::Polygon { pts, .. } if pts.len() > 4)));
+        let waist = notched.primitives.iter().find_map(|prim| match prim {
+            Prim::Polygon { pts, .. } if pts.len() > 4 => Some(pts.clone()),
+            _ => None,
+        });
+        let waist = waist.expect("notched box is a polygon");
+        let min_x = waist.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let max_x = waist.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let inset = waist.iter().any(|p| p.0 > min_x + 1.0 && p.0 < max_x - 1.0);
+        assert!(inset, "{waist:?}");
+    }
+
+    #[test]
+    fn top_and_right_view_moves_bound_annotation() {
+        let mut project = Project::new("p");
+        let graph_id = project.new_graph("双轴");
+        {
+            let layer = &mut project.graph_mut(graph_id).unwrap().layers[0];
+            layer.show_top = true;
+            layer.show_right = true;
+            layer.x_top.min = Some(0.0);
+            layer.x_top.max = Some(10.0);
+            layer.y_right.min = Some(0.0);
+            layer.y_right.max = Some(100.0);
+            layer.curves.push(sciplot_core::Curve {
+                name: "右".into(),
+                kind: CurveKind::Line,
+                axes: sciplot_core::CurveAxes {
+                    x: sciplot_core::XAxisSide::Top,
+                    y: sciplot_core::YAxisSide::Right,
+                },
+                source: sciplot_core::DataSource::Points {
+                    x: vec![1.0, 9.0],
+                    y: vec![10.0, 90.0],
+                },
+                ..sciplot_core::Curve::default()
+            });
+            layer.annotations.push(sciplot_core::Annotation {
+                id: 3,
+                x_top: true,
+                y_right: true,
+                kind: sciplot_core::AnnotationKind::Marker {
+                    x: 5.0,
+                    y: 20.0,
+                    label: "中".into(),
+                    color: [0, 0, 0, 255],
+                },
+            });
+        }
+        let graph = project.graph(graph_id).unwrap();
+        let scene = render(&project, graph, &[], 640.0, 480.0, 1.0);
+        let frame = &scene.layers[0];
+        assert!((frame.y2_max - 100.0).abs() < 1e-6, "{}", frame.y2_max);
+        let marker = scene.primitives.iter().find_map(|prim| match prim {
+            Prim::Circle { x, y, r, fill: Some(_), .. } if *r >= 4.0 => Some((*x, *y)),
+            _ => None,
+        });
+        let marker = marker.expect("marker");
+        let expected = data_to_screen_on(frame, 5.0, 20.0, true, true).unwrap();
+        assert!((marker.0 - expected.0).abs() < 1.0 && (marker.1 - expected.1).abs() < 1.0, "{marker:?} {expected:?}");
+        let wrong = data_to_screen(frame, 5.0, 20.0).unwrap();
+        assert!((marker.1 - wrong.1).abs() > 5.0, "right-axis marker must not use the left axis");
+        let view = LayerView {
+            x2_min: Some(0.0),
+            x2_max: Some(10.0),
+            y2_min: Some(0.0),
+            y2_max: Some(40.0),
+            ..LayerView::default()
+        };
+        let zoomed = render(&project, graph, &[view], 640.0, 480.0, 1.0);
+        assert!((zoomed.layers[0].y2_max - 40.0).abs() < 1e-6);
+        let moved = zoomed.primitives.iter().find_map(|prim| match prim {
+            Prim::Circle { x, y, r, fill: Some(_), .. } if *r >= 4.0 => Some((*x, *y)),
+            _ => None,
+        }).unwrap();
+        assert!((moved.1 - marker.1).abs() > 5.0, "zooming the right axis moves the marker");
+        let panned = pan_axis(frame.x2_scale, frame.x2_min, frame.x2_max, frame.x2_inverted, 12.0, frame.plot.w, false).unwrap();
+        let bottom = pan_limits(frame, 12.0, 0.0).unwrap().0;
+        let same = pan_axis(frame.x_scale, frame.x_min, frame.x_max, frame.x_inverted, 12.0, frame.plot.w, false).unwrap();
+        assert!((same.0 - bottom.0).abs() < 1e-9 && (same.1 - bottom.1).abs() < 1e-9);
+        assert!((panned.0 - same.0).abs() > 1e-6 || (frame.x2_max - frame.x_max).abs() > 1e-6);
+    }
+
+    #[test]
+    fn svg_transparency_skips_the_page_and_vector_images_keep_pixels() {
+        let project = demo_project();
+        let graph = project.graphs.iter().find(|graph| graph.name == sciplot_core::t("正弦与余弦")).unwrap();
+        let scene = render(&project, graph, &[], 320.0, 200.0, 1.0);
+        let opaque = to_svg(&scene);
+        let clear = to_svg_transparent(&scene, true);
+        assert!(opaque.contains("<rect x=\"0\" y=\"0\""), "{opaque}");
+        assert!(!clear.contains("<rect x=\"0\" y=\"0\""), "{clear}");
+        let mut options = ExportOptions {
+            format: ExportFormat::Svg,
+            transparent: true,
+            ..ExportOptions::default()
+        };
+        let exported = export_scene(&scene, None, &[], &options).unwrap();
+        let exported = String::from_utf8(exported).unwrap();
+        assert!(!exported.contains(&format!("<rect x=\"0\" y=\"0\" width=\"{}\"", scene.width)));
+
+        let mut project = Project::new("img");
+        let graph_id = project.new_graph("图");
+        let png = {
+            let mut buf = Vec::new();
+            let mut encoder = png::Encoder::new(&mut buf, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255, 0, 0, 255, 0, 0, 255, 255])
+                .unwrap();
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf)
+        };
+        project.graph_mut(graph_id).unwrap().layers[0].annotations.push(sciplot_core::Annotation {
+            id: 1,
+            kind: sciplot_core::AnnotationKind::Image {
+                x: 0.2,
+                y: 0.2,
+                w: 0.4,
+                h: 0.3,
+                png_base64: png,
+            },
+            ..Default::default()
+        });
+        let graph = project.graph(graph_id).unwrap();
+        let scene = render(&project, graph, &[], 320.0, 200.0, 1.0);
+        options.format = ExportFormat::Pdf;
+        options.transparent = false;
+        let pdf = export_scene(&scene, None, &[], &options).unwrap();
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(pdf.contains("ff0000"), "{pdf}");
+        assert!(pdf.contains("0000ff"), "{pdf}");
+        options.format = ExportFormat::Eps;
+        let eps = export_scene(&scene, None, &[], &options).unwrap();
+        let eps = String::from_utf8_lossy(&eps);
+        assert!(eps.contains("ff0000"), "{eps}");
+        assert!(eps.contains("0000ff"), "{eps}");
     }
 }

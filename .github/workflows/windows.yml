@@ -65,7 +65,7 @@ jobs:
             echo
             echo "Linux：下载 \`${linux}\`，加上可执行权限后运行：\`chmod +x ${linux} && ./${linux}\`。面向 64 位 Linux，需要图形环境（X11 或 Wayland）。"
             echo
-            echo "macOS：未签名、未公证的 Apple Silicon 应用会在这个发布创建之后附到同一个标签。解压后是 SciPlot.app。没有 Intel 包，也没有安装程序。"
+            echo "macOS：未签名、未公证。Apple Silicon 和 Intel（x86_64）包会在这个发布创建之后附到同一个标签，并改写 SHA256.txt 和这段说明。Intel 包由 macos-latest 交叉编译，没有在 Intel 硬件上运行。没有 Apple Developer 证书，不能签名或公证。解压后是 SciPlot.app。"
             echo
             echo "提交说明：$(git log -1 --pretty=%s)"
             echo
@@ -99,25 +99,35 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-macos
 
-      - name: 编译 macOS
+      - name: 编译 Apple Silicon
         env:
           SCIPLOT_BUILD: ${{ github.run_number }}
-        run: cargo build -p sciplot --release
+        run: cargo build -p sciplot --release --target aarch64-apple-darwin
 
-      - name: 打包未签名的应用
+      - name: 交叉编译 Intel（未在 Intel 硬件上运行）
         env:
           SCIPLOT_BUILD: ${{ github.run_number }}
-        run: bash scripts/package-macos.sh target/release/sciplot dist macos-aarch64
+        run: cargo build -p sciplot --release --target x86_64-apple-darwin
+
+      - name: 打包未签名、未公证的应用
+        env:
+          SCIPLOT_BUILD: ${{ github.run_number }}
+        run: |
+          bash scripts/package-macos.sh target/aarch64-apple-darwin/release/sciplot dist macos-aarch64
+          bash scripts/package-macos.sh target/x86_64-apple-darwin/release/sciplot dist macos-x86_64
+          rm -rf dist/SciPlot.app
 
       - uses: actions/upload-artifact@v4
         with:
           name: sciplot-macos
-          path: dist/*
+          path: dist/*.tar.gz
 
   attach-macos:
     needs: [release, macos]
@@ -141,5 +151,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -eu
           tag="${{ steps.version.outputs.tag }}"
-          gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          found=0
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              found=1
+              break
+            fi
+            sleep 10
+          done
+          test "$found" = 1
+          find dist -name '*.tar.gz' | grep -q .
+          gh release upload "$tag" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
+          rm -rf assets
+          mkdir -p assets
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir assets --pattern 'sciplot-*'
+          sha256sum assets/sciplot-* | sed 's|assets/||' | tee SHA256.txt
+          grep -q 'macos-aarch64' SHA256.txt
+          grep -q 'macos-x86_64' SHA256.txt
+          grep -q 'windows-x86_64' SHA256.txt
+          grep -q 'linux-x86_64' SHA256.txt
+          {
+            echo "自动构建自 ${GITHUB_SHA}。"
+            echo
+            echo "这些包都未签名。macOS 没有公证，也没有 Apple Developer 证书，所以 Gatekeeper 会拦截，需要用户在系统设置里自行放行。Intel（x86_64）包由 macos-latest 交叉编译到 x86_64-apple-darwin，没有在 Intel Mac 上运行过。解压后是 SciPlot.app。"
+            echo
+            echo "SHA256："
+            echo
+            echo '```'
+            cat SHA256.txt
+            echo '```'
+          } > notes.md
+          gh release upload "$tag" SHA256.txt --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file notes.md

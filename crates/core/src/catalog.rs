@@ -353,7 +353,7 @@ pub fn en(zh: &str) -> Option<&'static str> {
         "数据读取器已关闭" => "Data reader off",
         "数据读取器已打开" => "Data reader on",
         "数据长度 {n} 小于平滑窗口 {window}" => "The series length {n} is shorter than the smoothing window {window}",
-        "整数除法会截断，需要小数时写成 1.0/2。" => "Integer division truncates. Write 1.0/2 when you need a fraction.",
+        "除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。" => "Division yields a decimal: 1/2 is 0.5, and 1 equals 1.0.",
         "文件" => "File",
         "文件是空的" => "The file is empty",
         "文字" => "Text",

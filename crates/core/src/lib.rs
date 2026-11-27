@@ -3,6 +3,7 @@
 
 mod branch;
 mod catalog;
+mod expr;
 mod csv_io;
 mod datetime;
 mod demo;
@@ -11,9 +12,11 @@ mod formula;
 mod graph;
 mod history;
 mod lang_extra;
+mod lang_formats;
 mod locale;
 mod matrix;
 mod organize;
+mod official;
 mod origin;
 mod project;
 mod resolve;
@@ -27,15 +30,15 @@ pub use csv_io::{
     CsvEncoding, CsvHeader, CsvImportOptions, CsvLayout, DecimalMark,
 };
 pub use demo::demo_project;
-pub use exchange::{load_project_bytes, save_project_bytes, save_project_path, ProjectFormat};
+pub use exchange::{detach_save_path, load_project_bytes, save_project_bytes, save_project_path, ProjectFormat};
 pub use formula::{
-    apply_formula, apply_formula_with, commit_cell, eval_column, eval_column_with, eval_note, explain_error,
+    apply_formula, apply_formula_bar, apply_formula_with, commit_cell, eval_column, eval_column_with, eval_note, explain_error,
     is_python_formula, parameter_names, parse_initials, recalculate_table, set_python_column_hook, substitute_params,
     CompiledExpr, EvalColumn, NoteLine, NoteRun, PythonColumnFn, RecalcReport,
 };
 pub use graph::*;
 pub use history::History;
-pub use locale::{language, set_language, t, translate, Language};
+pub use locale::{fill_trf, language, set_language, t, translate, Language};
 pub use matrix::Matrix;
 pub use organize::{AppendReport, ProjectObject};
 pub use project::{Folder, Project, ProjectFile, FORMAT_VERSION};

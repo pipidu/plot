@@ -440,6 +440,9 @@ pub struct CurveStyle {
     #[serde(default = "default_pie_size")]
     pub pie_size: f32,
     pub pie_pattern: FillPattern,
+    /// 扇区沿角平分线离开圆心的比例。0 是整圆，0.2 大约移出半径的两成。
+    #[serde(default)]
+    pub pie_explode: f32,
     pub whisker: WhiskerMode,
     /// 百分位须的下百分位。上百分位是 100 减去它。
     #[serde(default = "default_whisker_percentile")]
@@ -447,6 +450,9 @@ pub struct CurveStyle {
     pub box_mean: bool,
     #[serde(default = "default_true")]
     pub box_outliers: bool,
+    /// 箱体在中位数处收成缺口。缺口半宽是 1.57 * IQR / sqrt(n)。
+    #[serde(default)]
+    pub box_notch: bool,
 }
 
 fn default_pie_start() -> f32 {
@@ -483,10 +489,12 @@ impl CurveStyle {
             pie_start_deg: default_pie_start(),
             pie_size: default_pie_size(),
             pie_pattern: FillPattern::Solid,
+            pie_explode: 0.0,
             whisker: WhiskerMode::Iqr15,
             whisker_percentile: default_whisker_percentile(),
             box_mean: false,
             box_outliers: true,
+            box_notch: false,
         }
     }
 }
@@ -748,6 +756,12 @@ impl Default for AnnotationKind {
 pub struct Annotation {
     pub id: u64,
     pub kind: AnnotationKind,
+    /// 横坐标走上轴。旧文件没有这个字段，仍然用下轴。
+    #[serde(default)]
+    pub x_top: bool,
+    /// 纵坐标走右轴。旧文件没有这个字段，仍然用左轴。
+    #[serde(default)]
+    pub y_right: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

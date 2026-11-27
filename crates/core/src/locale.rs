@@ -120,17 +120,105 @@ macro_rules! tr {
 #[macro_export]
 macro_rules! trf {
     ($zh:literal, $en:literal) => {{
-        match $crate::language() {
-            $crate::Language::Zh => format!($zh),
-            _ => format!($en),
-        }
+        $crate::fill_trf($zh, format!($zh), format!($en))
     }};
     ($zh:literal, $en:literal, $($rest:tt)*) => {{
-        match $crate::language() {
-            $crate::Language::Zh => format!($zh, $($rest)*),
-            _ => format!($en, $($rest)*),
-        }
+        $crate::fill_trf($zh, format!($zh, $($rest)*), format!($en, $($rest)*))
     }};
+}
+
+/// 把带参数的句子填进当前语言。简体用中文，英语用英文。
+/// 其余七种语言用 `lang_formats` 里的格式串，孔按中文的顺序填入已经格式化的文字。
+/// 没有收录时留简体中文，不再改用英文。
+pub fn fill_trf(zh_template: &str, zh_filled: String, en_filled: String) -> String {
+    match language() {
+        Language::Zh => zh_filled,
+        Language::En => en_filled,
+        other => {
+            let Some(translated) = crate::lang_formats::template(other, zh_template) else {
+                return zh_filled;
+            };
+            apply_holes(translated, &extract_holes(zh_template, &zh_filled).unwrap_or_default())
+                .unwrap_or(zh_filled)
+        }
+    }
+}
+
+enum Part<'a> {
+    Lit(&'a str),
+    Hole,
+}
+
+fn split_template(template: &str) -> Vec<Part<'_>> {
+    let mut parts = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        if start > 0 {
+            parts.push(Part::Lit(&rest[..start]));
+        }
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            parts.push(Part::Lit(rest));
+            return parts;
+        };
+        parts.push(Part::Hole);
+        rest = &after[end + 1..];
+    }
+    if !rest.is_empty() {
+        parts.push(Part::Lit(rest));
+    }
+    parts
+}
+
+fn extract_holes(template: &str, filled: &str) -> Option<Vec<String>> {
+    let parts = split_template(template);
+    let mut rest = filled;
+    let mut values = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        match part {
+            Part::Lit(lit) => {
+                rest = rest.strip_prefix(lit)?;
+            }
+            Part::Hole => {
+                let next = parts[index + 1..].iter().find_map(|part| match part {
+                    Part::Lit(lit) if !lit.is_empty() => Some(*lit),
+                    _ => None,
+                });
+                match next {
+                    Some(lit) => {
+                        let pos = rest.find(lit)?;
+                        values.push(rest[..pos].to_string());
+                        rest = &rest[pos..];
+                    }
+                    None => {
+                        values.push(rest.to_string());
+                        rest = "";
+                    }
+                }
+            }
+        }
+    }
+    if rest.is_empty() { Some(values) } else { None }
+}
+
+fn apply_holes(template: &str, values: &[String]) -> Option<String> {
+    let parts = split_template(template);
+    let holes = parts.iter().filter(|part| matches!(part, Part::Hole)).count();
+    if holes != values.len() {
+        return None;
+    }
+    let mut out = String::new();
+    let mut index = 0;
+    for part in parts {
+        match part {
+            Part::Lit(lit) => out.push_str(lit),
+            Part::Hole => {
+                out.push_str(&values[index]);
+                index += 1;
+            }
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -209,6 +297,46 @@ mod tests {
         assert_eq!(project.tables[0].name, "Trigonometry");
         assert!(project.notes[0].text.contains("Import CSV"));
         assert!(project.graphs.iter().any(|graph| graph.name == "Sine and cosine"));
+    }
+
+    #[test]
+    fn parameterized_status_uses_the_seven_languages() {
+        let _reset = ResetLanguage;
+        let expect = [
+            (Language::ZhHant, "已儲存", "已列印"),
+            (Language::De, "Gespeichert", "gedruckt"),
+            (Language::Fr, "Enregistré", "imprimés"),
+            (Language::Ru, "Сохранено", "Напечатано"),
+            (Language::Es, "Guardado", "imprimieron"),
+            (Language::Cs, "Uloženo", "Vytištěno"),
+            (Language::PtBr, "Salvo", "impressos"),
+        ];
+        for (language, saved_word, print_word) in expect {
+            set_language(language);
+            let saved = crate::trf!("已保存 {}", "Saved {}", "demo.splot");
+            assert!(saved.contains("demo.splot"), "{saved}");
+            assert!(saved.contains(saved_word), "{saved}");
+            assert!(!saved.contains("Saved"), "{saved}");
+            let printed = crate::trf!(
+                "已打印 {n} 张图到 {path}（PDF，{w:.0}×{h:.0} 点）。本机没有打印机时就写这个文件。",
+                "Printed {n} graphs to {path} (PDF, {w:.0}×{h:.0} pt). Without a printer, this file is the printout.",
+                n = 2,
+                path = "out.pdf",
+                w = 100.0,
+                h = 200.0
+            );
+            assert!(printed.contains("out.pdf"), "{printed}");
+            assert!(printed.contains(print_word), "{printed}");
+            assert!(printed.contains("100"), "{printed}");
+            assert!(printed.contains("200"), "{printed}");
+            assert!(!printed.contains("Printed"), "{printed}");
+            let missing = crate::trf!("完全没有收录 {}", "Totally missing {}", "x");
+            assert_eq!(missing, "完全没有收录 x");
+        }
+        set_language(Language::En);
+        assert_eq!(crate::trf!("已保存 {}", "Saved {}", "a"), "Saved a");
+        set_language(Language::Zh);
+        assert_eq!(crate::trf!("已保存 {}", "Saved {}", "a"), "已保存 a");
     }
 
     struct ResetLanguage;

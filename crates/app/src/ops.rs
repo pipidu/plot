@@ -91,6 +91,8 @@ pub fn apply_intersection(
         for point in &result.points {
             layer.annotations.push(Annotation {
                 id: 0,
+                x_top: false,
+                y_right: false,
                 kind: AnnotationKind::Marker {
                     x: point.x,
                     y: point.y,

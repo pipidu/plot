@@ -4,14 +4,16 @@ use std::path::{Path, PathBuf};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
-    demo_project, export_csv_with, import_csv_files, import_csv_with, load_project_bytes, save_project_path, tr,
+    demo_project, detach_save_path, export_csv_with, import_csv_files, import_csv_with, load_project_bytes, save_project_path,
+    tr,
     AnnotationKind, CsvDelimiter, CsvEncoding, CsvHeader, CsvImportOptions, CsvLayout, CurveKind, DataSource,
     DecimalMark, FolderId, Graph, GraphId, GraphTemplate, History, LayerAlign, LayerArrangement, MatrixId, NoteId,
     NumericFormat, PanelPreset, Project, ProjectFormat, ProjectObject, SortMode, SurfaceMode, SurfaceSource, TableId,
 };
 use sciplot_plot::{
-    data_to_screen, export_scene, nearest_curve, nearest_point, page_points, pan_limits, pixel_size, print_pdf, render,
-    screen_to_data, to_png, to_rgba, to_svg, zoom_limits, ExportFormat, ExportOptions, LayerFrame, LayerView,
+    data_to_screen, data_to_screen_on, export_scene, nearest_curve, nearest_point, page_points, pan_axis, pixel_size,
+    print_pdf, render, screen_to_data, screen_to_data_on, to_png, to_rgba, to_svg, zoom_limits, ExportFormat, ExportOptions,
+    LayerFrame, LayerView,
     PageOrientation, Paper, Scene,
 };
 
@@ -394,6 +396,11 @@ pub enum Dialog {
         vector_mode: sciplot_core::VectorMode,
     },
     Wizard {
+        step: usize,
+        create_new: bool,
+        new_name: String,
+        new_cols: String,
+        new_rows: String,
         table: TableId,
         x: usize,
         y: Vec<bool>,
@@ -651,6 +658,11 @@ pub struct SciPlotApp {
     pub(crate) selected_column: Option<(TableId, usize)>,
     /// 公式编辑模式只存在界面里，不写进项目文件。
     pub(crate) formula_mode: bool,
+    /// 新建标注时横坐标是否走上轴、纵坐标是否走右轴。
+    pub(crate) ann_x_top: bool,
+    pub(crate) ann_y_right: bool,
+    /// 公式栏草稿。有值时表示正在编辑某一格，避免每帧把输入框重置掉。
+    pub(crate) formula_bar: Option<(TableId, usize, usize, String)>,
     pub(crate) cell_anchor: Option<(TableId, usize, usize)>,
     pub(crate) cell_focus: Option<(TableId, usize, usize)>,
     active_layer: usize,
@@ -765,6 +777,9 @@ impl SciPlotApp {
             selected_ann: None,
             selected_column: None,
             formula_mode: false,
+            ann_x_top: false,
+            ann_y_right: false,
+            formula_bar: None,
             cell_anchor: None,
             cell_focus: None,
             active_layer: 0,
@@ -1090,23 +1105,38 @@ impl SciPlotApp {
             });
             return;
         }
-        match read_project_file(path) {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.status = err.to_string();
+                return;
+            }
+        };
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("project.splot");
+        match load_project_bytes(name, &bytes) {
             Ok(project) => {
+                let foreign = detach_save_path(name, &bytes);
                 let origin = ProjectFormat::from_path(path) == Some(ProjectFormat::Origin);
                 self.project = project;
                 self.history = History::new();
                 self.views.clear();
-                self.path = if origin { None } else { Some(path.to_path_buf()) };
-                self.dirty = origin;
-                if !origin {
+                self.path = if foreign { None } else { Some(path.to_path_buf()) };
+                self.dirty = foreign;
+                if !foreign {
                     remember(&mut self.recent, path);
                 }
                 self.note_dir(path);
                 self.rebuild_dock(false);
                 self.status = if origin {
                     sciplot_core::trf!(
-                        "已打开 Origin 项目 {}。图、文本列和分析没有导入，请另存为。",
-                        "Opened Origin project {}. Graphs, text columns, and analysis were not imported. Save as a new file.",
+                        "已打开 Origin 项目 {}。不能写回 Origin，请另存为 .splot。",
+                        "Opened Origin project {}. It cannot be written back; save as .splot.",
+                        path.display()
+                    )
+                } else if foreign {
+                    sciplot_core::trf!(
+                        "已打开 SciDAVis 项目 {}。官方格式没有单元格公式，保存将另存为 .splot，不会覆盖原文件。",
+                        "Opened SciDAVis project {}. The official format has no cell formulas. Save writes a .splot and does not overwrite the original.",
                         path.display()
                     )
                 } else {
@@ -1868,6 +1898,8 @@ impl SciPlotApp {
             }
         };
         let (x, y, w, h) = annotation_box(self, graph, fitted.width, fitted.height);
+        let x_top = self.ann_x_top;
+        let y_right = self.ann_y_right;
         if self
             .edit(sciplot_core::tr!("插入图像", "Insert image"), |project| {
                 crate::dialogs::push_annotation(
@@ -1881,6 +1913,8 @@ impl SciPlotApp {
                         h,
                         png_base64: png.clone(),
                     },
+                    x_top,
+                    y_right,
                 )
             })
             .is_some()
@@ -1898,6 +1932,8 @@ impl SciPlotApp {
     pub(crate) fn add_timestamp(&mut self, graph: GraphId, layer: usize) {
         let text = clock_text();
         let (x, y, _, _) = annotation_box(self, graph, 1, 1);
+        let x_top = self.ann_x_top;
+        let y_right = self.ann_y_right;
         if self
             .edit(sciplot_core::tr!("时间戳", "Time stamp"), |project| {
                 crate::dialogs::push_annotation(
@@ -1911,6 +1947,8 @@ impl SciPlotApp {
                         size: 13.0,
                         color: [20, 20, 20, 255],
                     },
+                    x_top,
+                    y_right,
                 )
             })
             .is_some()
@@ -2486,6 +2524,9 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     if clicked(ui, sciplot_core::t("新建项目"), "Ctrl+N") {
         request_after(app, AfterSave::NewProject);
     }
+    if clicked(ui, sciplot_core::t("绘图向导…"), "") {
+        app.dialog = Some(crate::context::open_wizard_start(app));
+    }
     if clicked(ui, sciplot_core::t("打开…"), "Ctrl+O") {
         request_after(app, AfterSave::OpenPicker);
     }
@@ -3009,6 +3050,7 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
             app.paste_cells();
         }
     });
+    formula_bar(app, ui, id);
     ui.separator();
     let min_width = 46.0 + 120.0 * ncols as f32;
     egui::ScrollArea::horizontal().show(ui, |ui| {
@@ -3166,6 +3208,70 @@ fn table_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
     });
     if app.arm_cell_focus == Some(id) && app.dialog.is_none() {
         app.arm_cell_focus = None;
+    }
+}
+
+fn formula_bar(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
+    let focus = app.cell_focus.filter(|(table, _, _)| *table == id);
+    let Some((table_id, column, row)) = focus else {
+        ui.horizontal(|ui| {
+            ui.label(sciplot_core::t("公式栏"));
+            ui.label(sciplot_core::t("先选中一个单元格"));
+        });
+        app.formula_bar = None;
+        return;
+    };
+    let shown = app.project.table(table_id).and_then(|table| {
+        let column_ref = table.columns.get(column)?;
+        let formula = column_ref.cell_formula(row);
+        let text = if formula.is_empty() {
+            column_ref.editor_text(row, false)
+        } else if formula.starts_with('=') {
+            formula.to_string()
+        } else {
+            format!("={formula}")
+        };
+        let name = column_ref.name.clone();
+        Some((name, text))
+    });
+    let Some((name, current)) = shown else {
+        return;
+    };
+    let mut text = match &app.formula_bar {
+        Some((stored_table, stored_col, stored_row, stored)) if *stored_table == table_id && *stored_col == column && *stored_row == row => {
+            stored.clone()
+        }
+        _ => current,
+    };
+    let mut commit = false;
+    ui.horizontal(|ui| {
+        ui.label(sciplot_core::trf!("公式栏 {} {}", "Formula bar {} {}", name, row + 1));
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .desired_width(420.0)
+                .hint_text("=col(\"A\")+1"),
+        );
+        if response.changed() {
+            app.formula_bar = Some((table_id, column, row, text.clone()));
+        }
+        if response.lost_focus() && app.formula_bar.is_some() {
+            commit = true;
+        }
+    });
+    if commit {
+        let written = text;
+        app.formula_bar = None;
+        let others: Vec<sciplot_core::Table> = app.project.tables.iter().filter(|table| table.id != id).cloned().collect();
+        app.history.push(sciplot_core::t("公式栏"), &app.project);
+        if let Some(table) = app.project.table_mut(id) {
+            match sciplot_core::apply_formula_bar(table, column, row, &written, &others) {
+                Ok(()) => {
+                    app.dirty = true;
+                    app.status = sciplot_core::t("已写入单元格").into();
+                }
+                Err(err) => app.status = err,
+            }
+        }
     }
 }
 
@@ -3672,7 +3778,14 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                 });
                 if let Some((drag_graph, drag_layer, ann_id, origin, start_x, start_y)) = drag {
                     if drag_graph == id && drag_layer == layer {
-                        if let Some((x, y)) = screen_to_data(frame, local.x, local.y) {
+                        let (x_top, y_right) = app
+                            .project
+                            .graph(id)
+                            .and_then(|graph| graph.layers.get(layer))
+                            .and_then(|layer_ref| layer_ref.annotations.iter().find(|a| a.id == ann_id))
+                            .map(|annotation| (annotation.x_top, annotation.y_right))
+                            .unwrap_or((false, false));
+                        if let Some((x, y)) = screen_to_data_on(frame, local.x, local.y, x_top, y_right) {
                             let kind = shift_kind(&origin, x - start_x, y - start_y);
                             if let Some(layer_ref) = app
                                 .project
@@ -3690,12 +3803,44 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                     }
                 } else if !shift {
                     let delta = response.drag_delta();
-                    if let Some(((xmin, xmax), (ymin, ymax))) = pan_limits(frame, delta.x, delta.y)
+                    if let Some((xmin, xmax)) =
+                        pan_axis(frame.x_scale, frame.x_min, frame.x_max, frame.x_inverted, delta.x, frame.plot.w, false)
                     {
                         views[layer].x_min = Some(xmin);
                         views[layer].x_max = Some(xmax);
+                        changed = true;
+                    }
+                    if let Some((ymin, ymax)) =
+                        pan_axis(frame.y_scale, frame.y_min, frame.y_max, frame.y_inverted, delta.y, frame.plot.h, true)
+                    {
                         views[layer].y_min = Some(ymin);
                         views[layer].y_max = Some(ymax);
+                        changed = true;
+                    }
+                    if let Some((xmin, xmax)) = pan_axis(
+                        frame.x2_scale,
+                        frame.x2_min,
+                        frame.x2_max,
+                        frame.x2_inverted,
+                        delta.x,
+                        frame.plot.w,
+                        false,
+                    ) {
+                        views[layer].x2_min = Some(xmin);
+                        views[layer].x2_max = Some(xmax);
+                        changed = true;
+                    }
+                    if let Some((ymin, ymax)) = pan_axis(
+                        frame.y2_scale,
+                        frame.y2_min,
+                        frame.y2_max,
+                        frame.y2_inverted,
+                        delta.y,
+                        frame.plot.h,
+                        true,
+                    ) {
+                        views[layer].y2_min = Some(ymin);
+                        views[layer].y2_max = Some(ymax);
                         changed = true;
                     }
                 }
@@ -3704,26 +3849,36 @@ fn graph_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 let zoom = ui.input(|i| i.zoom_delta());
                 if scroll.abs() > 0.2 || (zoom - 1.0).abs() > 0.01 {
-                    if let Some((x, y)) = screen_to_data(frame, local.x, local.y) {
-                        let factor = if scroll.abs() > 0.2 {
-                            (1.0 + scroll as f64 * 0.0015).clamp(0.75, 1.35)
-                        } else {
-                            zoom as f64
-                        };
-                        if let Some((a, b)) =
-                            zoom_limits(frame.x_scale, frame.x_min, frame.x_max, x, factor)
-                        {
+                    let factor = if scroll.abs() > 0.2 {
+                        (1.0 + scroll as f64 * 0.0015).clamp(0.75, 1.35)
+                    } else {
+                        zoom as f64
+                    };
+                    if let Some((x, _)) = screen_to_data(frame, local.x, local.y) {
+                        if let Some((a, b)) = zoom_limits(frame.x_scale, frame.x_min, frame.x_max, x, factor) {
                             views[layer].x_min = Some(a);
                             views[layer].x_max = Some(b);
                         }
-                        if let Some((a, b)) =
-                            zoom_limits(frame.y_scale, frame.y_min, frame.y_max, y, factor)
-                        {
+                    }
+                    if let Some((_, y)) = screen_to_data(frame, local.x, local.y) {
+                        if let Some((a, b)) = zoom_limits(frame.y_scale, frame.y_min, frame.y_max, y, factor) {
                             views[layer].y_min = Some(a);
                             views[layer].y_max = Some(b);
                         }
-                        changed = true;
                     }
+                    if let Some((x, _)) = screen_to_data_on(frame, local.x, local.y, true, false) {
+                        if let Some((a, b)) = zoom_limits(frame.x2_scale, frame.x2_min, frame.x2_max, x, factor) {
+                            views[layer].x2_min = Some(a);
+                            views[layer].x2_max = Some(b);
+                        }
+                    }
+                    if let Some((_, y)) = screen_to_data_on(frame, local.x, local.y, false, true) {
+                        if let Some((a, b)) = zoom_limits(frame.y2_scale, frame.y2_min, frame.y2_max, y, factor) {
+                            views[layer].y2_min = Some(a);
+                            views[layer].y2_max = Some(b);
+                        }
+                    }
+                    changed = true;
                 }
             }
         }
@@ -4068,8 +4223,8 @@ fn hit_annotation(
     for annotation in &layer.annotations {
         if let AnnotationKind::Image { x: ix, y: iy, w, h, .. } = &annotation.kind {
             if let (Some(a), Some(b)) = (
-                data_to_screen(frame, *ix, *iy),
-                data_to_screen(frame, *ix + *w, *iy + *h),
+                data_to_screen_on(frame, *ix, *iy, annotation.x_top, annotation.y_right),
+                data_to_screen_on(frame, *ix + *w, *iy + *h, annotation.x_top, annotation.y_right),
             ) {
                 let min_x = a.0.min(b.0);
                 let max_x = a.0.max(b.0);
@@ -4081,7 +4236,7 @@ fn hit_annotation(
             }
         }
         let (ax, ay) = anchor(&annotation.kind);
-        let Some((px, py)) = data_to_screen(frame, ax, ay) else {
+        let Some((px, py)) = data_to_screen_on(frame, ax, ay, annotation.x_top, annotation.y_right) else {
             continue;
         };
         let distance = (px - x).hypot(py - y);
@@ -5021,7 +5176,7 @@ mod tests {
         assert_eq!(table.columns[1].numbers[1], Some(4.0));
         assert_eq!(table.columns[1].numbers[2], Some(6.0));
         sciplot_core::apply_formula(table, 1, "1/2").unwrap();
-        assert_eq!(table.columns[1].numbers[0], Some(0.0));
+        assert!((table.columns[1].numbers[0].unwrap() - 0.5).abs() < 1e-12);
     }
 
     #[test]
@@ -5055,6 +5210,13 @@ mod tests {
         assert!(workflow.contains("gh release create"));
         assert!(workflow.contains("macos-latest"));
         assert!(workflow.contains("package-macos.sh"));
+        assert!(workflow.contains("x86_64-apple-darwin"));
+        assert!(workflow.contains("macos-x86_64"));
+        assert!(workflow.contains("dist/*.tar.gz"));
+        assert!(!workflow.contains("upload \"$tag\" dist/* --repo"));
+        assert!(workflow.contains("gh release edit"));
+        assert!(workflow.contains("未公证"));
+        assert!(workflow.contains("没有在 Intel"));
         let before_macos = workflow.split("\n  macos:").next().unwrap();
         assert!(!before_macos.contains("\n    needs:"));
         let cargo = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
@@ -5081,5 +5243,58 @@ mod tests {
         assert!(dir.join("SciPlot.app/Contents/MacOS/sciplot").is_file());
         assert!(dir.join("sciplot-0.2.1-btest-macos-aarch64.tar.gz").is_file());
         let _ = std::fs::remove_dir_all(&dir);
+
+        let marks = [
+            (sciplot_core::Language::ZhHant, "小數", "直譯器", "未簽名", "令牌"),
+            (sciplot_core::Language::De, "Dezimalzahl", "Interpreter", "unsigniertes", "Token"),
+            (sciplot_core::Language::Fr, "décimal", "interpréteur", "non signé", "jeton"),
+            (sciplot_core::Language::Ru, "дробн", "интерпретатор", "неподписан", "токен"),
+            (sciplot_core::Language::Es, "decimal", "intérprete", "sin firmar", "token"),
+            (sciplot_core::Language::Cs, "desetinn", "interpret", "nepodepsaný", "token"),
+            (sciplot_core::Language::PtBr, "decimal", "interpretador", "sem assinatura", "token"),
+        ];
+        for (language, formula_mark, script_mark, about_mark, ai_mark) in marks {
+            sciplot_core::set_language(language);
+            let saved = sciplot_core::trf!("已保存 {}", "Saved {}", "demo.splot");
+            assert!(saved.contains("demo.splot"), "{saved}");
+            assert!(!saved.contains("Saved"), "{saved}");
+            let formula = crate::i18n::formula_help();
+            assert!(formula.contains(formula_mark), "{formula}");
+            assert!(!formula.contains("Dividing two integers"), "{formula}");
+            assert!(formula.contains("0.5") || formula.contains("0,5"), "{formula}");
+            let script = crate::i18n::script_help();
+            assert!(script.contains(script_mark), "{script}");
+            assert!(!script.contains("The Scripting menu"), "{script}");
+            assert!(script.contains("CPython"), "{script}");
+            let about = crate::i18n::about();
+            assert!(about.contains(about_mark), "{about}");
+            assert!(!about.contains("Scientific plotting, written in Rust"), "{about}");
+            let ai = crate::i18n::ai_help();
+            assert!(ai.contains(ai_mark), "{ai}");
+            assert!(!ai.contains("There are two ways for an AI"), "{ai}");
+            assert!(sciplot_core::t("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。").contains("1/2"));
+            assert_ne!(
+                sciplot_core::t("除法得到小数：1/2 等于 0.5，并且 1 等于 1.0。"),
+                "Division yields a decimal: 1/2 is 0.5, and 1 equals 1.0."
+            );
+        }
+        sciplot_core::set_language(sciplot_core::Language::Zh);
+
+        let mut project = sciplot_core::Project::default();
+        let id = crate::dialogs::prepare_wizard_table(&mut project, "向导表", 3, 4).unwrap();
+        let table = project.table(id).unwrap();
+        assert_eq!(table.name, "向导表");
+        assert_eq!(table.columns.len(), 3);
+        assert_eq!(table.columns[0].mode, sciplot_core::ColumnMode::X);
+        assert!(table.columns[1..].iter().all(|column| column.mode == sciplot_core::ColumnMode::Y));
+        assert_eq!(table.nrows(), 4);
+        let clamped = crate::dialogs::prepare_wizard_table(&mut project, "窄表", 1, 0).unwrap();
+        let narrow = project.table(clamped).unwrap();
+        assert_eq!(narrow.columns.len(), 2);
+        assert_eq!(narrow.nrows(), 1);
+        let graph = project
+            .plot_picked(id, sciplot_core::CurveKind::Line, sciplot_core::VectorMode::DxDy, 0, &[1])
+            .unwrap();
+        assert!(project.graph(graph).unwrap().layers[0].curves.iter().any(|curve| curve.visible));
     }
 }

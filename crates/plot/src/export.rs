@@ -3,7 +3,7 @@
 
 use crate::raster::{to_png_with, to_rgba_with, GlyphFont};
 use crate::scene::Scene;
-use crate::svg::to_svg;
+use crate::svg::to_svg_transparent;
 use crate::vector::{eps_document, pdf_document};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,7 +270,7 @@ pub fn export_scene(scene: &Scene, font: Option<&GlyphFont>, faces: &[&[u8]], op
     let options = options.clamped();
     match options.format {
         ExportFormat::Png => to_png_with(scene, font, options.transparent && options.format.supports_transparency()),
-        ExportFormat::Svg => Ok(to_svg(scene).into_bytes()),
+        ExportFormat::Svg => Ok(to_svg_transparent(scene, options.transparent).into_bytes()),
         ExportFormat::Eps => Ok(eps_document(scene, faces, &options)),
         ExportFormat::Pdf => Ok(pdf_document(std::slice::from_ref(scene), faces, &options)),
         ExportFormat::Jpeg => {

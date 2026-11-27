@@ -1,7 +1,8 @@
-//! 程序内的 Python 子集和 SciDAVis 风格对象接口。
+//! 程序内的 Python 解释器和 SciDAVis 风格对象接口。
 //!
 //! 窗口、命令行和 MCP 进程启动时调用 [`install`]，列公式里的 `python:` 才会执行。
-//! 这不是 CPython：没有类、字典、异常对象和任意 import。
+//! 这不是 CPython。没有嵌入解释器的原因写在 `engine` 模块说明里。
+//! 脚本可以使用字典、类、异常，以及 math、statistics、random、json。不认识的 import 会报错。
 
 mod engine;
 
@@ -125,5 +126,84 @@ print(f.r2())
         let folder = execute(&mut project, "folder = newFolder(\"记录\")\nprint(folder.name())\n").unwrap();
         assert!(folder.output.contains("记录"));
         assert!(project.folders.iter().any(|item| item.name == "记录"));
+    }
+
+    #[test]
+    fn python_has_dicts_classes_exceptions_imports_and_object_api() {
+        install();
+        let mut project = sciplot_core::Project::new("api");
+        let out = execute(
+            &mut project,
+            r#"
+import math
+from statistics import mean
+import json
+d = {"a": 1, "b": 2}
+d["c"] = d["a"] + 3
+print(d["c"])
+print(len(d))
+print(mean([1, 2, 3]))
+print(math.sqrt(9))
+print(json.loads(json.dumps({"ok": 1}))["ok"])
+class Point:
+    def __init__(self, x):
+        self.x = x
+    def doubled(self):
+        self.x = self.x * 2
+        return self.x
+p = Point(4)
+print(p.doubled())
+print(p.x)
+try:
+    raise "boom"
+except as err:
+    print(err)
+t = newTable("测量", 2, 3)
+t.setColName(1, "x")
+t.setCell(1, 1, 1)
+t.setCell(1, 2, 2)
+t.setCell(1, 3, 3)
+t.setFormula(2, "col(\"x\")*10")
+print(t.colName(1))
+print(t.cell(2, 2))
+print(t.nr())
+g = plot(t, "line")
+g.setXTitle("时间")
+g.setYTitle("读数")
+print(g.layerCount())
+print(len(tableList()))
+"#,
+        )
+        .unwrap();
+        let lines: Vec<&str> = out.output.lines().collect();
+        assert_eq!(lines[0], "4");
+        assert_eq!(lines[1], "3");
+        assert_eq!(lines[2], "2");
+        assert_eq!(lines[3], "3");
+        assert_eq!(lines[4], "1");
+        assert_eq!(lines[5], "8");
+        assert_eq!(lines[6], "8");
+        assert_eq!(lines[7], "boom");
+        assert_eq!(lines[8], "x");
+        assert_eq!(lines[9], "20");
+        assert_eq!(lines[10], "3");
+        assert_eq!(lines[11], "1");
+        assert_eq!(lines[12], "1");
+        let graph = project.graphs.iter().find(|graph| graph.layers.iter().any(|layer| layer.x_axis.label == "时间")).unwrap();
+        assert_eq!(graph.layers[0].y_axis.label, "读数");
+        assert!(execute(&mut project, "import os\n").is_err());
+        let dir = std::env::temp_dir().join(format!("sciplot-script-api-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("t.csv");
+        let project_path = dir.join("p.splot");
+        let source = format!(
+            "table(\"测量\").exportASCII(\"{}\")\nsaveProject(\"{}\")\n",
+            csv.display(),
+            project_path.display()
+        );
+        execute(&mut project, &source).unwrap();
+        assert!(std::fs::read_to_string(&csv).unwrap().contains("x"));
+        assert!(std::fs::read_to_string(&project_path).unwrap().contains("测量"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

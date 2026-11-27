@@ -113,6 +113,12 @@ pub struct LayerView {
     pub x_max: Option<f64>,
     pub y_min: Option<f64>,
     pub y_max: Option<f64>,
+    /// 上轴的平移或缩放。空表示跟上轴自己的范围。
+    pub x2_min: Option<f64>,
+    pub x2_max: Option<f64>,
+    /// 右轴的平移或缩放。
+    pub y2_min: Option<f64>,
+    pub y2_max: Option<f64>,
 }
 
 /// 图例里一行对应的屏幕区域，用来右键隐藏的曲线。
@@ -135,7 +141,7 @@ pub struct LayerFrame {
     pub y_scale: sciplot_core::AxisScale,
     pub x_inverted: bool,
     pub y_inverted: bool,
-    /// 上轴。平移和滚轮缩放只改下轴和左轴。
+    /// 上轴。平移和滚轮会连上轴、右轴一起改。
     pub x2_min: f64,
     pub x2_max: f64,
     pub y2_min: f64,

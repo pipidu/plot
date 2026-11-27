@@ -1,5 +1,5 @@
 //! 把图元写成 PDF 和 EPS。几何是矢量；文字按字体轮廓填色，也是矢量。
-//! 位图标注在这里画成它的平均色块。PNG 和 SVG 仍保留原始像素。
+//! 位图标注写成像素：PDF 用内联图像，EPS 用 colorimage。透明通道先合成到白底上。
 
 use std::fmt::Write as _;
 
@@ -52,6 +52,19 @@ struct Drawn {
     ops: Vec<PathOp>,
     fill: Option<[u8; 4]>,
     stroke: Option<([u8; 4], f32, Dash)>,
+    /// 图像标注的像素。空表示这是普通路径。
+    image: Option<EmbeddedImage>,
+}
+
+struct EmbeddedImage {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    cols: u32,
+    rows: u32,
+    /// 从上到下、从左到右的 RGB，已经把透明叠到白底上。
+    rgb: Vec<u8>,
 }
 
 pub fn pdf_document(scenes: &[Scene], faces: &[&[u8]], options: &ExportOptions) -> Vec<u8> {
@@ -103,6 +116,7 @@ fn page_content(scene: &Scene, faces: &[&[u8]], options: &ExportOptions, page_w:
             ],
             fill: Some([255, 255, 255, 255]),
             stroke: None,
+            image: None,
         });
     }
     for prim in &scene.primitives {
@@ -138,6 +152,7 @@ fn push_prim(out: &mut Vec<Drawn>, prim: &Prim, map: &Mapper, faces: &[&[u8]]) {
                 ops: vec![PathOp::Move(a.0, a.1), PathOp::Line(b.0, b.1)],
                 fill: None,
                 stroke: Some((*color, (*width * map.scale).max(0.2), *dash)),
+                image: None,
             });
         }
         Prim::Polyline { pts, color, width, dash } => {
@@ -146,17 +161,22 @@ fn push_prim(out: &mut Vec<Drawn>, prim: &Prim, map: &Mapper, faces: &[&[u8]]) {
                     ops,
                     fill: None,
                     stroke: Some((*color, (*width * map.scale).max(0.2), *dash)),
-                });
+                image: None,
+            });
             }
         }
         Prim::Polygon { pts, fill } => {
             if let Some(ops) = poly_ops(pts, map, true) {
-                out.push(Drawn { ops, fill: Some(*fill), stroke: None });
+                out.push(Drawn { ops, fill: Some(*fill), stroke: None,
+                image: None,
+            });
             }
         }
         Prim::Triangle { a, b, c, fill } => {
             if let Some(ops) = poly_ops(&[*a, *b, *c], map, true) {
-                out.push(Drawn { ops, fill: Some(*fill), stroke: None });
+                out.push(Drawn { ops, fill: Some(*fill), stroke: None,
+                image: None,
+            });
             }
         }
         Prim::Rect { x, y, w, h, fill, stroke } => {
@@ -175,6 +195,7 @@ fn push_prim(out: &mut Vec<Drawn>, prim: &Prim, map: &Mapper, faces: &[&[u8]]) {
                 ],
                 fill: *fill,
                 stroke: stroke.map(|(color, width)| (color, (width * map.scale).max(0.2), Dash::Solid)),
+                image: None,
             });
         }
         Prim::Circle { x, y, r, fill, stroke } => {
@@ -184,28 +205,31 @@ fn push_prim(out: &mut Vec<Drawn>, prim: &Prim, map: &Mapper, faces: &[&[u8]]) {
                 ops: circle_ops(cx, cy, radius),
                 fill: *fill,
                 stroke: stroke.map(|(color, width)| (color, (width * map.scale).max(0.2), Dash::Solid)),
+                image: None,
             });
         }
         Prim::Text { x, y, text, size, color, halign, valign, vertical } => {
             text_ops(out, faces, text, *x, *y, *size, *color, *halign, *valign, *vertical, map);
         }
         Prim::Image { x, y, w, h, rgba, cols, rows, .. } => {
-            if *w <= 0.0 || *h <= 0.0 {
+            if *w <= 0.0 || *h <= 0.0 || *cols == 0 || *rows == 0 {
                 return;
             }
-            let color = average_color(rgba, *cols, *rows);
             let (x0, y0) = map.pt(*x, *y + *h);
             let (x1, y1) = map.pt(*x + *w, *y);
             out.push(Drawn {
-                ops: vec![
-                    PathOp::Move(x0, y0),
-                    PathOp::Line(x1, y0),
-                    PathOp::Line(x1, y1),
-                    PathOp::Line(x0, y1),
-                    PathOp::Close,
-                ],
-                fill: Some(color),
-                stroke: Some(([80, 80, 80, 255], 0.4, Dash::Solid)),
+                ops: Vec::new(),
+                fill: None,
+                stroke: None,
+                image: Some(EmbeddedImage {
+                    x: x0.min(x1),
+                    y: y0.min(y1),
+                    w: (x1 - x0).abs().max(0.5),
+                    h: (y1 - y0).abs().max(0.5),
+                    cols: *cols,
+                    rows: *rows,
+                    rgb: flatten_rgb(rgba, *cols, *rows),
+                }),
             });
         }
     }
@@ -240,27 +264,72 @@ fn circle_ops(cx: f32, cy: f32, r: f32) -> Vec<PathOp> {
     ]
 }
 
-fn average_color(rgba: &[u8], cols: u32, rows: u32) -> [u8; 4] {
-    if cols == 0 || rows == 0 || rgba.len() < 4 {
-        return [180, 180, 180, 255];
+fn flatten_rgb(rgba: &[u8], cols: u32, rows: u32) -> Vec<u8> {
+    let need = (cols as usize).saturating_mul(rows as usize);
+    let mut rgb = Vec::with_capacity(need.saturating_mul(3));
+    for index in 0..need {
+        let pixel = rgba.get(index * 4..index * 4 + 4).unwrap_or(&[255, 255, 255, 255]);
+        let alpha = pixel[3] as f32 / 255.0;
+        let mix = |channel: u8| (channel as f32 * alpha + 255.0 * (1.0 - alpha)).round() as u8;
+        rgb.push(mix(pixel[0]));
+        rgb.push(mix(pixel[1]));
+        rgb.push(mix(pixel[2]));
     }
-    let mut r = 0u64;
-    let mut g = 0u64;
-    let mut b = 0u64;
-    let mut n = 0u64;
-    for pixel in rgba.chunks_exact(4) {
-        if pixel[3] < 16 {
-            continue;
+    rgb
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2 + bytes.len() / 32);
+    for (index, byte) in bytes.iter().enumerate() {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+        if index % 32 == 31 {
+            out.push('\n');
         }
-        r += pixel[0] as u64;
-        g += pixel[1] as u64;
-        b += pixel[2] as u64;
-        n += 1;
     }
-    if n == 0 {
-        return [200, 200, 200, 255];
+    out
+}
+
+fn write_pdf_image(out: &mut String, image: &EmbeddedImage) {
+    let _ = writeln!(
+        out,
+        "q\n{w:.3} 0 0 {h:.3} {x:.3} {y:.3} cm\nBI\n/W {cols}\n/H {rows}\n/CS /RGB\n/BPC 8\n/F /AHx\nID\n{hex}>\nEI\nQ",
+        w = image.w,
+        h = image.h,
+        x = image.x,
+        y = image.y,
+        cols = image.cols,
+        rows = image.rows,
+        hex = hex_bytes(&bottom_up(&image.rgb, image.cols, image.rows))
+    );
+}
+
+fn write_ps_image(out: &mut String, image: &EmbeddedImage) {
+    let _ = writeln!(
+        out,
+        "gsave\n{x:.3} {y:.3} translate\n{w:.3} {h:.3} scale\n{cols} {rows} 8\n[{cols} 0 0 -{rows} 0 {rows}]\n{{<{hex}>}} false 3 colorimage\ngrestore",
+        x = image.x,
+        y = image.y,
+        w = image.w,
+        h = image.h,
+        cols = image.cols,
+        rows = image.rows,
+        hex = hex_bytes(&image.rgb)
+    );
+}
+
+fn bottom_up(rgb: &[u8], cols: u32, rows: u32) -> Vec<u8> {
+    let stride = cols as usize * 3;
+    let mut out = Vec::with_capacity(rgb.len());
+    for row in (0..rows as usize).rev() {
+        let start = row * stride;
+        let end = (start + stride).min(rgb.len());
+        if start < rgb.len() {
+            out.extend_from_slice(&rgb[start..end]);
+        }
     }
-    [(r / n) as u8, (g / n) as u8, (b / n) as u8, 255]
+    out
 }
 
 struct Recorder {
@@ -438,6 +507,7 @@ fn draw_run(
                 ops: recorder.ops,
                 fill: Some(color),
                 stroke: None,
+                image: None,
             });
         }
         pen += glyph_advance(faces, ch, scale, size);
@@ -474,6 +544,10 @@ fn emit_pdf(drawn: &[Drawn]) -> String {
 }
 
 fn write_pdf_item(out: &mut String, item: &Drawn) {
+    if let Some(image) = &item.image {
+        write_pdf_image(out, image);
+        return;
+    }
     if item.ops.is_empty() {
         return;
     }
@@ -540,6 +614,10 @@ fn write_pdf_ops(out: &mut String, ops: &[PathOp]) {
 fn emit_ps(drawn: &[Drawn]) -> String {
     let mut out = String::new();
     for item in drawn {
+        if let Some(image) = &item.image {
+            write_ps_image(&mut out, image);
+            continue;
+        }
         if item.ops.is_empty() {
             continue;
         }

@@ -1,11 +1,15 @@
-//! 一个嵌在程序里的 Python 子集。
+//! 一个嵌在程序里的 Python 解释器，不是 CPython。
 //!
-//! 有缩进、`if/elif/else`、`for/while`、`def/return`、`break/continue`、列表、属性和调用。
-//! `import math` 和 `from sciplot import *` 是空操作，函数本来就在环境里。
-//! 没有类、字典、异常和任意第三方库。这不是 CPython。
-//! 列公式里的 `/` 仍按 evalexpr 做整数除法；脚本里的 `/` 是 Python 3 的真除法，`//` 是向下取整。
+//! 没有把 CPython 嵌进来：Windows 发行包是在 Linux 上用 mingw 交叉编译的，PyO3 需要 libpython，
+//! 三个平台再带一份标准库既放不进这个仓库的体积，也会逼用户自己装 Python。
+//! RustPython 的工具链要求高于本仓库声明的 1.81。
+//! 因此这里继续用这个解释器，并补上字典、类、异常，以及 math、statistics、random、json、sciplot 这几个模块。
+//! 不认识的 import 会报错。脚本里的 `/` 是真除法，`//` 才向下取整。
+//! 列公式已经改用 `sciplot_core::expr`，`1/2` 也是 0.5。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use sciplot_analysis::{convolve, correlate, deconvolve, fit_series, FitModel};
 use sciplot_core::{
@@ -41,6 +45,7 @@ pub fn execute(project: &mut Project, source: &str) -> Result<ScriptOutput, Stri
         Signal::Break | Signal::Continue => {
             return Err(trf!("break 或 continue 不在循环里", "break or continue is outside a loop"));
         }
+        Signal::Raise(message) => return Err(message),
         Signal::None(_) => {}
     }
     Ok(ScriptOutput { output: machine.output })
@@ -81,6 +86,13 @@ pub fn python_column(table: &Table, formula: &str, others: &[Table]) -> Result<E
                     values.push(None);
                 }
             },
+            Ok(Signal::Raise(message)) => {
+                warnings += 1;
+                if first_error.is_none() {
+                    first_error = Some(message);
+                }
+                values.push(None);
+            }
             Ok(_) => {
                 warnings += 1;
                 if first_error.is_none() {
@@ -152,12 +164,55 @@ impl<'a> Machine<'a> {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Signal, String> {
         match stmt {
-            Stmt::Pass | Stmt::Import => Ok(Signal::None(Val::None)),
+            Stmt::Pass => Ok(Signal::None(Val::None)),
+            Stmt::ImportModules(names) => {
+                for name in names {
+                    self.bind_module(name)?;
+                }
+                Ok(Signal::None(Val::None))
+            }
+            Stmt::FromImport { module, names } => {
+                self.bind_from(module, names)?;
+                Ok(Signal::None(Val::None))
+            }
             Stmt::Expr(expr) => Ok(Signal::None(self.eval(expr)?)),
             Stmt::Assign { name, expr } => {
                 let value = self.eval(expr)?;
                 self.env.set(name, value);
                 Ok(Signal::None(Val::None))
+            }
+            Stmt::SetIndex { base, index, expr } => {
+                let mut target = self.eval(base)?;
+                let index = self.eval(index)?;
+                let value = self.eval(expr)?;
+                set_index(&mut target, &index, value)?;
+                self.write_place(base, target)?;
+                Ok(Signal::None(Val::None))
+            }
+            Stmt::SetAttr { base, name, expr } => {
+                let target = self.eval(base)?;
+                let value = self.eval(expr)?;
+                set_field(&target, name, value)?;
+                Ok(Signal::None(Val::None))
+            }
+            Stmt::Class { name, methods } => {
+                self.env.set(
+                    name,
+                    Val::Class(ClassDef {
+                        name: name.clone(),
+                        methods: methods.clone(),
+                    }),
+                );
+                Ok(Signal::None(Val::None))
+            }
+            Stmt::Try { body, name, handler } => match self.exec_block(body) {
+                Ok(Signal::Raise(message)) => self.run_handler(name, handler, message),
+                Err(message) => self.run_handler(name, handler, message),
+                Ok(other) => Ok(other),
+            },
+            Stmt::Raise(expr) => {
+                let value = self.eval(expr)?;
+                Ok(Signal::Raise(display(&value)))
             }
             Stmt::If { arms, else_body } => {
                 for (cond, body) in arms {
@@ -175,7 +230,7 @@ impl<'a> Machine<'a> {
             }
             Stmt::For { name, iter, body } => {
                 let values = self.eval(iter)?;
-                let items = expect_list(&values)?;
+                let items = iter_values(&values)?;
                 self.loops += 1;
                 let signal = self.exec_for(name, &items, body);
                 self.loops -= 1;
@@ -226,6 +281,7 @@ impl<'a> Machine<'a> {
                 Signal::Break => return Ok(Signal::None(Val::None)),
                 Signal::Continue => continue,
                 Signal::Return(value) => return Ok(Signal::Return(value)),
+                Signal::Raise(message) => return Ok(Signal::Raise(message)),
                 Signal::None(_) => {}
             }
         }
@@ -239,6 +295,7 @@ impl<'a> Machine<'a> {
                 Signal::Break => return Ok(Signal::None(Val::None)),
                 Signal::Continue => continue,
                 Signal::Return(value) => return Ok(Signal::Return(value)),
+                Signal::Raise(message) => return Ok(Signal::Raise(message)),
                 Signal::None(_) => {}
             }
         }
@@ -273,6 +330,13 @@ impl<'a> Machine<'a> {
                 }
                 Ok(Val::List(values))
             }
+            Expr::Dict(pairs) => {
+                let mut values = Vec::with_capacity(pairs.len());
+                for (key, value) in pairs {
+                    values.push((self.eval(key)?, self.eval(value)?));
+                }
+                Ok(Val::Dict(values))
+            }
             Expr::Unary { op, expr } => self.eval_unary(op, expr),
             Expr::Binary { op, left, right } => self.eval_binary(op, left, right),
             Expr::Index { base, index } => {
@@ -283,7 +347,7 @@ impl<'a> Machine<'a> {
             Expr::Call { callee, args } => self.eval_call(callee, args),
             Expr::Attr { base, name } => {
                 let object = self.eval(base)?;
-                self.call_method(object, name, Vec::new())
+                self.lookup_attr(object, name)
             }
         }
     }
@@ -377,6 +441,8 @@ impl<'a> Machine<'a> {
         match func {
             Val::Builtin(builtin) => self.call_builtin(builtin, args),
             Val::Func(func) => self.call_func(func, args),
+            Val::Class(class) => self.construct(class, args),
+            Val::Bound { receiver, method } => self.call_bound(*receiver, &method, args),
             _ => Err(trf!("这不是函数", "That is not a function")),
         }
     }
@@ -402,9 +468,8 @@ impl<'a> Machine<'a> {
         self.env.pop();
         match signal? {
             Signal::Return(value) | Signal::None(value) => Ok(value),
-            Signal::Break | Signal::Continue => {
-                Err(trf!("break 不能跳出函数", "break cannot leave a function"))
-            }
+            Signal::Break | Signal::Continue => Err(trf!("break 不能跳出函数", "break cannot leave a function")),
+            Signal::Raise(message) => Err(message),
         }
     }
 
@@ -426,7 +491,7 @@ impl<'a> Machine<'a> {
                 Some(value) => Ok(Val::Float(as_f64(value)?.abs())),
                 None => Err(trf!("abs 需要一个数", "abs needs a number")),
             },
-            Builtin::MathFn(name) => Ok(Val::Float(math_call(name, &args)?)),
+            Builtin::MathFn(name) => call_named(name, &args),
             Builtin::Table => self.lookup_object(Kind::Table, &args),
             Builtin::Graph => self.lookup_object(Kind::Graph, &args),
             Builtin::Matrix => self.lookup_object(Kind::Matrix, &args),
@@ -453,7 +518,27 @@ impl<'a> Machine<'a> {
             Builtin::Col => self.col_lookup(&args),
             Builtin::Cell => self.cell_lookup(&args),
             Builtin::TableCol => self.tablecol_lookup(&args),
+            Builtin::TableList => self.object_list(Kind::Table),
+            Builtin::GraphList => self.object_list(Kind::Graph),
+            Builtin::MatrixList => self.object_list(Kind::Matrix),
+            Builtin::NoteList => self.object_list(Kind::Note),
+            Builtin::SaveProject => self.save_project(&args),
         }
+    }
+
+    fn lookup_attr(&mut self, object: Val, name: &str) -> Result<Val, String> {
+        if let Val::Object(instance) = &object {
+            if let Some(value) = instance.borrow().fields.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone()) {
+                return Ok(value);
+            }
+            if instance.borrow().methods.iter().any(|(key, _)| key == name) {
+                return Ok(Val::Bound {
+                    receiver: Box::new(object),
+                    method: name.to_string(),
+                });
+            }
+        }
+        self.call_method(object, name, Vec::new())
     }
 
     fn call_method(&mut self, object: Val, name: &str, args: Vec<Val>) -> Result<Val, String> {
@@ -464,8 +549,124 @@ impl<'a> Machine<'a> {
             Val::Note(id) => self.note_method(id, name, args),
             Val::Folder(id) => self.folder_method(id, name, args),
             Val::Fit(index) => self.fit_method(index, name, args),
+            Val::Object(instance) => self.object_method(instance, name, args),
+            Val::Module(module) => module_attr(&module, name, &args),
+            Val::Dict(items) => dict_method(&items, name, &args),
             _ => Err(trf!("这个对象没有方法", "That object has no methods")),
         }
+    }
+
+    fn run_handler(&mut self, name: &Option<String>, handler: &[Stmt], message: String) -> Result<Signal, String> {
+        if let Some(name) = name {
+            self.env.set(name, Val::Str(message));
+        }
+        self.exec_block(handler)
+    }
+
+    fn write_place(&mut self, place: &Expr, value: Val) -> Result<(), String> {
+        match place {
+            Expr::Name(name) => {
+                self.env.set(name, value);
+                Ok(())
+            }
+            Expr::Index { base, index } => {
+                let key = self.eval(index)?;
+                let mut target = self.eval(base)?;
+                set_index(&mut target, &key, value)?;
+                self.write_place(base, target)
+            }
+            Expr::Attr { base, name } => {
+                set_field(&self.eval(base)?, name, value)?;
+                Ok(())
+            }
+            _ => Err(trf!("这里不能赋值", "That cannot be assigned")),
+        }
+    }
+
+    fn construct(&mut self, class: ClassDef, args: Vec<Val>) -> Result<Val, String> {
+        let object = Val::Object(Rc::new(RefCell::new(Instance {
+            class: class.name,
+            methods: class.methods.clone(),
+            fields: Vec::new(),
+        })));
+        if let Some((_, init)) = class.methods.into_iter().find(|(name, _)| name == "__init__") {
+            let mut full = vec![object.clone()];
+            full.extend(args);
+            self.call_func(init, full)?;
+        } else if !args.is_empty() {
+            return Err(trf!("这个类不能带参数创建", "This class does not take arguments"));
+        }
+        Ok(object)
+    }
+
+    fn call_bound(&mut self, receiver: Val, method: &str, args: Vec<Val>) -> Result<Val, String> {
+        let Val::Object(instance) = &receiver else {
+            return Err(trf!("这不是方法", "That is not a method"));
+        };
+        let func = instance
+            .borrow()
+            .methods
+            .iter()
+            .find(|(name, _)| name == method)
+            .map(|(_, func)| func.clone())
+            .ok_or_else(|| trf!("没有这个方法：{method}", "No such method: {method}", method = method))?;
+        let mut full = vec![receiver];
+        full.extend(args);
+        self.call_func(func, full)
+    }
+
+    fn object_method(&mut self, instance: Rc<RefCell<Instance>>, name: &str, args: Vec<Val>) -> Result<Val, String> {
+        let func = instance.borrow().methods.iter().find(|(key, _)| key == name).map(|(_, func)| func.clone());
+        if let Some(func) = func {
+            let mut full = vec![Val::Object(instance)];
+            full.extend(args);
+            return self.call_func(func, full);
+        }
+        if args.is_empty() {
+            if let Some(value) = instance.borrow().fields.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone()) {
+                return Ok(value);
+            }
+        }
+        Err(trf!("没有这个属性：{name}", "No such attribute: {name}", name = name))
+    }
+
+    fn bind_module(&mut self, name: &str) -> Result<(), String> {
+        known_module(name)?;
+        self.env.set(name, Val::Module(name.to_string()));
+        Ok(())
+    }
+
+    fn bind_from(&mut self, module: &str, names: &[String]) -> Result<(), String> {
+        known_module(module)?;
+        if names.is_empty() {
+            for (name, value) in module_exports(module) {
+                self.env.set(&name, value);
+            }
+            return Ok(());
+        }
+        for name in names {
+            self.env.set(name, module_attr(module, name, &[])?);
+        }
+        Ok(())
+    }
+
+    fn object_list(&mut self, kind: Kind) -> Result<Val, String> {
+        let project = self.project()?;
+        let values = match kind {
+            Kind::Table => project.tables.iter().map(|item| Val::Table(item.id)).collect(),
+            Kind::Graph => project.graphs.iter().map(|item| Val::Graph(item.id)).collect(),
+            Kind::Matrix => project.matrices.iter().map(|item| Val::Matrix(item.id)).collect(),
+            Kind::Note => project.notes.iter().map(|item| Val::Note(item.id)).collect(),
+            Kind::Folder => Vec::new(),
+        };
+        Ok(Val::List(values))
+    }
+
+    fn save_project(&mut self, args: &[Val]) -> Result<Val, String> {
+        let path = expect_str(arg(args, 0)?)?;
+        let bytes = sciplot_core::save_project_bytes(self.project()?, Some(sciplot_core::ProjectFormat::Splot))?;
+        std::fs::write(path, bytes).map_err(|err| err.to_string())?;
+        Ok(Val::None)
     }
 
     fn project(&mut self) -> Result<&mut Project, String> {
@@ -616,8 +817,73 @@ impl<'a> Machine<'a> {
         let table = project.table_mut(id).ok_or_else(|| t("找不到表格").to_string())?;
         match name {
             "name" => Ok(Val::Str(table.name.clone())),
-            "numCols" => Ok(Val::Int(table.columns.len() as i64)),
-            "numRows" => Ok(Val::Int(table.nrows() as i64)),
+            "numCols" | "nc" => Ok(Val::Int(table.columns.len() as i64)),
+            "numRows" | "nr" => Ok(Val::Int(table.nrows() as i64)),
+            "comment" => Ok(Val::Str(table.comment.clone())),
+            "setComment" => {
+                table.comment = expect_str(arg(&args, 0)?)?;
+                Ok(Val::None)
+            }
+            "colName" => {
+                let index = one_based(arg(&args, 0)?, table.columns.len())?;
+                Ok(Val::Str(table.columns[index].name.clone()))
+            }
+            "column" => {
+                let index = column_ref(table, arg(&args, 0)?)?;
+                Ok(column_values(&table.columns[index]))
+            }
+            "formula" => {
+                let index = one_based(arg(&args, 0)?, table.columns.len())?;
+                Ok(Val::Str(table.columns[index].formula.clone()))
+            }
+            "setNumRows" => {
+                let rows = as_count(arg(&args, 0)?)?;
+                if rows < table.nrows() {
+                    for column in &mut table.columns {
+                        column.resize(rows);
+                    }
+                } else {
+                    table.ensure_rows(rows);
+                }
+                Ok(Val::None)
+            }
+            "setNumCols" => {
+                let cols = as_count(arg(&args, 0)?)?.max(1);
+                while table.columns.len() < cols {
+                    let index = table.columns.len();
+                    table.add_column(column_letter(index), ColumnMode::Y);
+                }
+                while table.columns.len() > cols {
+                    table.columns.pop();
+                }
+                Ok(Val::None)
+            }
+            "recalculate" => {
+                let _ = recalculate_table(table, &[]);
+                Ok(Val::None)
+            }
+            "exportASCII" => {
+                let path = expect_str(arg(&args, 0)?)?;
+                std::fs::write(path, sciplot_core::export_csv(table)).map_err(|err| err.to_string())?;
+                Ok(Val::None)
+            }
+            "importASCII" => {
+                let path = expect_str(arg(&args, 0)?)?;
+                let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
+                let imported = sciplot_core::import_csv(&bytes)?;
+                let id = table.id;
+                let name = table.name.clone();
+                let folder = table.folder;
+                let comment = table.comment.clone();
+                *table = imported;
+                table.id = id;
+                table.name = name;
+                table.folder = folder;
+                if table.comment.is_empty() {
+                    table.comment = comment;
+                }
+                Ok(Val::None)
+            }
             "setColName" => {
                 let index = one_based(arg(&args, 0)?, table.columns.len())?;
                 let column_name = expect_str(arg(&args, 1)?)?;
@@ -690,10 +956,22 @@ impl<'a> Machine<'a> {
                 arrange_graph(self.project()?.graph_mut(id).ok_or_else(|| t("找不到图形").to_string())?, rows, cols);
                 Ok(Val::None)
             }
-            "exportImage" => {
+            "exportImage" | "save" => {
                 let path = expect_str(arg(&args, 0)?)?;
                 self.export_graph(id, &path)?;
                 Ok(Val::None)
+            }
+            "layerCount" => {
+                let graph = self.project()?.graph(id).ok_or_else(|| t("找不到图形").to_string())?;
+                Ok(Val::Int(graph.layers.len() as i64))
+            }
+            "activeLayer" => Ok(Val::Int(1)),
+            "setXTitle" => self.set_axis_title(id, 0, "x", &expect_str(arg(&args, 0)?)?),
+            "setYTitle" => self.set_axis_title(id, 0, "y", &expect_str(arg(&args, 0)?)?),
+            "setAxisTitle" => {
+                let side = expect_str(arg(&args, 0)?)?;
+                let title = expect_str(arg(&args, 1)?)?;
+                self.set_axis_title(id, 0, &side, &title)
             }
             "printPdf" => {
                 let path = expect_str(arg(&args, 0)?)?;
@@ -708,6 +986,14 @@ impl<'a> Machine<'a> {
         let matrix = self.project()?.matrix_mut(id).ok_or_else(|| t("找不到矩阵").to_string())?;
         match name {
             "name" => Ok(Val::Str(matrix.name.clone())),
+            "numRows" => Ok(Val::Int(matrix.rows as i64)),
+            "numCols" => Ok(Val::Int(matrix.cols as i64)),
+            "setDimensions" => {
+                let rows = as_count(arg(&args, 0)?)?.max(1);
+                let cols = as_count(arg(&args, 1)?)?.max(1);
+                matrix.resize(rows, cols);
+                Ok(Val::None)
+            }
             "setCell" => {
                 let row = one_based(arg(&args, 0)?, matrix.rows)?;
                 let col = one_based(arg(&args, 1)?, matrix.cols)?;
@@ -741,11 +1027,40 @@ impl<'a> Machine<'a> {
     }
 
     fn folder_method(&mut self, id: sciplot_core::FolderId, name: &str, _args: Vec<Val>) -> Result<Val, String> {
-        let folder = self.project()?.folder(id).ok_or_else(|| t("没有这个文件夹").to_string())?;
+        let project = self.project()?;
+        let folder = project.folder(id).ok_or_else(|| t("没有这个文件夹").to_string())?;
         match name {
             "name" => Ok(Val::Str(folder.name.clone())),
+            "tables" => Ok(Val::List(project.tables.iter().filter(|table| table.folder == Some(id)).map(|table| Val::Table(table.id)).collect())),
+            "windows" => {
+                let mut values = Vec::new();
+                values.extend(project.tables.iter().filter(|item| item.folder == Some(id)).map(|item| Val::Table(item.id)));
+                values.extend(project.matrices.iter().filter(|item| item.folder == Some(id)).map(|item| Val::Matrix(item.id)));
+                values.extend(project.graphs.iter().filter(|item| item.folder == Some(id)).map(|item| Val::Graph(item.id)));
+                values.extend(project.notes.iter().filter(|item| item.folder == Some(id)).map(|item| Val::Note(item.id)));
+                Ok(Val::List(values))
+            }
             _ => Err(trf!("文件夹没有这个方法：{name}", "Folder has no method {name}", name = name)),
         }
+    }
+
+    fn set_axis_title(&mut self, id: sciplot_core::GraphId, layer: usize, side: &str, title: &str) -> Result<Val, String> {
+        let graph = self.project()?.graph_mut(id).ok_or_else(|| t("找不到图形").to_string())?;
+        let layer = graph.layers.get_mut(layer).ok_or_else(|| t("找不到图层").to_string())?;
+        match side {
+            "x" | "bottom" => layer.x_axis.label = title.to_string(),
+            "y" | "left" => layer.y_axis.label = title.to_string(),
+            "top" => {
+                layer.show_top = true;
+                layer.x_top.label = title.to_string();
+            }
+            "right" => {
+                layer.show_right = true;
+                layer.y_right.label = title.to_string();
+            }
+            _ => return Err(trf!("没有这根坐标轴", "No such axis")),
+        }
+        Ok(Val::None)
     }
 
     fn fit_method(&mut self, index: usize, name: &str, _args: Vec<Val>) -> Result<Val, String> {
@@ -1037,11 +1352,402 @@ fn expect_str(value: &Val) -> Result<String, String> {
     }
 }
 
+fn column_ref(table: &sciplot_core::Table, value: &Val) -> Result<usize, String> {
+    if let Val::Str(name) = value {
+        return table
+            .columns
+            .iter()
+            .position(|column| column.name == *name)
+            .ok_or_else(|| trf!("找不到这一列", "That column does not exist"));
+    }
+    one_based(value, table.columns.len())
+}
+
+fn column_values(column: &sciplot_core::Column) -> Val {
+    if column.numbers.iter().any(|value| value.is_some()) {
+        Val::List(column.numbers.iter().copied().map(|value| value.map(Val::Float).unwrap_or(Val::None)).collect())
+    } else {
+        Val::List(column.texts.iter().cloned().map(Val::Str).collect())
+    }
+}
+
 fn expect_list(value: &Val) -> Result<Vec<Val>, String> {
     match value {
         Val::List(items) => Ok(items.clone()),
         _ => Err(trf!("这里要一个列表", "A list is required")),
     }
+}
+
+fn iter_values(value: &Val) -> Result<Vec<Val>, String> {
+    match value {
+        Val::List(items) => Ok(items.clone()),
+        Val::Dict(items) => Ok(items.iter().map(|(key, _)| key.clone()).collect()),
+        Val::Str(text) => Ok(text.chars().map(|ch| Val::Str(ch.to_string())).collect()),
+        _ => Err(trf!("这里要一个列表", "A list is required")),
+    }
+}
+
+fn set_index(base: &mut Val, index: &Val, value: Val) -> Result<(), String> {
+    match base {
+        Val::List(items) => {
+            let mut at = as_f64(index)?.trunc() as isize;
+            if at < 0 {
+                at += items.len() as isize;
+            }
+            if at < 0 || at as usize >= items.len() {
+                return Err(trf!("下标超出范围", "Index out of range"));
+            }
+            items[at as usize] = value;
+            Ok(())
+        }
+        Val::Dict(items) => {
+            if let Some(slot) = items.iter_mut().find(|(key, _)| values_equal(key, index)) {
+                slot.1 = value;
+            } else {
+                items.push((index.clone(), value));
+            }
+            Ok(())
+        }
+        _ => Err(trf!("只能给列表或字典赋值", "Only lists and dicts can be assigned by index")),
+    }
+}
+
+fn set_field(object: &Val, name: &str, value: Val) -> Result<(), String> {
+    let Val::Object(instance) = object else {
+        return Err(trf!("只能给对象的属性赋值", "Only object attributes can be assigned"));
+    };
+    let mut instance = instance.borrow_mut();
+    if let Some(slot) = instance.fields.iter_mut().find(|(key, _)| key == name) {
+        slot.1 = value;
+    } else {
+        instance.fields.push((name.to_string(), value));
+    }
+    Ok(())
+}
+
+fn dict_method(items: &[(Val, Val)], name: &str, args: &[Val]) -> Result<Val, String> {
+    match name {
+        "keys" => Ok(Val::List(items.iter().map(|(key, _)| key.clone()).collect())),
+        "get" => {
+            let key = arg(args, 0)?;
+            Ok(items.iter().find(|(item, _)| values_equal(item, key)).map(|(_, value)| value.clone()).unwrap_or(Val::None))
+        }
+        _ => Err(trf!("字典没有这个方法：{name}", "Dict has no method {name}", name = name)),
+    }
+}
+
+fn known_module(name: &str) -> Result<(), String> {
+    match name {
+        "math" | "sciplot" | "statistics" | "random" | "json" => Ok(()),
+        _ => Err(trf!("没有这个模块：{name}", "No such module: {name}", name = name)),
+    }
+}
+
+fn module_exports(module: &str) -> Vec<(String, Val)> {
+    match module {
+        "math" => math_names().iter().map(|name| (name.to_string(), module_attr("math", name, &[]).unwrap_or(Val::None))).collect(),
+        "sciplot" => sciplot_names().iter().map(|name| (name.to_string(), Val::Builtin(sciplot_builtin(name)))).collect(),
+        "statistics" => ["mean", "median", "stdev"].into_iter().map(|name| (name.to_string(), Val::Builtin(Builtin::MathFn(name)))).collect(),
+        "random" => vec![("random".into(), Val::Builtin(Builtin::MathFn("random"))), ("randint".into(), Val::Builtin(Builtin::MathFn("randint")))],
+        "json" => vec![("dumps".into(), Val::Builtin(Builtin::MathFn("dumps"))), ("loads".into(), Val::Builtin(Builtin::MathFn("loads")))],
+        _ => Vec::new(),
+    }
+}
+
+fn intern_name(name: &str) -> Option<&'static str> {
+    [
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "exp", "log", "log10", "sqrt", "fabs", "floor", "ceil", "pow",
+        "hypot", "degrees", "radians", "mean", "median", "stdev", "random", "randint", "dumps", "loads",
+    ]
+    .into_iter()
+    .find(|item| *item == name)
+}
+
+fn math_names() -> &'static [&'static str] {
+    &[
+        "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "exp", "log", "log10", "sqrt", "fabs", "floor", "ceil",
+        "pow", "hypot", "degrees", "radians", "pi", "e",
+    ]
+}
+
+fn sciplot_names() -> &'static [&'static str] {
+    &[
+        "table", "graph", "matrix", "note", "folder", "newTable", "newGraph", "newMatrix", "newNote", "newFolder", "plot", "Fit", "convolve",
+        "deconvolve", "correlate", "printPdf", "arrangeLayers", "col", "cell", "tablecol", "tableList", "graphList", "matrixList", "noteList",
+        "saveProject",
+    ]
+}
+
+fn sciplot_builtin(name: &str) -> Builtin {
+    match name {
+        "table" => Builtin::Table,
+        "graph" => Builtin::Graph,
+        "matrix" => Builtin::Matrix,
+        "note" => Builtin::Note,
+        "folder" => Builtin::Folder,
+        "newTable" => Builtin::NewTable,
+        "newGraph" => Builtin::NewGraph,
+        "newMatrix" => Builtin::NewMatrix,
+        "newNote" => Builtin::NewNote,
+        "newFolder" => Builtin::NewFolder,
+        "plot" => Builtin::Plot,
+        "Fit" => Builtin::Fit,
+        "convolve" => Builtin::Convolve,
+        "deconvolve" => Builtin::Deconvolve,
+        "correlate" => Builtin::Correlate,
+        "printPdf" => Builtin::PrintPdf,
+        "arrangeLayers" => Builtin::Arrange,
+        "col" => Builtin::Col,
+        "cell" => Builtin::Cell,
+        "tablecol" => Builtin::TableCol,
+        "tableList" => Builtin::TableList,
+        "graphList" => Builtin::GraphList,
+        "matrixList" => Builtin::MatrixList,
+        "noteList" => Builtin::NoteList,
+        "saveProject" => Builtin::SaveProject,
+        _ => Builtin::Print,
+    }
+}
+
+fn module_attr(module: &str, name: &str, args: &[Val]) -> Result<Val, String> {
+    if !args.is_empty() {
+        return call_module(module, name, args);
+    }
+    match (module, name) {
+        ("math", "pi") => Ok(Val::Float(std::f64::consts::PI)),
+        ("math", "e") => Ok(Val::Float(std::f64::consts::E)),
+        ("math" | "statistics" | "random" | "json", _) => {
+            let interned = intern_name(name).ok_or_else(|| trf!("模块里没有这个名字：{name}", "The module has no name {name}", name = name))?;
+            Ok(Val::Builtin(Builtin::MathFn(interned)))
+        }
+        ("sciplot", _) if sciplot_names().contains(&name) => Ok(Val::Builtin(sciplot_builtin(name))),
+        _ => Err(trf!("模块里没有这个名字：{name}", "The module has no name {name}", name = name)),
+    }
+}
+
+fn call_module(module: &str, name: &str, args: &[Val]) -> Result<Val, String> {
+    match module {
+        "math" | "statistics" | "random" | "json" => call_named(name, args),
+        "sciplot" => Err(trf!("请直接调用这个函数", "Call this function directly")),
+        _ => Err(trf!("模块里没有这个名字：{name}", "The module has no name {name}", name = name)),
+    }
+}
+
+fn call_named(name: &str, args: &[Val]) -> Result<Val, String> {
+    match name {
+        "dumps" => Ok(Val::Str(json_dumps(arg(args, 0)?))),
+        "loads" => json_loads(&expect_str(arg(args, 0)?)?),
+        "randint" => {
+            let low = as_f64(arg(args, 0)?)?.trunc() as i64;
+            let high = as_f64(arg(args, 1)?)?.trunc() as i64;
+            if high < low {
+                return Err(trf!("randint 的范围不对", "randint range is empty"));
+            }
+            let span = (high - low + 1).max(1) as u64;
+            Ok(Val::Int(low + (random_unit() * span as f64) as i64))
+        }
+        "random" => Ok(Val::Float(random_unit())),
+        "mean" | "median" | "stdev" => Ok(Val::Float(stats_call(name, args)?)),
+        _ => Ok(Val::Float(math_call(name, args)?)),
+    }
+}
+
+fn random_unit() -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STATE: AtomicU64 = AtomicU64::new(0x1234_5678);
+    let mut x = STATE.load(Ordering::Relaxed);
+    x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+    STATE.store(x, Ordering::Relaxed);
+    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+fn stats_call(name: &str, args: &[Val]) -> Result<f64, String> {
+    let mut values = as_f64_list(arg(args, 0)?)?;
+    if values.is_empty() {
+        return Err(trf!("统计需要至少一个数", "Statistics need at least one number"));
+    }
+    match name {
+        "mean" => Ok(values.iter().sum::<f64>() / values.len() as f64),
+        "median" => {
+            values.sort_by(|a, b| a.total_cmp(b));
+            let mid = values.len() / 2;
+            if values.len() % 2 == 0 {
+                Ok((values[mid - 1] + values[mid]) * 0.5)
+            } else {
+                Ok(values[mid])
+            }
+        }
+        "stdev" => {
+            if values.len() < 2 {
+                return Err(trf!("标准差至少要两个数", "Standard deviation needs two numbers"));
+            }
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let var = values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+            Ok(var.sqrt())
+        }
+        _ => Err(trf!("没有这个统计函数", "No such statistics function")),
+    }
+}
+
+fn json_dumps(value: &Val) -> String {
+    match value {
+        Val::None => "null".into(),
+        Val::Bool(true) => "true".into(),
+        Val::Bool(false) => "false".into(),
+        Val::Int(number) => number.to_string(),
+        Val::Float(number) => {
+            if number.is_finite() {
+                format!("{number}")
+            } else {
+                "null".into()
+            }
+        }
+        Val::Str(text) => format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"")),
+        Val::List(items) => {
+            let parts = items.iter().map(json_dumps).collect::<Vec<_>>().join(",");
+            format!("[{parts}]")
+        }
+        Val::Dict(items) => {
+            let parts = items
+                .iter()
+                .map(|(key, value)| format!("{}:{}", json_dumps(key), json_dumps(value)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{parts}}}")
+        }
+        other => format!("\"{}\"", display(other).replace('"', "\\\"")),
+    }
+}
+
+fn json_loads(text: &str) -> Result<Val, String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    let value = parse_json(&chars, &mut index)?;
+    skip_json(&chars, &mut index);
+    if index != chars.len() {
+        return Err(trf!("JSON 没有解析完", "JSON was not fully parsed"));
+    }
+    Ok(value)
+}
+
+fn skip_json(chars: &[char], index: &mut usize) {
+    while *index < chars.len() && chars[*index].is_whitespace() {
+        *index += 1;
+    }
+}
+
+fn parse_json(chars: &[char], index: &mut usize) -> Result<Val, String> {
+    skip_json(chars, index);
+    if *index >= chars.len() {
+        return Err(trf!("JSON 是空的", "JSON is empty"));
+    }
+    match chars[*index] {
+        'n' => {
+            *index += 4;
+            Ok(Val::None)
+        }
+        't' => {
+            *index += 4;
+            Ok(Val::Bool(true))
+        }
+        'f' => {
+            *index += 5;
+            Ok(Val::Bool(false))
+        }
+        '"' => Ok(Val::Str(parse_json_string(chars, index)?)),
+        '[' => {
+            *index += 1;
+            let mut items = Vec::new();
+            skip_json(chars, index);
+            if *index < chars.len() && chars[*index] == ']' {
+                *index += 1;
+                return Ok(Val::List(items));
+            }
+            loop {
+                items.push(parse_json(chars, index)?);
+                skip_json(chars, index);
+                if *index < chars.len() && chars[*index] == ',' {
+                    *index += 1;
+                    continue;
+                }
+                if *index < chars.len() && chars[*index] == ']' {
+                    *index += 1;
+                    break;
+                }
+                return Err(trf!("JSON 数组不对", "Bad JSON array"));
+            }
+            Ok(Val::List(items))
+        }
+        '{' => {
+            *index += 1;
+            let mut items = Vec::new();
+            skip_json(chars, index);
+            if *index < chars.len() && chars[*index] == '}' {
+                *index += 1;
+                return Ok(Val::Dict(items));
+            }
+            loop {
+                let key = parse_json(chars, index)?;
+                skip_json(chars, index);
+                if *index >= chars.len() || chars[*index] != ':' {
+                    return Err(trf!("JSON 对象不对", "Bad JSON object"));
+                }
+                *index += 1;
+                let value = parse_json(chars, index)?;
+                items.push((key, value));
+                skip_json(chars, index);
+                if *index < chars.len() && chars[*index] == ',' {
+                    *index += 1;
+                    continue;
+                }
+                if *index < chars.len() && chars[*index] == '}' {
+                    *index += 1;
+                    break;
+                }
+                return Err(trf!("JSON 对象不对", "Bad JSON object"));
+            }
+            Ok(Val::Dict(items))
+        }
+        _ => {
+            let start = *index;
+            if chars[*index] == '-' {
+                *index += 1;
+            }
+            while *index < chars.len() && (chars[*index].is_ascii_digit() || chars[*index] == '.' || chars[*index] == 'e' || chars[*index] == 'E' || chars[*index] == '+') {
+                *index += 1;
+            }
+            let text: String = chars[start..*index].iter().collect();
+            if text.contains('.') || text.contains('e') || text.contains('E') {
+                Ok(Val::Float(text.parse().map_err(|_| trf!("JSON 数字不对", "Bad JSON number"))?))
+            } else {
+                Ok(Val::Int(text.parse().map_err(|_| trf!("JSON 数字不对", "Bad JSON number"))?))
+            }
+        }
+    }
+}
+
+fn parse_json_string(chars: &[char], index: &mut usize) -> Result<String, String> {
+    *index += 1;
+    let mut out = String::new();
+    while *index < chars.len() {
+        let ch = chars[*index];
+        *index += 1;
+        if ch == '"' {
+            return Ok(out);
+        }
+        if ch == '\\' && *index < chars.len() {
+            let next = chars[*index];
+            *index += 1;
+            out.push(match next {
+                'n' => '\n',
+                't' => '\t',
+                other => other,
+            });
+        } else {
+            out.push(ch);
+        }
+    }
+    Err(trf!("JSON 字符串没有结束", "JSON string is not closed"))
 }
 
 fn as_f64_list(value: &Val) -> Result<Vec<f64>, String> {
@@ -1086,6 +1792,7 @@ fn truthy(value: &Val) -> bool {
         Val::Float(number) => *number != 0.0 && number.is_finite(),
         Val::Str(text) => !text.is_empty(),
         Val::List(items) => !items.is_empty(),
+        Val::Dict(items) => !items.is_empty(),
         _ => true,
     }
 }
@@ -1099,6 +1806,9 @@ fn values_equal(left: &Val, right: &Val) -> bool {
             as_f64(left).ok() == as_f64(right).ok()
         }
         (Val::List(a), Val::List(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a, b)| values_equal(a, b)),
+        (Val::Dict(a), Val::Dict(b)) => {
+            a.len() == b.len() && a.iter().all(|(key, value)| b.iter().any(|(other, other_value)| values_equal(key, other) && values_equal(value, other_value)))
+        }
         _ => false,
     }
 }
@@ -1160,12 +1870,31 @@ fn num_bin(left: &Val, right: &Val, op: impl Fn(f64, f64) -> f64, keep_int: bool
 fn len_of(value: Option<&Val>) -> Result<usize, String> {
     match value {
         Some(Val::List(items)) => Ok(items.len()),
+        Some(Val::Dict(items)) => Ok(items.len()),
         Some(Val::Str(text)) => Ok(text.chars().count()),
         _ => Err(trf!("len 需要列表或文字", "len needs a list or a string")),
     }
 }
 
 fn index_value(base: &Val, index: &Val) -> Result<Val, String> {
+    if let Val::Dict(items) = base {
+        return items
+            .iter()
+            .find(|(key, _)| values_equal(key, index))
+            .map(|(_, value)| value.clone())
+            .ok_or_else(|| trf!("字典里没有这个键", "Dict has no such key"));
+    }
+    if let Val::Str(text) = base {
+        let chars: Vec<char> = text.chars().collect();
+        let mut at = as_f64(index)?.trunc() as isize;
+        if at < 0 {
+            at += chars.len() as isize;
+        }
+        if at < 0 || at as usize >= chars.len() {
+            return Err(trf!("下标超出范围", "Index out of range"));
+        }
+        return Ok(Val::Str(chars[at as usize].to_string()));
+    }
     let Val::List(items) = base else {
         return Err(trf!("只能给列表取下标", "Only lists can be indexed"));
     };
@@ -1209,6 +1938,19 @@ fn math_call(name: &str, args: &[Val]) -> Result<f64, String> {
         "log10" => x.log10(),
         "exp" => x.exp(),
         "pow" => x.powf(y),
+        "asin" => x.asin(),
+        "acos" => x.acos(),
+        "atan" => x.atan(),
+        "atan2" => x.atan2(y),
+        "sinh" => x.sinh(),
+        "cosh" => x.cosh(),
+        "tanh" => x.tanh(),
+        "fabs" => x.abs(),
+        "floor" => x.floor(),
+        "ceil" => x.ceil(),
+        "hypot" => x.hypot(y),
+        "degrees" => x.to_degrees(),
+        "radians" => x.to_radians(),
         _ => return Err(trf!("没有这个数学函数", "No such math function")),
     };
     if value.is_finite() {
@@ -1236,6 +1978,14 @@ fn display(value: &Val) -> String {
             let parts = items.iter().map(display).collect::<Vec<_>>().join(", ");
             format!("[{parts}]")
         }
+        Val::Dict(items) => {
+            let parts = items.iter().map(|(key, value)| format!("{}: {}", display(key), display(value))).collect::<Vec<_>>().join(", ");
+            format!("{{{parts}}}")
+        }
+        Val::Class(class) => format!("<class {}>", class.name),
+        Val::Object(instance) => format!("<{}>", instance.borrow().class),
+        Val::Bound { method, .. } => format!("<method {method}>"),
+        Val::Module(name) => format!("<module {name}>"),
         Val::Table(_) => "<table>".into(),
         Val::Matrix(_) => "<matrix>".into(),
         Val::Graph(_) => "<graph>".into(),
@@ -1254,6 +2004,11 @@ enum Val {
     Float(f64),
     Str(String),
     List(Vec<Val>),
+    Dict(Vec<(Val, Val)>),
+    Class(ClassDef),
+    Object(Rc<RefCell<Instance>>),
+    Bound { receiver: Box<Val>, method: String },
+    Module(String),
     Table(sciplot_core::TableId),
     Matrix(sciplot_core::MatrixId),
     Graph(sciplot_core::GraphId),
@@ -1294,6 +2049,11 @@ enum Builtin {
     Col,
     Cell,
     TableCol,
+    TableList,
+    GraphList,
+    MatrixList,
+    NoteList,
+    SaveProject,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1324,6 +2084,19 @@ struct FitSnap {
 struct FuncDef {
     params: Vec<String>,
     body: Vec<Stmt>,
+}
+
+#[derive(Clone, Debug)]
+struct ClassDef {
+    name: String,
+    methods: Vec<(String, FuncDef)>,
+}
+
+#[derive(Clone, Debug)]
+struct Instance {
+    class: String,
+    methods: Vec<(String, FuncDef)>,
+    fields: Vec<(String, Val)>,
 }
 
 struct Env {
@@ -1371,6 +2144,11 @@ impl Env {
         bind(&mut map, "col", Builtin::Col);
         bind(&mut map, "cell", Builtin::Cell);
         bind(&mut map, "tablecol", Builtin::TableCol);
+        bind(&mut map, "tableList", Builtin::TableList);
+        bind(&mut map, "graphList", Builtin::GraphList);
+        bind(&mut map, "matrixList", Builtin::MatrixList);
+        bind(&mut map, "noteList", Builtin::NoteList);
+        bind(&mut map, "saveProject", Builtin::SaveProject);
         map.insert("pi".into(), Val::Float(std::f64::consts::PI));
         map.insert("True".into(), Val::Bool(true));
         map.insert("False".into(), Val::Bool(false));
@@ -1410,18 +2188,25 @@ enum Signal {
     Return(Val),
     Break,
     Continue,
+    Raise(String),
 }
 
 #[derive(Clone, Debug)]
 enum Stmt {
     Pass,
-    Import,
+    ImportModules(Vec<String>),
+    FromImport { module: String, names: Vec<String> },
     Expr(Expr),
     Assign { name: String, expr: Expr },
+    SetIndex { base: Expr, index: Expr, expr: Expr },
+    SetAttr { base: Expr, name: String, expr: Expr },
     If { arms: Vec<(Expr, Vec<Stmt>)>, else_body: Vec<Stmt> },
     While { cond: Expr, body: Vec<Stmt> },
     For { name: String, iter: Expr, body: Vec<Stmt> },
     Def { name: String, params: Vec<String>, body: Vec<Stmt> },
+    Class { name: String, methods: Vec<(String, FuncDef)> },
+    Try { body: Vec<Stmt>, name: Option<String>, handler: Vec<Stmt> },
+    Raise(Expr),
     Return(Option<Expr>),
     Break,
     Continue,
@@ -1436,6 +2221,7 @@ enum Expr {
     Str(String),
     Name(String),
     List(Vec<Expr>),
+    Dict(Vec<(Expr, Expr)>),
     Unary { op: &'static str, expr: Box<Expr> },
     Binary { op: &'static str, left: Box<Expr>, right: Box<Expr> },
     Attr { base: Box<Expr>, name: String },
@@ -1545,11 +2331,13 @@ impl Parser {
                 self.bump();
                 Ok(Stmt::Pass)
             }
-            Some(Token::Import | Token::From) => {
-                while !matches!(self.peek(), Some(Token::Newline) | Some(Token::Dedent) | None) {
-                    self.bump();
-                }
-                Ok(Stmt::Import)
+            Some(Token::Import) => self.parse_import(),
+            Some(Token::From) => self.parse_from(),
+            Some(Token::Class) => self.parse_class(),
+            Some(Token::Try) => self.parse_try(),
+            Some(Token::Raise) => {
+                self.bump();
+                Ok(Stmt::Raise(self.parse_expr()?))
             }
             _ => self.parse_assign_or_expr(),
         }
@@ -1616,13 +2404,80 @@ impl Parser {
     fn parse_assign_or_expr(&mut self) -> Result<Stmt, String> {
         let expr = self.parse_expr()?;
         if self.eat(&Token::Assign) {
-            let Expr::Name(name) = expr else {
-                return Err(trf!("赋值的左边要是名字", "The left side of an assignment must be a name"));
-            };
             let value = self.parse_expr()?;
-            return Ok(Stmt::Assign { name, expr: value });
+            return match expr {
+                Expr::Name(name) => Ok(Stmt::Assign { name, expr: value }),
+                Expr::Index { base, index } => Ok(Stmt::SetIndex { base: *base, index: *index, expr: value }),
+                Expr::Attr { base, name } => Ok(Stmt::SetAttr { base: *base, name, expr: value }),
+                _ => Err(trf!("赋值的左边要是名字", "The left side of an assignment must be a name")),
+            };
         }
         Ok(Stmt::Expr(expr))
+    }
+
+    fn parse_import(&mut self) -> Result<Stmt, String> {
+        self.expect(&Token::Import)?;
+        let mut names = vec![self.expect_ident()?];
+        while self.eat(&Token::Comma) {
+            names.push(self.expect_ident()?);
+        }
+        Ok(Stmt::ImportModules(names))
+    }
+
+    fn parse_from(&mut self) -> Result<Stmt, String> {
+        self.expect(&Token::From)?;
+        let module = self.expect_ident()?;
+        self.expect(&Token::Import)?;
+        let names = if self.eat(&Token::Op(BinOp::Mul)) {
+            Vec::new()
+        } else {
+            let mut names = vec![self.expect_ident()?];
+            while self.eat(&Token::Comma) {
+                names.push(self.expect_ident()?);
+            }
+            names
+        };
+        Ok(Stmt::FromImport { module, names })
+    }
+
+    fn parse_class(&mut self) -> Result<Stmt, String> {
+        self.expect(&Token::Class)?;
+        let name = self.expect_ident()?;
+        self.expect(&Token::Colon)?;
+        let body = self.parse_suite()?;
+        let mut methods = Vec::new();
+        for stmt in body {
+            if let Stmt::Def { name, params, body } = stmt {
+                methods.push((name, FuncDef { params, body }));
+            } else if matches!(stmt, Stmt::Pass) {
+                continue;
+            } else {
+                return Err(trf!("类里面目前只能写方法", "A class body can only contain methods"));
+            }
+        }
+        Ok(Stmt::Class { name, methods })
+    }
+
+    fn parse_try(&mut self) -> Result<Stmt, String> {
+        self.expect(&Token::Try)?;
+        self.expect(&Token::Colon)?;
+        let body = self.parse_suite()?;
+        self.expect(&Token::Except)?;
+        let name = if self.eat(&Token::As) {
+            Some(self.expect_ident()?)
+        } else if matches!(self.peek(), Some(Token::Ident(_))) {
+            let ident = self.expect_ident()?;
+            if self.eat(&Token::As) {
+                Some(self.expect_ident()?)
+            } else {
+                Some(ident)
+            }
+        } else {
+            None
+        };
+        self.expect(&Token::Colon)?;
+        let handler = self.parse_suite()?;
+        Ok(Stmt::Try { body, name, handler })
     }
 
     fn parse_expr(&mut self) -> Result<Expr, String> {
@@ -1775,6 +2630,25 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
+            Some(Token::LBrace) => {
+                let mut pairs = Vec::new();
+                if !self.eat(&Token::RBrace) {
+                    loop {
+                        let key = self.parse_expr()?;
+                        self.expect(&Token::Colon)?;
+                        let value = self.parse_expr()?;
+                        pairs.push((key, value));
+                        if self.eat(&Token::RBrace) {
+                            break;
+                        }
+                        self.expect(&Token::Comma)?;
+                        if self.eat(&Token::RBrace) {
+                            break;
+                        }
+                    }
+                }
+                Ok(Expr::Dict(pairs))
+            }
             Some(Token::LBrack) => {
                 let mut items = Vec::new();
                 if !self.eat(&Token::RBrack) {
@@ -1816,6 +2690,8 @@ enum Token {
     RParen,
     LBrack,
     RBrack,
+    LBrace,
+    RBrace,
     Comma,
     Colon,
     Dot,
@@ -1833,6 +2709,11 @@ enum Token {
     Pass,
     Import,
     From,
+    Class,
+    Try,
+    Except,
+    Raise,
+    As,
     True,
     False,
     NoneKw,
@@ -1942,13 +2823,13 @@ fn logical_lines(source: &str) -> Result<Vec<(usize, String)>, String> {
                 }
                 continue;
             }
-            if matches!(ch, '(' | '[') {
+            if matches!(ch, '(' | '[' | '{') {
                 paren += 1;
                 text.push(ch);
                 index += 1;
                 continue;
             }
-            if matches!(ch, ')' | ']') {
+            if matches!(ch, ')' | ']' | '}') {
                 paren -= 1;
                 text.push(ch);
                 index += 1;
@@ -2074,6 +2955,11 @@ fn keyword(word: &str) -> Token {
         "pass" => Token::Pass,
         "import" => Token::Import,
         "from" => Token::From,
+        "class" => Token::Class,
+        "try" => Token::Try,
+        "except" => Token::Except,
+        "raise" => Token::Raise,
+        "as" => Token::As,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,
@@ -2109,6 +2995,8 @@ fn one_char(ch: char) -> Result<Token, String> {
         ')' => Token::RParen,
         '[' => Token::LBrack,
         ']' => Token::RBrack,
+        '{' => Token::LBrace,
+        '}' => Token::RBrace,
         ',' => Token::Comma,
         ':' => Token::Colon,
         '.' => Token::Dot,

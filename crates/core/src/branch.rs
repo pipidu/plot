@@ -1,18 +1,14 @@
-//! 列公式里的分支。`if()` 和 `?:` 只计算被选中的一边，不交给 evalexpr 的函数调用。
-//! 缩进的 `if / elif / else` 也在这里解释。叶子表达式仍是 evalexpr，整数除法不变。
+//! 列公式里的分支。`if()` 和 `?:` 只计算被选中的一边。
+//! 缩进的 `if / elif / else` 也在这里解释。叶子表达式交给 `expr`，除法是真除法。
 
-use evalexpr::Value;
+use crate::expr::Value;
 
 pub(crate) fn uses_branching(expr: &str) -> bool {
     has_if_call(expr) || has_qmark(expr) || has_block_header(expr)
 }
 
 pub(crate) fn value_as_f64(value: Value) -> Result<f64, String> {
-    match value {
-        Value::Boolean(true) => Ok(1.0),
-        Value::Boolean(false) => Ok(0.0),
-        other => other.as_number().map_err(|err| err.to_string()),
-    }
+    value.as_number()
 }
 
 pub(crate) fn eval_extended(expr: &str, vars: &[(&str, f64)]) -> Result<Value, String> {
@@ -50,42 +46,19 @@ fn eval_expr(expr: &str, vars: &[(&str, f64)], depth: usize) -> Result<Value, St
 }
 
 fn truthy(value: &Value) -> Result<bool, String> {
-    match value {
-        Value::Boolean(flag) => Ok(*flag),
-        Value::Int(number) => Ok(*number != 0),
-        Value::Float(number) => {
-            if !number.is_finite() {
-                return Err(crate::tr!("条件不是有限数", "The condition is not a finite number").into());
-            }
-            Ok(*number != 0.0)
-        }
-        _ => Err(crate::tr!("条件必须是数值或比较", "The condition must be a number or a comparison").into()),
-    }
+    value.truthy().map_err(|_| crate::tr!("条件必须是数值或比较", "The condition must be a number or a comparison").to_string())
 }
 
 fn literal_token(value: &Value) -> Result<String, String> {
-    match value {
-        Value::Int(number) => {
-            if *number < 0 {
-                Ok(format!("({number})"))
-            } else {
-                Ok(number.to_string())
-            }
-        }
-        Value::Float(number) => {
-            if !number.is_finite() {
-                return Err(crate::tr!("分支结果不是有限数", "The branch result is not a finite number").into());
-            }
-            let text = format!("{number:?}");
-            if *number < 0.0 {
-                Ok(format!("({text})"))
-            } else {
-                Ok(text)
-            }
-        }
-        Value::Boolean(true) => Ok("1".into()),
-        Value::Boolean(false) => Ok("0".into()),
-        _ => Err(crate::tr!("分支结果不是数", "The branch result is not a number").into()),
+    let number = value.as_number().map_err(|_| crate::tr!("分支结果不是数", "The branch result is not a number").to_string())?;
+    if !number.is_finite() {
+        return Err(crate::tr!("分支结果不是有限数", "The branch result is not a finite number").into());
+    }
+    let text = format!("{number:?}");
+    if number < 0.0 {
+        Ok(format!("({text})"))
+    } else {
+        Ok(text)
     }
 }
 
@@ -363,7 +336,7 @@ fn block_lines(expr: &str) -> Vec<(usize, usize, String)> {
 }
 
 fn eval_suite(lines: &[(usize, usize, String)], index: &mut usize, indent: usize, vars: &[(&str, f64)]) -> Result<Value, String> {
-    let mut last = Value::Float(f64::NAN);
+    let mut last = Value::Number(f64::NAN);
     let mut any = false;
     while *index < lines.len() {
         let (no, ind, text) = &lines[*index];
@@ -400,7 +373,7 @@ fn eval_if_chain(lines: &[(usize, usize, String)], index: &mut usize, indent: us
     let cond_true = truthy(&eval_expr(cond_src, vars, 0)?)?;
     *index += 1;
     let mut matched = false;
-    let mut result = Value::Float(f64::NAN);
+    let mut result = Value::Number(f64::NAN);
     if cond_true {
         result = eval_or_skip_body(lines, index, indent, inline, vars, true)?;
         matched = true;
@@ -436,7 +409,7 @@ fn eval_if_chain(lines: &[(usize, usize, String)], index: &mut usize, indent: us
         }
     }
     if !matched {
-        return Ok(Value::Float(f64::NAN));
+        return Ok(Value::Number(f64::NAN));
     }
     Ok(result)
 }
@@ -456,7 +429,7 @@ fn eval_or_skip_body(
         if run {
             eval_expr(inline, vars, 0)
         } else {
-            Ok(Value::Float(f64::NAN))
+            Ok(Value::Number(f64::NAN))
         }
     } else {
         body_from_indent(lines, index, parent, vars, run)
@@ -480,7 +453,7 @@ fn body_from_indent(
         while *index < lines.len() && lines[*index].1 >= body_indent {
             *index += 1;
         }
-        Ok(Value::Float(f64::NAN))
+        Ok(Value::Number(f64::NAN))
     }
 }
 

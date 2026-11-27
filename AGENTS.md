@@ -19,7 +19,7 @@ Cargo workspace，resolver 2，edition 2021，`rust-version` 1.81，许可证 MI
 | `crates/core` | `sciplot-core` | `sciplot_core` | 表格、矩阵、图形模型、公式、撤销、`.splot`、CSV。不依赖 GUI，也不依赖 analysis |
 | `crates/analysis` | `sciplot-analysis` | `sciplot_analysis` | 拟合、微积分、插值、平滑、FFT、统计、求交点。不依赖 GUI |
 | `crates/plot` | `sciplot-plot` | `sciplot_plot` | 坐标变换、图元、二维/三维绘制、SVG、PNG、EPS、PDF 和 JPEG/BMP/PBM/PGM/PPM/XBM/XPM。不依赖 analysis |
-| `crates/script` | `sciplot-script` | `sciplot_script` | 程序内的 Python 子集和 `table()` / `graph()` / `newTable()` / `plot()` / `Fit`。不依赖 GUI |
+| `crates/script` | `sciplot-script` | `sciplot_script` | 程序内的 Python 解释器（字典、类、异常、math/statistics/random/json）和 `table()` / `graph()` / `newTable()` / `plot()` / `Fit`。不依赖 GUI，不是 CPython |
 | `crates/app` | `sciplot` | 二进制 `sciplot` | egui 主窗口、菜单、对话框、字体 |
 | `assets/fonts` |  |  | 内嵌中文字体 Droid Sans Fallback 及其许可证 |
 | `crates/app/assets/icon.ico`、`icon.png` |  |  | 应用图标。Windows 下由 `crates/app/build.rs` 把 ICO 嵌入可执行文件；启动时用 PNG 设置窗口图标（Linux 任务栏和窗口标题也靠它） |
@@ -48,7 +48,7 @@ Windows 交叉编译需要 `x86_64-w64-mingw32-gcc` 和 `x86_64-w64-mingw32-wind
 
 `Project` 持有表格、矩阵、图形、备注、日志和文件夹。ID 是新类型：`TableId`、`MatrixId`、`GraphId`、`NoteId`、`FolderId`。对象上的 `folder` 为空表示根。读入项目后调用 `fix_ids()`，让分配器越过已有 ID，再 `sanitize_folders()`。
 
-项目文件仍是 `FORMAT_VERSION = 1`，形状是 `{ "format", "project" }`。未压缩的 `.splot` 是 JSON。`.splot.gz` 是同一份 JSON 的 gzip。`.sciprj` / `.sciprj.gz` 是交换用的 XML 子集。Origin（`.opj`、`.opju`、`.ogw`、`.ogg`、`.ogm`）只读一部分数值列，不能写回去。不认识的扩展名按 `.splot` 写，给原来的 HTTP/MCP 留兼容。数值里的空单元格用 `Option<f64>`，不要序列化 NaN。布尔字段如果默认是 true，用 `#[serde(default = "default_true")]`。枚举上不要写 `#[serde(default)]`。追加项目用 `append_project`，不要替换当前项目。删除文件夹只把子文件夹和对象交回父文件夹。
+项目文件仍是 `FORMAT_VERSION = 1`，形状是 `{ "format", "project" }`。未压缩的 `.splot` 是 JSON。`.splot.gz` 是同一份 JSON 的 gzip。`.sciprj` / `.sciprj.gz` 有两条路：SciPlot 自己的 XML 可以往返；以 `SciDAVis x.y.z project file` 开头的官方项目可以读入表格、列公式、矩阵、备注、文件夹和曲线。官方文件没有单元格公式。打开官方 SciDAVis 或 Origin 文件后，保存另存为 `.splot` / `.splot.gz`，不会覆盖原文件。Origin（`.opj`、`.opju`、`.ogw`、`.ogg`、`.ogm`）只读：数值、文本、日期和 XML 里的曲线；二进制图窗口不还原，也不能写回 Origin。不认识的扩展名按 `.splot` 写，给原来的 HTTP/MCP 留兼容。数值里的空单元格用 `Option<f64>`，不要序列化 NaN。布尔字段如果默认是 true，用 `#[serde(default = "default_true")]`。枚举上不要写 `#[serde(default)]`。追加项目用 `append_project`，不要替换当前项目。删除文件夹只把子文件夹和对象交回父文件夹。
 
 撤销是整份项目的 JSON 快照，上限 40 步，接口是 `History::push`、`undo`、`redo`。界面上的修改走 `SciPlotApp::edit`，失败时恢复修改前的项目。
 
@@ -56,7 +56,7 @@ CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件�
 
 图形模板是 `.sptpl`（`sciplot-template`），JSON，不是 SciDAVis 的 `.qpt`。`GraphTemplate` 记下画布大小、图层几何、字体、颜色、坐标轴标题和文字标注，打开后是空图。曲线、曲线样式和刻度（步长、次刻度、刻度样式）不写入模板。
 
-列公式和拟合表达式用 evalexpr **11.3.1**，锁死这个版本。12 及以上是 AGPL，不要升级。整数除法会截断，需要小数时写成 `1.0/2`。乘方是 `^`。`col("名字")`、`col("A")`、`col(1)`（从 1 开始）、`cell("A", 行号)`、`tablecol`、`i` 和 `row` 可用。`if()`、`?:` 和缩进的 if/elif/else 在 `crates/core/src/branch.rs`，只计算被选中的一边。`evalexpr` 的 `==` 不把浮点和整数当成同一个数，比较列时用 `<`、`>`。以 `python:` 开头的列公式交给 `set_python_column_hook`，由 `sciplot-script` 逐行计算。给上下文注册函数时要引入 `ContextWithMutableVariables` 和 `ContextWithMutableFunctions`。多参数函数收到的是 `Value::Tuple`。
+列公式和拟合表达式用 `crates/core/src/expr.rs` 里的表达式引擎，所有数都是 `f64`：`1/2` 等于 0.5，`1==1.0` 为真。不要换回 evalexpr：11.3.1 会截断整数除法，12 及以上是 AGPL。乘方是 `^`。`col("名字")`、`col("A")`、`col(1)`（从 1 开始）、`cell("A", 行号)`、`tablecol`、`i` 和 `row` 可用。`if()`、`?:` 和缩进的 if/elif/else 在 `crates/core/src/branch.rs`，只计算被选中的一边。以 `python:` 开头的列公式交给 `set_python_column_hook`，由 `sciplot-script` 逐行计算。套用列公式不会清掉已有的单元格公式。重算按依赖每个公式算一次，不是迭代到不动点。表格上方有公式栏。备注求值会先清掉线程里的列上下文。
 
 ## 绘图
 
@@ -65,11 +65,11 @@ CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件�
 - `paint`：egui `Painter`，用于普通二维图的屏幕绘制
 - `to_svg`：矢量导出，`font-family` 使用 `SVG_FONT`
 - `to_png` / `to_rgba`：`tiny-skia` 光栅。三维图在屏幕上也走 `to_rgba`，再贴成纹理。egui 的 `convex_polygon` 会把很瘦的三角形拉成刺，所以曲面不要直接用 `Painter` 填三角形
-- `export_scene` / `print_pdf`：EPS、PDF 和 JPEG、BMP、PBM、PGM、PPM、XBM、XPM。纸张、方向、DPI、JPEG 质量和透明背景从 `ExportOptions` 进去。不贴纸时 PNG 仍是 960×640 乘以 DPI/96，默认 DPI 144。EPS 和 PDF 的页始终用纸张点尺寸；文字用 `ttf-parser` 转成轮廓。透明背景会跳过铺满画布的白底，目前用于 PNG、XPM 和 SVG。PDF/EPS 里的图像标注画成平均色块，像素仍只在 PNG 和 SVG 里。打印没有系统打印队列，`print_pdf` 把每张图写成 PDF 的一页
+- `export_scene` / `print_pdf`：EPS、PDF 和 JPEG、BMP、PBM、PGM、PPM、XBM、XPM。纸张、方向、DPI、JPEG 质量和透明背景从 `ExportOptions` 进去。不贴纸时 PNG 仍是 960×640 乘以 DPI/96，默认 DPI 144。EPS 和 PDF 的页始终用纸张点尺寸；文字用 `ttf-parser` 转成轮廓。透明背景会跳过铺满画布的白底，用于 PNG、XPM 和 SVG。PDF/EPS 里的图像标注写入像素；带透明通道的像素先合成到白底上。打印没有系统打印队列，`print_pdf` 把每张图写成 PDF 的一页
 
 `Graph.arrangement` 用行列、对齐、边距和间距摆图层。`rows == 0` 且 `cols == 0` 时按接近正方形的网格，两层是左右而不是上下。新建、复制和插入图层都会重排。删除只在 `auto_rearrange` 为真时重排。单个图层的数值位置仍是归一化的 `x,y,w,h`。当前图层是界面上的 `active_layer`，不写进项目；图窗口左上角的数字按钮切换它。表格右键「面板」走 `Project::plot_panel`。
 
-坐标可以是线性、以 10 为底的对数、倒数，并支持反向轴。刻度用 1-2-5。视图缩放和平移存在 `LayerView` 里，和坐标轴的 min/max 分开。双击恢复视图。按住 Shift 拖拽只记录 X 区间，给求交点用。
+坐标可以是线性、以 10 为底的对数、倒数，并支持反向轴。刻度用 1-2-5。视图缩放和平移存在 `LayerView` 里，和坐标轴的 min/max 分开；平移和滚轮缩放同时改下、上、左、右四条轴。网格和标注跟曲线或标注绑定的那条轴。全是极坐标曲线的图层用极坐标网格和角度刻度。双击恢复视图。按住 Shift 拖拽只记录 X 区间，给求交点用。
 
 纵轴中文标题按字竖排，不依赖旋转文本。纵轴的英文标题整行逆时针转 90 度，不把每个字母拆开。三维曲面按平均深度做画家算法排序，范围会缩进画布，避免裁切。鼠标拖拽改方位角和仰角，滚轮改 `zoom`。`SurfaceMode` 还有多边形、隐藏线和网格曲面；散点可以是圆点、十字、锥体或竖线。表格列可以画成色带、柱或轨迹（`SurfaceSource::Table`）。边长超过 160 的矩阵只在显示时抽稀。
 
@@ -77,7 +77,7 @@ CSV 导入先按 UTF-8，失败再按 GBK。导出带 UTF-8 BOM。最近文件�
 
 拟合在 `crates/analysis/src/fit.rs`。线性和多项式用正规方程加 LU，不要用 nalgebra 0.33 的 QR 解非方阵。指数、一到三阶衰减、指数增长、Boltzmann、高斯、洛伦兹、多峰和自定义函数走 `FitOptions`：默认权重为 1、缩放 Levenberg-Marquardt、80 次、容差 1e-12。算法还可以选不缩放的 Levenberg-Marquardt 和 Nelder-Mead。线性和多项式不看这个算法，只用加权最小二乘。自定义参数从 `parameter_names` 和 `parse_initials`（如 `a=1, b=0.5`）来。文本拟合插件放在主目录或程序旁边的 `fitPlugins`，由 `crates/analysis/src/plugin.rs` 读取，不是 `.fdf` 或 Python。`nalgebra` 停在 0.33：0.34 的 MSRV 更高，0.35 需要 edition 2024。
 
-FFT 在 `crates/analysis/src/fft.rs`。原来的 `fft_spectrum` 仍是单边振幅和相位。`fft_filter` 保留低通和高通；带通和带阻用 `fft_filter_band`。`fft_forward` / `fft_inverse` 写出实部、虚部、振幅和相位，并接受归一化与零频移位。卷积、反卷积和信号相关在 `crates/analysis/src/signal.rs`，和 Pearson 相关不是一回事。备注里的「运行备注」仍是 `eval_note`，逐行公式，没有 `col()`。菜单「脚本」和「执行脚本」走 `crates/script`，是程序内的 Python 子集，不是 CPython。脚本里的 `/` 是真除法，`//` 才向下取整。
+FFT 在 `crates/analysis/src/fft.rs`。原来的 `fft_spectrum` 仍是单边振幅和相位。`fft_filter` 保留低通和高通；带通和带阻用 `fft_filter_band`。`fft_forward` / `fft_inverse` 写出实部、虚部、振幅和相位，并接受归一化与零频移位。卷积、反卷积和信号相关在 `crates/analysis/src/signal.rs`，和 Pearson 相关不是一回事。备注里的「运行备注」仍是 `eval_note`，逐行公式，没有 `col()`。菜单「脚本」和「执行脚本」走 `crates/script`，是程序内的解释器，不是 CPython（没有嵌入 libpython：Windows 包是 mingw 交叉编译，再带三份标准库不现实，动态链接会要求用户另装 Python；RustPython 的工具链高于声明的 1.81）。脚本有字典、类、异常，以及 math、statistics、random、json。不认识的 import 会报错。脚本里的 `/` 是真除法，`//` 才向下取整。
 
 Savitzky-Golay 按窗口内每个偏移单独算系数，这样边缘也能保住阶数不超过窗口的多项式。不要用反射填充，那会破坏直线。
 
@@ -105,9 +105,9 @@ Savitzky-Golay 按窗口内每个偏移单独算系数，这样边缘也能保�
 
 界面字体启动时按顺序找 Windows 的微软雅黑（`msyh.ttc` 等），再找系统里的 Noto Sans、文泉驿、Droid，最后用 `include_bytes!` 的 `assets/fonts/DroidSansFallbackFull.ttf`。图上的拉丁字母按 Times New Roman、Liberation Serif 这条顺序，中文按宋体、Noto Serif CJK、思源宋体、文鼎明体，找不到就用同一份内嵌 Droid。设置里的字体文件如果填了，界面和图都改用这一个文件；留空才走上面的自动顺序。TTC 要先抽出一个 TTF，`ab_glyph` 读不了字体集合。界面字体同时注册为 egui 的 Proportional 和 Monospace。图使用名为 `sciplot-plot` 的字体族，拉丁文件在前、中文文件在后，缺字时 egui 会落到后一个。SVG 的 `font-family` 写成 Times New Roman、Liberation Serif、SimSun、宋体这一串，不用双引号，避免撑破 XML 属性。
 
-界面语言在 `sciplot_core::Language`，默认简体中文，存在 `.sciplot_prefs.json` 的 `language` 字段，不写进 `.splot`。除了简体中文和英语，还有繁体中文、德语、法语、俄语、西班牙语、捷克语和巴西葡萄牙语。短句用 `t("中文")` 或 `tr!` / `trf!`，英文对照在 `crates/core/src/catalog.rs`，其余语言的菜单短句在 `crates/core/src/lang_extra.rs`。没有对照时先用英语，再用中文。`trf!` 和长说明不进这七种语言。`format!` 的格式串必须是字面量，带参数的句子用 `trf!`。测试默认语言是中文，改成别的语言后要改回来，否则同一线程上后面的测试会读到那种语言。示例项目的名字在创建时翻译；查找示例表和图时同时认中文名和英文名。
+界面语言在 `sciplot_core::Language`，默认简体中文，存在 `.sciplot_prefs.json` 的 `language` 字段，不写进 `.splot`。除了简体中文和英语，还有繁体中文、德语、法语、俄语、西班牙语、捷克语和巴西葡萄牙语。短句用 `t("中文")` 或 `tr!` / `trf!`，英文对照在 `crates/core/src/catalog.rs`，其余语言的菜单短句在 `crates/core/src/lang_extra.rs`。没有对照的短句先用英语，再用中文。状态栏的带参数句子在 `crates/core/src/lang_formats.rs`，七种语言按中文格式串填孔，没有收录时留中文，不再改用英文。公式说明、脚本说明、关于和 AI 说明也有这七种语言的译文。`format!` 的格式串必须是字面量，带参数的句子用 `trf!`。测试默认语言是中文，改成别的语言后要改回来，否则同一线程上后面的测试会读到那种语言。示例项目的名字在创建时翻译；查找示例表和图时同时认中文名和英文名。
 
-发布用 `.github/workflows/windows.yml`。`release` 任务仍编译 Windows 和 Linux，并创建 `v0.2.1-bN`。不要给这个任务加 `needs`，否则 macOS 失败会挡住已有的包。`macos` 任务在 `macos-latest` 上打未签名的 Apple Silicon `SciPlot.app`，`attach-macos` 再把它传到同一个标签。没有公证，CI 也不打 Intel 包。不要在本机创建标签或 GitHub Release。
+发布用 `.github/workflows/windows.yml`。`release` 任务仍编译 Windows 和 Linux，并创建 `v0.2.1-bN`。不要给这个任务加 `needs`，否则 macOS 失败会挡住已有的包。`macos` 任务在 `macos-latest` 上打未签名、未公证的 Apple Silicon 包，并交叉编译一个没有在 Intel 硬件上运行过的 x86_64 包。`attach-macos` 只上传 `.tar.gz`，重算包含 macOS 的 `SHA256.txt`，再改写发布说明。没有 Apple Developer 证书，不能签名或公证。不要在本机创建标签或 GitHub Release。
 
 停靠用 `egui_dock` 0.16。`DockState` 和 `TabViewer` 不要同时可变借用：先 `mem::replace` 取出 dock，画完再放回去。因此 `open_tab` 只把标签放进 `pending_tabs`，等 dock 放回来再 `flush_tabs`。在表格或图的右键菜单里直接改 `self.dock` 会被这一帧的换回盖掉。菜单项被点击后调用 `ui.close_menu()`，否则对话框打开时菜单会留在画面上。
 

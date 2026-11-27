@@ -5,6 +5,10 @@ use crate::scene::{dash_intervals, HAlign, Prim, Scene, VAlign};
 pub const SVG_FONT: &str = "Times New Roman, Times, Liberation Serif, SimSun, Songti SC, STSong, Noto Serif CJK SC, Source Han Serif SC, serif";
 
 pub fn to_svg(scene: &Scene) -> String {
+    to_svg_transparent(scene, false)
+}
+
+pub fn to_svg_transparent(scene: &Scene, transparent: bool) -> String {
     let w = scene.width.max(1.0);
     let h = scene.height.max(1.0);
     let mut out = format!(
@@ -38,6 +42,9 @@ pub fn to_svg(scene: &Scene) -> String {
                 out.push_str(&format!("<polygon points=\"{points}\" fill=\"{}\"/>\n", hex(*fill)));
             }
             Prim::Rect { x, y, w, h, fill, stroke } => {
+                if transparent && full_white(scene, *x, *y, *w, *h, *fill) {
+                    continue;
+                }
                 let fill = fill.map(hex).unwrap_or_else(|| "none".to_string());
                 let (stroke, sw) = stroke.map(|(c, w)| (hex(c), w)).unwrap_or_else(|| ("none".to_string(), 0.0));
                 out.push_str(&format!(
@@ -108,6 +115,13 @@ pub fn to_svg(scene: &Scene) -> String {
     }
     out.push_str("</svg>\n");
     out
+}
+
+fn full_white(scene: &Scene, x: f32, y: f32, w: f32, h: f32, fill: Option<[u8; 4]>) -> bool {
+    let Some(color) = fill else {
+        return false;
+    };
+    color[0] > 250 && color[1] > 250 && color[2] > 250 && color[3] > 250 && x <= 1.0 && y <= 1.0 && w >= scene.width - 2.0 && h >= scene.height - 2.0
 }
 
 fn dash_attr(dash: Dash, width: f32) -> String {
