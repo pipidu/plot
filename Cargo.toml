@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/analysis", "crates/plot", "crates/app"]
+members = ["crates/core", "crates/analysis", "crates/plot", "crates/script", "crates/app"]
 default-members = ["crates/app"]
 
 [workspace.package]

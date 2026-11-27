@@ -406,6 +406,9 @@ pub struct Table {
     pub comment: String,
     #[serde(default = "default_true")]
     pub show_headers: bool,
+    /// 所在文件夹。空表示项目根。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<crate::FolderId>,
 }
 
 impl Default for Table {
@@ -416,6 +419,7 @@ impl Default for Table {
             columns: Vec::new(),
             comment: String::new(),
             show_headers: true,
+            folder: None,
         }
     }
 }

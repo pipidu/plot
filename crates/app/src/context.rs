@@ -1,7 +1,8 @@
 //! 右键菜单。对象上的操作放在这里，菜单栏只保留项目级命令。
 
 use sciplot_core::{
-    unique_name, ColumnMode, CurveKind, GraphId, MatrixId, NoteId, SurfaceMode, TableId, TablePlot3D,
+    unique_name, ColumnMode, CurveKind, FolderId, GraphId, MatrixId, NoteId, ProjectObject, SurfaceMode, TableId,
+    TablePlot3D,
 };
 
 use crate::app::{
@@ -52,6 +53,18 @@ pub(crate) fn section_notes(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     }
 }
 
+pub(crate) fn tree_folder(app: &mut SciPlotApp, ui: &mut egui::Ui, id: FolderId) {
+    if clicked_menu(ui, sciplot_core::t("新建子文件夹")) {
+        app.add_folder(Some(id));
+    }
+    if clicked_menu(ui, sciplot_core::t("重命名文件夹…")) {
+        app.begin_rename_folder(id);
+    }
+    if clicked_menu(ui, sciplot_core::t("删除文件夹")) {
+        app.delete_folder(id);
+    }
+}
+
 pub(crate) fn tree_table(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
     if clicked_menu(ui, sciplot_core::t("打开")) {
         app.open_tab(Tab::Table(id));
@@ -72,6 +85,9 @@ pub(crate) fn tree_table(app: &mut SciPlotApp, ui: &mut egui::Ui, id: TableId) {
         correlation(app, id);
     }
     ui.separator();
+    if clicked_menu(ui, sciplot_core::t("移到当前文件夹")) {
+        app.move_to_active_folder(ProjectObject::Table(id));
+    }
     if clicked_menu(ui, sciplot_core::t("删除表格")) {
         crate::app::ask_delete_table(app, id);
     }
@@ -83,6 +99,9 @@ pub(crate) fn tree_matrix(app: &mut SciPlotApp, ui: &mut egui::Ui, id: MatrixId)
     }
     matrix_actions(app, ui, id);
     ui.separator();
+    if clicked_menu(ui, sciplot_core::t("移到当前文件夹")) {
+        app.move_to_active_folder(ProjectObject::Matrix(id));
+    }
     if clicked_menu(ui, sciplot_core::t("删除矩阵")) {
         crate::app::ask_delete_matrix(app, id);
     }
@@ -100,6 +119,9 @@ pub(crate) fn tree_graph(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
     }
     export_items(app, ui, id);
     ui.separator();
+    if clicked_menu(ui, sciplot_core::t("移到当前文件夹")) {
+        app.move_to_active_folder(ProjectObject::Graph(id));
+    }
     if clicked_menu(ui, sciplot_core::t("删除图形")) {
         app.edit(sciplot_core::t("删除图形"), |project| {
             if project.delete_graph(id) {
@@ -114,6 +136,9 @@ pub(crate) fn tree_graph(app: &mut SciPlotApp, ui: &mut egui::Ui, id: GraphId) {
 pub(crate) fn tree_note(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
     if clicked_menu(ui, sciplot_core::t("打开")) {
         app.open_tab(Tab::Note(id));
+    }
+    if clicked_menu(ui, sciplot_core::t("移到当前文件夹")) {
+        app.move_to_active_folder(ProjectObject::Note(id));
     }
     if clicked_menu(ui, sciplot_core::t("删除备注")) {
         app.edit(sciplot_core::t("删除备注"), |project| {

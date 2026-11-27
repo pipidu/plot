@@ -29,6 +29,9 @@ pub fn window() -> &'static str {
 pub fn help() -> &'static str {
     sciplot_core::t("帮助")
 }
+pub fn scripting() -> &'static str {
+    sciplot_core::t("脚本")
+}
 
 const FORMULA_HELP_ZH: &str = "\
 表达式规则：用普通的算式写列公式和拟合公式。
@@ -55,7 +58,11 @@ const FORMULA_HELP_ZH: &str = "\
 
 例如：sin(col(\"X\")) * 2
 
-备注也可以当计算器。打开备注后点「运行备注」：每一行是一个表达式，`名字 = 表达式` 会记住这个数，后面的行可以用它。空行、# 和 // 会跳过。这用的是同一套公式引擎，不是 Python，也不能在备注里用 col() 读表格。
+列公式可以分支。if(条件, 为真时, 为假时) 和 条件 ? 为真时 : 为假时 只计算选中的一边。也可以写成缩进的 if / elif / else。两个整数相除仍然截断。
+
+以 python: 开头的列公式用程序内的 Python 子集逐行计算，可以用 col()、cell()、tablecol()、i 和 row。
+
+备注有两种算法。「运行备注」仍是逐行公式：`名字 = 表达式` 会记住这个数，空行、# 和 // 会跳过，这里不能用 col()。「执行脚本」运行程序内的 Python 子集，可以建表、画图、拟合和导出。这不是完整的 CPython。
 ";
 
 const FORMULA_HELP_EN: &str = "\
@@ -83,8 +90,28 @@ A cell can have its own formula, which overrides the column formula. Formula edi
 
 Example: sin(col(\"X\")) * 2
 
-A note can also be used as a calculator. Open it and choose Run note. Each line is an expression, and `name = expression` remembers the number for later lines. Blank lines, #, and // are skipped. This is the same formula engine, not Python, and a note cannot use col() to read a table.
+Column formulas can branch. if(condition, when true, when false) and condition ? when true : when false evaluate only the chosen side. An indented if / elif / else block works too. Dividing two integers still truncates.
+
+A column formula that starts with python: is evaluated row by row by the built-in Python subset. It can use col(), cell(), tablecol(), i, and row.
+
+A note has two runners. Run note still evaluates one formula per line: `name = expression` remembers the number, and blank lines, #, and // are skipped. That runner cannot use col(). Run script executes the built-in Python subset, which can create tables, plot, fit, and export. It is not a full CPython.
 ";
+
+pub fn script_help() -> String {
+    sciplot_core::tr!(
+        "脚本菜单和备注里的「执行脚本」使用程序内的 Python 子集，不是 CPython。\n\
+可以写 if/elif/else、for、while、def、列表和 table()/graph()/newTable()/plot()/Fit。\n\
+import math 和 from sciplot import * 不用写也会有这些函数。\n\
+脚本里的 / 是真除法，// 是向下取整。列公式里不带 python: 的 / 仍按整数截断。\n\
+newTable(名字, 列数, 行数)，setCell 和 setColName 的序号从 1 开始。",
+        "The Scripting menu and Run script in a note use the built-in Python subset, not CPython.\n\
+You can write if/elif/else, for, while, def, lists, and table()/graph()/newTable()/plot()/Fit.\n\
+import math and from sciplot import * are optional; those names are already available.\n\
+In a script, / is true division and // floors. A column formula without the python: prefix still truncates integer division.\n\
+newTable(name, columns, rows). setCell and setColName are numbered from 1."
+    )
+    .to_string()
+}
 
 pub fn formula_help() -> &'static str {
     sciplot_core::translate(FORMULA_HELP_ZH, FORMULA_HELP_EN)
@@ -96,9 +123,9 @@ const ABOUT_ZH: &str = "\
 表格、矩阵、多种二维图、三维曲面、拟合、微积分、插值、平滑、FFT，
 以及曲线/折线求交点（可限制 X 区间，也可与水平线、竖直线求交）。
 
-项目文件是 .splot。图形可以导出 PNG 和 SVG。
+项目可以存成 .splot 或压缩的 .splot.gz，也可以交换 .sciprj / .sciprj.gz 的一个子集。一部分 Origin 项目可以打开。图形可以导出 PNG、SVG 和 PDF。
 
-发布页有 Windows 程序，也有需要图形界面的 Linux 程序。Windows 是主要使用的系统。
+发布页有 Windows、Linux，以及未签名的 macOS 程序。
 ";
 
 const ABOUT_EN: &str = "\
@@ -108,9 +135,9 @@ Tables, matrices, many two-dimensional plots, three-dimensional surfaces, fittin
 calculus, interpolation, smoothing, FFT, and intersections of curves or polylines
 (an X range, a horizontal line, or a vertical line).
 
-Projects are .splot files. Graphs export to PNG and SVG.
+A project can be saved as .splot or compressed .splot.gz, and a subset of .sciprj / .sciprj.gz can be exchanged. Some Origin projects can be opened. Graphs export to PNG, SVG, and PDF.
 
-Releases include a Windows program and a Linux program that needs a graphical session. Windows is the main platform.
+Releases include Windows, Linux, and an unsigned macOS program.
 ";
 
 pub fn about() -> &'static str {

@@ -1187,6 +1187,9 @@ pub struct Graph {
     pub layers: Vec<Layer>,
     pub surface: Option<SurfaceSpec>,
     pub arrangement: LayerArrangement,
+    /// 所在文件夹。空表示项目根。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<crate::FolderId>,
 }
 
 impl Default for Graph {
@@ -1197,6 +1200,7 @@ impl Default for Graph {
             layers: vec![Layer::default()],
             surface: None,
             arrangement: LayerArrangement::default(),
+            folder: None,
         }
     }
 }

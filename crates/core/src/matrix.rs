@@ -18,6 +18,9 @@ pub struct Matrix {
     pub y_max: f64,
     pub formula: String,
     pub comment: String,
+    /// 所在文件夹。空表示项目根。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<crate::FolderId>,
 }
 
 impl Default for Matrix {
@@ -34,6 +37,7 @@ impl Default for Matrix {
             y_max: 1.0,
             formula: String::new(),
             comment: String::new(),
+            folder: None,
         }
     }
 }

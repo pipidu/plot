@@ -7,7 +7,7 @@ use crate::graph::{
 use crate::matrix::Matrix;
 use crate::table::{ColumnMode, ColumnType, Table, TableId};
 use crate::util::unique_name;
-use crate::{GraphId, MatrixId, NoteId};
+use crate::{FolderId, GraphId, MatrixId, NoteId};
 
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -17,6 +17,30 @@ pub struct Note {
     pub id: NoteId,
     pub name: String,
     pub text: String,
+    /// 所在文件夹。空表示项目根。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<FolderId>,
+}
+
+/// 项目里的文件夹。内容仍在表格、矩阵、图形和备注列表里，用 `folder` 指回来。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Folder {
+    pub id: FolderId,
+    pub name: String,
+    /// 空表示直接放在项目根下。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<FolderId>,
+}
+
+impl Default for Folder {
+    fn default() -> Self {
+        Self {
+            id: FolderId(0),
+            name: String::new(),
+            parent: None,
+        }
+    }
 }
 
 impl Default for Note {
@@ -25,6 +49,7 @@ impl Default for Note {
             id: NoteId(0),
             name: crate::locale::t("备注").to_string(),
             text: String::new(),
+            folder: None,
         }
     }
 }
@@ -39,6 +64,12 @@ pub struct Project {
     pub notes: Vec<Note>,
     pub log: Vec<String>,
     pub next_id: u64,
+    /// 文件夹。根本身不占一条记录。
+    #[serde(default)]
+    pub folders: Vec<Folder>,
+    /// 项目树当前看着的文件夹。空表示根。不参与计算，只记住浏览位置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_folder: Option<FolderId>,
 }
 
 impl Default for Project {
@@ -57,6 +88,8 @@ impl Project {
             notes: Vec::new(),
             log: Vec::new(),
             next_id: 1,
+            folders: Vec::new(),
+            active_folder: None,
         }
     }
 
@@ -68,7 +101,7 @@ impl Project {
         }
     }
 
-    fn alloc(&mut self) -> u64 {
+    pub(crate) fn alloc(&mut self) -> u64 {
         let id = self.next_id.max(1);
         self.next_id = id + 1;
         id
@@ -98,6 +131,9 @@ impl Project {
         for note in &self.notes {
             bump(note.id.0);
         }
+        for folder in &self.folders {
+            bump(folder.id.0);
+        }
         if self.next_id <= max_id {
             self.next_id = max_id + 1;
         }
@@ -106,21 +142,27 @@ impl Project {
     pub fn new_table(&mut self, name: &str) -> TableId {
         let id = TableId(self.alloc());
         let name = unique_name(&self.table_names(), name);
-        self.tables.push(Table::new(id, name));
+        let mut table = Table::new(id, name);
+        table.folder = self.placement();
+        self.tables.push(table);
         id
     }
 
     pub fn new_matrix(&mut self, name: &str, rows: usize, cols: usize) -> MatrixId {
         let id = MatrixId(self.alloc());
         let name = unique_name(&self.matrix_names(), name);
-        self.matrices.push(Matrix::new(id, name, rows, cols));
+        let mut matrix = Matrix::new(id, name, rows, cols);
+        matrix.folder = self.placement();
+        self.matrices.push(matrix);
         id
     }
 
     pub fn new_graph(&mut self, name: &str) -> GraphId {
         let id = GraphId(self.alloc());
         let name = unique_name(&self.graph_names(), name);
-        self.graphs.push(Graph::new(id, name));
+        let mut graph = Graph::new(id, name);
+        graph.folder = self.placement();
+        self.graphs.push(graph);
         id
     }
 
@@ -129,6 +171,7 @@ impl Project {
         let id = GraphId(self.alloc());
         let mut graph = template.into_graph(id);
         graph.name = unique_name(&self.graph_names(), &graph.name);
+        graph.folder = self.placement();
         self.graphs.push(graph);
         id
     }
@@ -140,6 +183,7 @@ impl Project {
             id,
             name,
             text: String::new(),
+            folder: self.placement(),
         });
         id
     }
@@ -400,6 +444,7 @@ impl Project {
                 crate::trf!("不是 SciPlot 项目文件：{err}", "This is not a SciPlot project: {err}", err = err)
             })?;
             project.fix_ids();
+            project.sanitize_folders();
             return Ok(project);
         }
         let legacy = ["tables", "graphs", "matrices", "notes"].iter().any(|key| obj.contains_key(*key));
@@ -410,6 +455,7 @@ impl Project {
             crate::trf!("不是 SciPlot 项目文件：{err}", "This is not a SciPlot project: {err}", err = err)
         })?;
         project.fix_ids();
+        project.sanitize_folders();
         Ok(project)
     }
 

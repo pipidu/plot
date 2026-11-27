@@ -27,6 +27,7 @@ struct Session {
 }
 
 pub fn serve(project: Option<&str>) -> Result<(), String> {
+    sciplot_script::install();
     let mut session = Session::open(project, true)?;
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();

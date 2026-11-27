@@ -1469,8 +1469,12 @@ fn unique_named(dir: &Path, stem: &str, ext: &str, used: &mut std::collections::
 
 fn open_project(project: &mut Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
     let path = req_str(args, "path")?;
-    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let loaded = Project::from_json(&text)?;
+    let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("project.splot");
+    let loaded = sciplot_core::load_project_bytes(name, &bytes)?;
     let name = loaded.name.clone();
     *project = loaded;
     let mut output = ToolOutput::new(
@@ -1484,8 +1488,7 @@ fn open_project(project: &mut Project, args: &Map<String, Value>) -> Result<Tool
 
 fn save_project(project: &Project, args: &Map<String, Value>) -> Result<ToolOutput, String> {
     let path = req_str(args, "path")?;
-    let text = project.to_json()?;
-    write_bytes(Path::new(&path), text.as_bytes())?;
+    sciplot_core::save_project_path(project, Path::new(&path))?;
     let mut output = ToolOutput::new(
         sciplot_core::trf!("已保存项目到 {path}", "Saved the project to {path}", path = path),
         json!({"path": path}),
@@ -2123,6 +2126,40 @@ mod tests {
         });
         assert!((loaded.title_size - 23.0).abs() < 1e-4);
         assert_eq!(loaded.api_port, 1111);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tools_still_create_tables_and_roundtrip_new_project_files() {
+        let dir = std::env::temp_dir().join(format!("sciplot-tools-batch5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut project = Project::new("工具");
+        let created = run(
+            &mut project,
+            "create_table",
+            json!({"name": "实验", "columns": [{"name": "A", "values": [1, 2]}]}),
+        );
+        assert!(created.open_table);
+        assert!(project.tables.iter().any(|table| table.name == "实验"));
+
+        let gz = dir.join("工具.splot.gz");
+        run(&mut project, "save_project", json!({"path": gz}));
+        assert_eq!(&std::fs::read(&gz).unwrap()[..2], &[0x1f, 0x8b]);
+        let mut fresh = Project::new("空");
+        run(&mut fresh, "open_project", json!({"path": gz}));
+        assert!(fresh.tables.iter().any(|table| table.name == "实验"));
+
+        let sciprj = dir.join("工具.sciprj");
+        run(&mut project, "save_project", json!({"path": sciprj}));
+        let mut xml = Project::new("空");
+        run(&mut xml, "open_project", json!({"path": sciprj}));
+        assert!(xml.tables.iter().any(|table| table.name == "实验"));
+
+        let plain = dir.join("plain");
+        run(&mut project, "save_project", json!({"path": plain}));
+        let text = std::fs::read_to_string(&plain).unwrap();
+        assert!(Project::from_json(&text).unwrap().tables.iter().any(|table| table.name == "实验"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -5,6 +5,8 @@
 //! 列公式里可以用 `col("列名")`、`col("A")`（列名优先，没有同名列时才按字母列标）、`col(1)`（从 1 开始的位置）、`cell("A", 行号)`、`i`（从 1 开始的行号），以及 `tablecol("表","列")` 读另一张表的同一行。
 //! 某一格还可以有自己的公式，算的时候盖过这一列的公式。
 //! 整数相除会截断，需要小数时写成 `1.0/2`。
+//! 分支不走 evalexpr 的函数调用：`if(条件, 真, 假)` 和 `条件 ? 真 : 假` 只计算选中的一边，也可以写成缩进的 `if / elif / else`。
+//! 以 `python:` 开头的列公式交给内嵌脚本引擎；脚本引擎没装上时会报错，普通公式不受影响。
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -34,8 +36,36 @@ thread_local! {
 const FUNCTIONS: &[&str] = &[
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh",
     "atanh", "exp", "ln", "log", "log10", "log2", "sqrt", "abs", "floor", "ceil", "round", "hypot",
-    "sign", "pow", "min", "max", "cbrt", "col", "cell", "tablecol",
+    "sign", "pow", "min", "max", "cbrt", "col", "cell", "tablecol", "if", "elif", "else",
 ];
+
+/// 以 `python:` 或 `#python` 开头的列公式交给脚本引擎，不在 evalexpr 里算。
+pub fn is_python_formula(formula: &str) -> bool {
+    let trimmed = formula.trim();
+    trimmed.starts_with("python:") || trimmed.starts_with("#python")
+}
+
+pub type PythonColumnFn = fn(&Table, &str, &[Table]) -> Result<EvalColumn, String>;
+
+thread_local! {
+    static PYTHON_COLUMN: Cell<Option<PythonColumnFn>> = const { Cell::new(None) };
+}
+
+pub fn set_python_column_hook(hook: Option<PythonColumnFn>) {
+    PYTHON_COLUMN.with(|slot| slot.set(hook));
+}
+
+fn python_column(table: &Table, formula: &str, others: &[Table]) -> Result<EvalColumn, String> {
+    let hook = PYTHON_COLUMN.with(|slot| slot.get());
+    match hook {
+        Some(hook) => hook(table, formula, others),
+        None => Err(crate::tr!(
+            "这一列是 Python 公式，但脚本引擎还没有装上。",
+            "This column is a Python formula, but the scripting engine is not installed."
+        )
+        .into()),
+    }
+}
 
 pub struct CompiledExpr {
     tree: Node,
@@ -69,6 +99,37 @@ pub fn eval_column(table: &Table, formula: &str) -> Result<EvalColumn, String> {
 
 /// 和 `eval_column` 一样，另外可以用 `tablecol("表","列")` 读其他表的同一行。
 pub fn eval_column_with(table: &Table, formula: &str, others: &[Table]) -> Result<EvalColumn, String> {
+    if is_python_formula(formula) {
+        return python_column(table, formula, others);
+    }
+    if crate::branch::uses_branching(formula) {
+        publish(table, others);
+        let n = table.nrows();
+        let mut values = Vec::with_capacity(n);
+        let mut warnings = 0;
+        let mut first_error = None;
+        for row in 0..n {
+            match eval_stored(formula, row) {
+                Ok(value) if value.is_finite() => values.push(Some(value)),
+                Ok(_) => {
+                    warnings += 1;
+                    values.push(None);
+                }
+                Err(err) => {
+                    warnings += 1;
+                    if first_error.is_none() {
+                        first_error = Some(crate::trf!("第 {} 行：{err}", "Row {}: {err}", row + 1, err = err));
+                    }
+                    values.push(None);
+                }
+            }
+        }
+        return Ok(EvalColumn {
+            values,
+            warnings,
+            first_error,
+        });
+    }
     let compiled = CompiledExpr::compile(formula)?;
     publish(table, others);
     let n = table.nrows();
@@ -144,17 +205,40 @@ pub fn recalculate_table(table: &mut Table, others: &[Table]) -> RecalcReport {
     for index in 0..table.columns.len() {
         let formula = table.columns[index].formula.trim().to_string();
         if !formula.is_empty() {
-            match CompiledExpr::compile(&formula) {
-                Ok(compiled) => {
-                    for row in 0..rows {
-                        if !table.columns[index].cell_formula(row).trim().is_empty() {
-                            continue;
+            if is_python_formula(&formula) {
+                match python_column(table, &formula, others) {
+                    Ok(evaluated) => {
+                        for row in 0..rows {
+                            if !table.columns[index].cell_formula(row).trim().is_empty() {
+                                continue;
+                            }
+                            let value = evaluated
+                                .values
+                                .get(row)
+                                .copied()
+                                .flatten()
+                                .ok_or_else(|| evaluated.first_error.clone().unwrap_or_else(|| crate::locale::t("公式没有得到有限数值").into()));
+                            write_evaluated(&mut table.columns[index], row, value, &mut report);
                         }
-                        write_evaluated(&mut table.columns[index], row, eval_at(&compiled, row), &mut report);
+                        if evaluated.warnings > 0 {
+                            if let Some(err) = &evaluated.first_error {
+                                note_formula_error(&mut report, err);
+                            }
+                        }
                     }
-                    publish(table, others);
+                    Err(err) => note_formula_error(&mut report, &err),
                 }
-                Err(err) => note_formula_error(&mut report, &err),
+                publish(table, others);
+            } else if let Err(err) = compile_guard(&formula) {
+                note_formula_error(&mut report, &err);
+            } else {
+                for row in 0..rows {
+                    if !table.columns[index].cell_formula(row).trim().is_empty() {
+                        continue;
+                    }
+                    write_evaluated(&mut table.columns[index], row, eval_stored(&formula, row), &mut report);
+                }
+                publish(table, others);
             }
         }
         for row in 0..rows {
@@ -167,14 +251,17 @@ pub fn recalculate_table(table: &mut Table, others: &[Table]) -> RecalcReport {
             if expr.is_empty() {
                 continue;
             }
-            let compiled = match CompiledExpr::compile(&expr) {
-                Ok(compiled) => compiled,
-                Err(err) => {
-                    note_formula_error(&mut report, &err);
-                    continue;
-                }
-            };
-            write_evaluated(&mut table.columns[index], row, eval_at(&compiled, row), &mut report);
+            if is_python_formula(&expr) {
+                note_formula_error(
+                    &mut report,
+                    crate::tr!(
+                        "单元格公式请用 if() 或三元运算符，不要写 python:。",
+                        "Cell formulas use if() or ? :, not a python: block."
+                    ),
+                );
+                continue;
+            }
+            write_evaluated(&mut table.columns[index], row, eval_stored(&expr, row), &mut report);
             publish(table, others);
         }
     }
@@ -200,14 +287,21 @@ pub fn commit_cell(table: &mut Table, column: usize, row: usize, formula_mode: b
             return Ok(());
         }
         publish(table, others);
-        let compiled = CompiledExpr::compile(&expr).map_err(|err| {
+        if is_python_formula(&expr) {
+            return Err(crate::tr!(
+                "单元格公式请用 if() 或三元运算符，不要写 python:。",
+                "Cell formulas use if() or ? :, not a python: block."
+            )
+            .into());
+        }
+        if let Err(err) = compile_guard(&expr) {
             if row < table.columns[column].texts.len() {
                 table.columns[column].texts[row] = raw.trim().to_string();
             }
-            explain_error(&err)
-        })?;
+            return Err(explain_error(&err));
+        }
         let mut report = RecalcReport::default();
-        write_evaluated(&mut table.columns[column], row, eval_at(&compiled, row), &mut report);
+        write_evaluated(&mut table.columns[column], row, eval_stored(&expr, row), &mut report);
         if let Some(err) = report.first_error {
             // 计算失败时把公式留在格子里，否则下一帧编辑框会从空白文本重新加载。
             if row < table.columns[column].texts.len() {
@@ -250,10 +344,22 @@ fn snapshot(table: &Table) -> ColumnStore {
     ColumnStore { names, values }
 }
 
-fn eval_at(compiled: &CompiledExpr, row: usize) -> Result<f64, String> {
+fn compile_guard(expr: &str) -> Result<(), String> {
+    if crate::branch::uses_branching(expr) {
+        return Ok(());
+    }
+    CompiledExpr::compile(expr).map(|_| ())
+}
+
+fn eval_stored(expr: &str, row: usize) -> Result<f64, String> {
     ROW.with(|current| current.set(row));
     let row_number = row as f64 + 1.0;
-    compiled.eval(&[("i", row_number), ("row", row_number)])
+    let vars = [("i", row_number), ("row", row_number)];
+    if crate::branch::uses_branching(expr) {
+        crate::branch::eval_extended(expr, &vars).and_then(crate::branch::value_as_f64)
+    } else {
+        CompiledExpr::compile(expr)?.eval(&vars)
+    }
 }
 
 fn write_evaluated(column: &mut crate::table::Column, row: usize, value: Result<f64, String>, report: &mut RecalcReport) {
@@ -416,6 +522,15 @@ fn format_coeff(v: f64) -> String {
 }
 
 fn eval_tree(tree: &Node, vars: &[(&str, f64)]) -> Result<f64, String> {
+    eval_tree_value(tree, vars)?.as_number().map_err(|err| err.to_string())
+}
+
+pub(crate) fn eval_with_vars(expr: &str, vars: &[(&str, f64)]) -> Result<Value, String> {
+    let tree = build_operator_tree(expr).map_err(|err| err.to_string())?;
+    eval_tree_value(&tree, vars)
+}
+
+fn eval_tree_value(tree: &Node, vars: &[(&str, f64)]) -> Result<Value, String> {
     MATH.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         if borrowed.is_none() {
@@ -431,8 +546,7 @@ fn eval_tree(tree: &Node, vars: &[(&str, f64)]) -> Result<f64, String> {
             ctx.set_value((*name).to_string(), Value::Float(*value))
                 .map_err(|err| err.to_string())?;
         }
-        let value = tree.eval_with_context(ctx).map_err(|err| err.to_string())?;
-        value.as_number().map_err(|err| err.to_string())
+        tree.eval_with_context(ctx).map_err(|err| err.to_string())
     })
 }
 
@@ -930,7 +1044,12 @@ pub fn eval_note(text: &str) -> NoteRun {
         }
         let (name, expr) = split_assignment(source);
         let borrowed: Vec<(&str, f64)> = vars.iter().map(|(key, value)| (key.as_str(), *value)).collect();
-        match CompiledExpr::compile(expr).and_then(|compiled| compiled.eval(&borrowed)) {
+        let value = if crate::branch::uses_branching(expr) {
+            crate::branch::eval_extended(expr, &borrowed).and_then(crate::branch::value_as_f64)
+        } else {
+            CompiledExpr::compile(expr).and_then(|compiled| compiled.eval(&borrowed))
+        };
+        match value {
             Ok(value) => {
                 if let Some(name) = name {
                     if let Some(slot) = vars.iter_mut().find(|(key, _)| key == name) {
@@ -1173,5 +1292,43 @@ mod tests {
         assert!(report.first_error.is_none(), "{:?}", report.first_error);
         assert_eq!(table.columns[1].numbers[0], Some(10.0));
         assert_eq!(table.columns[0].numbers[0], Some(6.0));
+    }
+
+    #[test]
+    fn branching_is_lazy_and_integer_division_stays() {
+        assert_eq!(CompiledExpr::compile("1/2").unwrap().eval(&[]).unwrap(), 0.0);
+        assert!((CompiledExpr::compile("1.0/2").unwrap().eval(&[]).unwrap() - 0.5).abs() < 1e-12);
+
+        let mut table = Table::new(TableId(1), "t");
+        table.columns.clear();
+        table.add_numeric_column("A", ColumnMode::X, &[0.0, 2.0, 5.0]);
+        table.add_column("B", ColumnMode::Y);
+        apply_formula(&mut table, 1, "if(col(\"A\")>1, col(\"A\"), 1/0)").unwrap();
+        assert!(table.columns[1].numbers[0].is_none());
+        assert_eq!(table.columns[1].numbers[1], Some(2.0));
+        assert_eq!(table.columns[1].numbers[2], Some(5.0));
+
+        apply_formula(&mut table, 1, "col(\"A\")>1 ? col(\"A\")*2 : 0").unwrap();
+        assert_eq!(table.columns[1].numbers[0], Some(0.0));
+        assert_eq!(table.columns[1].numbers[1], Some(4.0));
+
+        apply_formula(&mut table, 1, "if(1, 1, 2)/2").unwrap();
+        assert_eq!(table.columns[1].numbers[0], Some(0.0));
+
+        let block = "if col(\"A\") > 1:\n    col(\"A\")\nelif col(\"A\") < 1:\n    7\nelse:\n    1/0\n";
+        apply_formula(&mut table, 1, block).unwrap();
+        assert_eq!(table.columns[1].numbers[0], Some(7.0));
+        assert_eq!(table.columns[1].numbers[1], Some(2.0));
+        assert_eq!(table.columns[1].numbers[2], Some(5.0));
+
+        let run = eval_note("a = if(1, 2, 1/0)\na+1\n");
+        assert_eq!(run.lines[0].output, "2");
+        assert_eq!(run.lines[1].output, "3");
+
+        let err = match eval_column(&table, "python:\n1\n") {
+            Err(err) => err,
+            Ok(_) => panic!("python formula should fail without a hook"),
+        };
+        assert!(err.contains("Python") || err.contains("脚本"), "{err}");
     }
 }

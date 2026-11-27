@@ -65,6 +65,8 @@ jobs:
             echo
             echo "Linux：下载 \`${linux}\`，加上可执行权限后运行：\`chmod +x ${linux} && ./${linux}\`。面向 64 位 Linux，需要图形环境（X11 或 Wayland）。"
             echo
+            echo "macOS：未签名、未公证的 Apple Silicon 应用会在这个发布创建之后附到同一个标签。解压后是 SciPlot.app。没有 Intel 包，也没有安装程序。"
+            echo
             echo "提交说明：$(git log -1 --pretty=%s)"
             echo
             echo "SHA256："
@@ -90,3 +92,54 @@ jobs:
               --notes-file notes.md \
               --latest
           fi
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
+
+      - name: 编译 macOS
+        env:
+          SCIPLOT_BUILD: ${{ github.run_number }}
+        run: cargo build -p sciplot --release
+
+      - name: 打包未签名的应用
+        env:
+          SCIPLOT_BUILD: ${{ github.run_number }}
+        run: bash scripts/package-macos.sh target/release/sciplot dist macos-aarch64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sciplot-macos
+          path: dist/*
+
+  attach-macos:
+    needs: [release, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本号
+        id: version
+        run: |
+          version=$(awk '/^\[workspace.package\]/{flag=1; next} /^\[/{flag=0} flag && /^version = /{gsub(/"/, "", $3); print $3; exit}' Cargo.toml)
+          test -n "$version"
+          echo "tag=v${version}-b${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sciplot-macos
+          path: dist
+
+      - name: 附到已有发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber

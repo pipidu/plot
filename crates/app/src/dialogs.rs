@@ -92,7 +92,10 @@ fn title_of(dialog: &Dialog) -> String {
         Dialog::Update(crate::update::UpdateView::Failed(_)) => sciplot_core::t("检查更新").into(),
         Dialog::Path { action, .. } => match action {
             PathAction::Open => sciplot_core::t("打开项目").into(),
+            PathAction::Append => sciplot_core::t("追加项目…").into(),
             PathAction::SaveAs => sciplot_core::t("另存为").into(),
+            PathAction::SaveCompressed => sciplot_core::t("另存为压缩项目…").into(),
+            PathAction::ExportSciprj => sciplot_core::t("导出 SciDAVis 项目…").into(),
             PathAction::ImportCsv => sciplot_core::t("导入 CSV").into(),
             PathAction::ImportImage => sciplot_core::tr!("导入图像", "Import image").into(),
             PathAction::ExportCsv => sciplot_core::t("导出 CSV").into(),
@@ -624,7 +627,7 @@ fn prefs_dialog(app: &mut SciPlotApp, ui: &mut egui::Ui, prefs: &mut crate::pref
         ui.strong(sciplot_core::t("语言"));
         ui.horizontal(|ui| {
             for language in sciplot_core::Language::all() {
-                if ui.selectable_value(&mut prefs.language, language, language.label()).changed() {
+                if ui.selectable_value(&mut prefs.language, *language, language.label()).changed() {
                     sciplot_core::set_language(prefs.language);
                 }
             }
@@ -855,7 +858,10 @@ fn path_dialog(
         ui.text_edit_singleline(extra);
     }
     let target = crate::app::resolve_user_path(app, path);
-    let verb = if matches!(action, PathAction::Open | PathAction::ImportCsv | PathAction::ImportImage) {
+    let verb = if matches!(
+        action,
+        PathAction::Open | PathAction::Append | PathAction::ImportCsv | PathAction::ImportImage
+    ) {
         sciplot_core::t("将读取")
     } else {
         sciplot_core::t("将写入")

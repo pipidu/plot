@@ -1,0 +1,12 @@
+[package]
+name = "sciplot-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "In-app Python subset and SciDAVis-style object API"
+
+[dependencies]
+sciplot-core = { path = "../core" }
+sciplot-analysis = { path = "../analysis" }
+sciplot-plot = { path = "../plot" }

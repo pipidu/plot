@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use egui_dock::{DockArea, DockState, TabViewer};
 use egui_extras::{Column, TableBuilder};
 use sciplot_core::{
-    demo_project, export_csv_with, import_csv_files, import_csv_with, tr, AnnotationKind, CsvDelimiter,
-    CsvEncoding, CsvHeader, CsvImportOptions, CsvLayout, CurveKind, DataSource, DecimalMark, Graph, GraphId,
-    GraphTemplate, History, LayerAlign, LayerArrangement, MatrixId, NoteId, NumericFormat, PanelPreset, Project,
-    SortMode, SurfaceMode, SurfaceSource, TableId,
+    demo_project, export_csv_with, import_csv_files, import_csv_with, load_project_bytes, save_project_path, tr,
+    AnnotationKind, CsvDelimiter, CsvEncoding, CsvHeader, CsvImportOptions, CsvLayout, CurveKind, DataSource,
+    DecimalMark, FolderId, Graph, GraphId, GraphTemplate, History, LayerAlign, LayerArrangement, MatrixId, NoteId,
+    NumericFormat, PanelPreset, Project, ProjectFormat, ProjectObject, SortMode, SurfaceMode, SurfaceSource, TableId,
 };
 use sciplot_plot::{
     data_to_screen, export_scene, nearest_curve, nearest_point, page_points, pan_limits, pixel_size, print_pdf, render,
@@ -219,6 +219,9 @@ pub enum RangeOp {
 pub enum PathAction {
     Open,
     SaveAs,
+    SaveCompressed,
+    ExportSciprj,
+    Append,
     ImportCsv,
     ImportImage,
     ExportCsv,
@@ -676,6 +679,10 @@ pub struct SciPlotApp {
     pub(crate) fit_plugins: Vec<sciplot_analysis::FitPlugin>,
     note_result: Option<(NoteId, String)>,
     api_failed: Option<u16>,
+    /// 项目树是否把子文件夹里的对象也列出来。不写入项目。
+    include_subfolders: bool,
+    folder_edit: Option<FolderId>,
+    folder_edit_text: String,
 }
 
 pub(crate) struct PeakPick {
@@ -735,6 +742,7 @@ impl SciPlotApp {
     }
 
     fn empty(project: Project) -> Self {
+        sciplot_script::install();
         let mut dock = DockState::new(Vec::<Tab>::new());
         chinese_dock(&mut dock);
         let mut app = Self {
@@ -783,6 +791,9 @@ impl SciPlotApp {
             peak_pick: None,
             fit_plugins: Vec::new(),
             note_result: None,
+            include_subfolders: false,
+            folder_edit: None,
+            folder_edit_text: String::new(),
         };
         app.reload_font_silent();
         app
@@ -936,6 +947,15 @@ impl SciPlotApp {
 
     pub fn save_current(&mut self) -> bool {
         if let Some(path) = self.path.clone() {
+            if ProjectFormat::from_path(&path) == Some(ProjectFormat::Origin) {
+                self.status = sciplot_core::tr!(
+                    "Origin 项目只能打开，请另存为 .splot 或 .sciprj。",
+                    "Origin projects can only be opened. Save as .splot or .sciprj."
+                )
+                .into();
+                start_file(self, PathAction::SaveAs, "");
+                return false;
+            }
             self.write_path(&path)
         } else {
             self.status = sciplot_core::t("还没有文件名，请用「另存为」").into();
@@ -945,16 +965,18 @@ impl SciPlotApp {
     }
 
     fn write_path(&mut self, path: &Path) -> bool {
-        let path = with_splot_extension(path);
-        match self
-            .project
-            .to_json()
-            .and_then(|text| std::fs::write(&path, text).map_err(|err| err.to_string()))
-        {
+        self.store_project(path, true)
+    }
+
+    fn store_project(&mut self, path: &Path, remember_path: bool) -> bool {
+        let path = normalize_project_path(path);
+        match save_project_path(&self.project, &path) {
             Ok(()) => {
-                self.path = Some(path.to_path_buf());
-                self.dirty = false;
-                remember(&mut self.recent, &path);
+                if remember_path {
+                    self.path = Some(path.clone());
+                    self.dirty = false;
+                    remember(&mut self.recent, &path);
+                }
                 self.note_dir(&path);
                 self.status = sciplot_core::trf!("已保存 {}", "Saved {}", path.display());
                 true
@@ -974,8 +996,12 @@ impl SciPlotApp {
         }
         match action {
             PathAction::Open => self.load_path(&path),
-            PathAction::SaveAs => {
+            PathAction::Append => self.append_path(&path),
+            PathAction::SaveAs | PathAction::SaveCompressed => {
                 self.write_path(&path);
+            }
+            PathAction::ExportSciprj => {
+                self.store_project(&path, false);
             }
             PathAction::ImportImage => self.import_image(&path),
             PathAction::ImportCsv => {
@@ -1064,28 +1090,53 @@ impl SciPlotApp {
             });
             return;
         }
-        match std::fs::read_to_string(path)
-            .map_err(|err| err.to_string())
-            .and_then(|text| Project::from_json(&text))
-        {
+        match read_project_file(path) {
             Ok(project) => {
+                let origin = ProjectFormat::from_path(path) == Some(ProjectFormat::Origin);
                 self.project = project;
                 self.history = History::new();
                 self.views.clear();
-                self.path = Some(path.to_path_buf());
-                self.dirty = false;
-                remember(&mut self.recent, path);
+                self.path = if origin { None } else { Some(path.to_path_buf()) };
+                self.dirty = origin;
+                if !origin {
+                    remember(&mut self.recent, path);
+                }
                 self.note_dir(path);
                 self.rebuild_dock(false);
-                self.status = sciplot_core::trf!("已打开 {}", "Opened {}", path.display());
+                self.status = if origin {
+                    sciplot_core::trf!(
+                        "已打开 Origin 项目 {}。图、文本列和分析没有导入，请另存为。",
+                        "Opened Origin project {}. Graphs, text columns, and analysis were not imported. Save as a new file.",
+                        path.display()
+                    )
+                } else {
+                    sciplot_core::trf!("已打开 {}", "Opened {}", path.display())
+                };
             }
-            Err(err) => {
-                self.status = sciplot_core::trf!(
-                    "打不开这个项目。请选择 .splot 文件。{err}",
-                    "Could not open this project. Choose a .splot file. {err}",
-                    err = err
-                )
+            Err(err) => self.status = err,
+        }
+    }
+
+    fn append_path(&mut self, path: &Path) {
+        match read_project_file(path) {
+            Ok(incoming) => {
+                let name = incoming.name.clone();
+                if self
+                    .edit(sciplot_core::t("追加项目…"), move |project| {
+                        project.append_project(&incoming);
+                        Ok(())
+                    })
+                    .is_some()
+                {
+                    self.note_dir(path);
+                    self.status = sciplot_core::trf!(
+                        "已把「{name}」追加进当前项目",
+                        "Appended \"{name}\" to the current project",
+                        name = name
+                    );
+                }
             }
+            Err(err) => self.status = err,
         }
     }
 
@@ -2164,6 +2215,7 @@ fn menus(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     egui::menu::bar(ui, |ui| {
         ui.menu_button(i18n::file(), |ui| file_menu(app, ui));
         ui.menu_button(i18n::edit(), |ui| edit_menu(app, ui));
+        ui.menu_button(i18n::scripting(), |ui| scripting_menu(app, ui));
         ui.menu_button(i18n::settings(), |ui| {
             if clicked(ui, sciplot_core::t("默认样式与字体…"), "") {
                 app.dialog = Some(Dialog::Prefs(app.prefs.clone()));
@@ -2443,6 +2495,15 @@ fn file_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     if clicked(ui, sciplot_core::t("另存为…"), "") {
         start_file(app, PathAction::SaveAs, "");
     }
+    if clicked(ui, sciplot_core::t("另存为压缩项目…"), "") {
+        start_file(app, PathAction::SaveCompressed, "");
+    }
+    if clicked(ui, sciplot_core::t("导出 SciDAVis 项目…"), "") {
+        start_file(app, PathAction::ExportSciprj, "");
+    }
+    if clicked(ui, sciplot_core::t("追加项目…"), "") {
+        start_file(app, PathAction::Append, "");
+    }
     if clicked(ui, sciplot_core::t("导入 CSV…"), "") {
         open_import(app);
     }
@@ -2603,6 +2664,25 @@ pub(crate) fn range_dialog(graph: GraphId, layer: usize, curve: usize, op: Range
     }
 }
 
+fn scripting_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
+    if clicked(ui, sciplot_core::t("执行当前备注"), "") {
+        app.execute_focused_note();
+    }
+    if clicked(ui, sciplot_core::t("求值当前备注"), "") {
+        app.evaluate_focused_note();
+    }
+    if clicked(ui, sciplot_core::t("新建脚本备注"), "") {
+        app.new_script_note();
+    }
+    ui.separator();
+    if clicked(ui, sciplot_core::t("脚本说明"), "") {
+        app.dialog = Some(Dialog::Message {
+            title: sciplot_core::t("脚本说明").into(),
+            text: i18n::script_help(),
+        });
+    }
+}
+
 fn window_menu(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     ui.checkbox(&mut app.show_tree, sciplot_core::t("项目树"));
     ui.checkbox(&mut app.show_log, sciplot_core::t("日志"));
@@ -2630,29 +2710,52 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
     if response.lost_focus() {
         app.pushed_name = false;
     }
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut app.include_subfolders, sciplot_core::t("含子文件夹"));
+        if ui.button(sciplot_core::t("新建文件夹")).clicked() {
+            app.add_folder(app.project.active_folder);
+        }
+    });
     egui::ScrollArea::vertical().show(ui, |ui| {
+        let root_selected = app.project.active_folder.is_none();
+        let root = tree_row(ui, root_selected, sciplot_core::t("（根）"));
+        if root.clicked() {
+            app.project.active_folder = None;
+        }
+        root.context_menu(|ui| {
+            if clicked_menu(ui, sciplot_core::t("新建文件夹")) {
+                app.add_folder(None);
+            }
+        });
+        draw_folders(app, ui, None);
+        let view = app.project.active_folder;
+        let nested = app.include_subfolders;
         let tables: Vec<(TableId, String)> = app
             .project
             .tables
             .iter()
+            .filter(|table| app.project.folder_visible(view, nested, table.folder))
             .map(|t| (t.id, t.name.clone()))
             .collect();
         let matrices: Vec<(MatrixId, String)> = app
             .project
             .matrices
             .iter()
+            .filter(|matrix| app.project.folder_visible(view, nested, matrix.folder))
             .map(|m| (m.id, m.name.clone()))
             .collect();
         let graphs: Vec<(GraphId, String)> = app
             .project
             .graphs
             .iter()
+            .filter(|graph| app.project.folder_visible(view, nested, graph.folder))
             .map(|g| (g.id, g.name.clone()))
             .collect();
         let notes: Vec<(NoteId, String)> = app
             .project
             .notes
             .iter()
+            .filter(|note| app.project.folder_visible(view, nested, note.folder))
             .map(|n| (n.id, n.name.clone()))
             .collect();
         let tables_header = egui::CollapsingHeader::new(sciplot_core::t("表格"))
@@ -2712,6 +2815,47 @@ fn tree(app: &mut SciPlotApp, ui: &mut egui::Ui) {
             .header_response
             .context_menu(|ui| crate::context::section_notes(app, ui));
     });
+}
+
+fn draw_folders(app: &mut SciPlotApp, ui: &mut egui::Ui, parent: Option<FolderId>) {
+    let ids = app.project.child_folders(parent);
+    for id in ids {
+        let name = app
+            .project
+            .folder(id)
+            .map(|folder| folder.name.clone())
+            .unwrap_or_default();
+        let selected = app.project.active_folder == Some(id);
+        let label = if selected {
+            egui::RichText::new(name).strong()
+        } else {
+            egui::RichText::new(name)
+        };
+        if app.folder_edit == Some(id) {
+            let mut text = app.folder_edit_text.clone();
+            let mut commit = false;
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut text);
+                commit = ui.button(sciplot_core::t("确定")).clicked();
+            });
+            app.folder_edit_text = text.clone();
+            if commit {
+                app.folder_edit = None;
+                app.edit(sciplot_core::t("重命名文件夹…"), move |project| {
+                    project.rename_folder(id, &text)
+                });
+            }
+        }
+        let header = egui::CollapsingHeader::new(label).default_open(true).show(ui, |ui| {
+            draw_folders(app, ui, Some(id));
+        });
+        if header.header_response.clicked() {
+            app.project.active_folder = Some(id);
+        }
+        header
+            .header_response
+            .context_menu(|ui| crate::context::tree_folder(app, ui, id));
+    }
 }
 
 fn tab_still_exists(app: &SciPlotApp, tab: &Tab) -> bool {
@@ -3126,11 +3270,14 @@ fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
     };
     ui.horizontal(|ui| {
         ui.label(sciplot_core::tr!(
-            "用公式引擎逐行求值。名字 = 表达式 会记住结果。这不是 Python。",
-            "Each line is evaluated with the formula engine. name = expression remembers the value. This is not Python."
+            "「运行备注」逐行求值。名字 = 表达式 会记住结果。完整脚本请用「执行脚本」。",
+            "Run note evaluates one formula per line. name = expression remembers the value. Use Run script for a full script."
         ));
         if ui.button(sciplot_core::tr!("运行备注", "Run note")).clicked() {
-            app.note_result = Some((id, note_report(&text)));
+            app.evaluate_note(id);
+        }
+        if ui.button(sciplot_core::t("执行脚本")).clicked() {
+            app.execute_note(id);
         }
         if ui.button(sciplot_core::tr!("追加结果", "Append results")).clicked() {
             let report = note_report(&text);
@@ -3178,6 +3325,122 @@ fn note_view(app: &mut SciPlotApp, ui: &mut egui::Ui, id: NoteId) {
         }
     }
 }
+
+impl SciPlotApp {
+    pub(crate) fn add_folder(&mut self, parent: Option<FolderId>) -> bool {
+        self.edit(sciplot_core::t("新建文件夹"), |project| {
+            project.new_folder(sciplot_core::t("文件夹"), parent).map(|_| ())
+        })
+        .is_some()
+    }
+
+    pub(crate) fn delete_folder(&mut self, id: FolderId) -> bool {
+        self.edit(sciplot_core::t("删除文件夹"), |project| project.delete_folder(id))
+            .is_some()
+    }
+
+    pub(crate) fn begin_rename_folder(&mut self, id: FolderId) {
+        self.folder_edit_text = self
+            .project
+            .folder(id)
+            .map(|folder| folder.name.clone())
+            .unwrap_or_default();
+        self.folder_edit = Some(id);
+    }
+
+    pub(crate) fn move_to_active_folder(&mut self, object: ProjectObject) -> bool {
+        self.edit(sciplot_core::t("移到当前文件夹"), |project| {
+            let folder = project.active_folder;
+            project.move_to_folder(object, folder)
+        })
+        .is_some()
+    }
+
+    fn focused_note(&self) -> Option<NoteId> {
+        match self.focus {
+            Some(Tab::Note(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn execute_focused_note(&mut self) {
+        let Some(id) = self.focused_note() else {
+            self.status = sciplot_core::tr!("请先打开一张备注", "Open a note first").into();
+            return;
+        };
+        self.execute_note(id);
+    }
+
+    fn evaluate_focused_note(&mut self) {
+        let Some(id) = self.focused_note() else {
+            self.status = sciplot_core::tr!("请先打开一张备注", "Open a note first").into();
+            return;
+        };
+        self.evaluate_note(id);
+    }
+
+    pub(crate) fn evaluate_note(&mut self, id: NoteId) {
+        let Some(text) = self.project.notes.iter().find(|note| note.id == id).map(|note| note.text.clone()) else {
+            self.status = sciplot_core::t("备注已删除").into();
+            return;
+        };
+        let report = note_report(&text);
+        self.note_result = Some((id, report));
+    }
+
+    pub(crate) fn execute_note(&mut self, id: NoteId) {
+        let Some(text) = self.project.notes.iter().find(|note| note.id == id).map(|note| note.text.clone()) else {
+            self.status = sciplot_core::t("备注已删除").into();
+            return;
+        };
+        let mut report = String::new();
+        let ran = self.edit(sciplot_core::t("执行脚本"), |project| {
+            match sciplot_script::execute(project, &text) {
+                Ok(output) => {
+                    report = if output.output.trim().is_empty() {
+                        sciplot_core::tr!("脚本已执行", "Script finished").into()
+                    } else {
+                        output.output
+                    };
+                    Ok(())
+                }
+                Err(err) => {
+                    report = err;
+                    Ok(())
+                }
+            }
+        });
+        if ran.is_some() {
+            self.status = report.lines().next().unwrap_or("").to_string();
+            self.note_result = Some((id, report));
+        }
+    }
+
+    pub(crate) fn new_script_note(&mut self) -> Option<NoteId> {
+        let sample = SCRIPT_SAMPLE.to_string();
+        let id = self.edit(sciplot_core::t("新建脚本备注"), move |project| {
+            let id = project.new_note(sciplot_core::t("脚本"));
+            if let Some(note) = project.note_mut(id) {
+                note.text = sample;
+            }
+            Ok(id)
+        })?;
+        self.open_tab(Tab::Note(id));
+        Some(id)
+    }
+}
+
+const SCRIPT_SAMPLE: &str = "\
+t = newTable(\"示例\", 2, 4)
+t.setColName(1, \"x\")
+t.setColName(2, \"y\")
+for i in range(1, 5):
+    t.setCell(1, i, i)
+    t.setCell(2, i, i * i)
+g = plot(t, \"line\")
+g.setTitle(\"平方\")
+print(g.name())
+";
 
 fn note_report(text: &str) -> String {
     let run = sciplot_core::eval_note(text);
@@ -4035,6 +4298,20 @@ fn remember_plot_notes(app: &mut SciPlotApp, scene: &Scene) {
     }
 }
 
+fn read_project_file(path: &Path) -> Result<Project, String> {
+    let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("project.splot");
+    load_project_bytes(name, &bytes)
+}
+
+fn normalize_project_path(path: &Path) -> PathBuf {
+    if ProjectFormat::from_path(path).is_some() {
+        path.to_path_buf()
+    } else {
+        with_splot_extension(path)
+    }
+}
+
 fn with_splot_extension(path: &Path) -> PathBuf {
     match path.extension().and_then(|ext| ext.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("splot") => path.to_path_buf(),
@@ -4141,13 +4418,19 @@ pub(crate) fn native_dialog(
         return None;
     }
     let mut dialog = rfd::FileDialog::new().set_directory(default_dir(app));
-    if !file_name.is_empty() && !matches!(action, PathAction::Open | PathAction::ImportCsv | PathAction::ImportImage) {
+    if !file_name.is_empty()
+        && !matches!(
+            action,
+            PathAction::Open | PathAction::Append | PathAction::ImportCsv | PathAction::ImportImage
+        )
+    {
         dialog = dialog.set_file_name(file_name);
     }
     dialog = match action {
-        PathAction::Open | PathAction::SaveAs => {
-            dialog.add_filter(sciplot_core::t("SciPlot 项目"), &["splot"])
-        }
+        PathAction::Open | PathAction::Append => dialog
+            .add_filter(sciplot_core::t("SciPlot 项目"), &["splot", "gz", "sciprj", "opj", "opju", "ogw", "ogg", "ogm"]),
+        PathAction::SaveAs | PathAction::SaveCompressed | PathAction::ExportSciprj => dialog
+            .add_filter(sciplot_core::t("SciPlot 项目"), &["splot", "gz", "sciprj"]),
         PathAction::ImportCsv | PathAction::ExportCsv => {
             dialog.add_filter("CSV", &["csv", "txt", "tsv"])
         }
@@ -4159,8 +4442,10 @@ pub(crate) fn native_dialog(
         ),
     };
     match action {
-        PathAction::Open | PathAction::ImportCsv | PathAction::ImportImage => dialog.pick_file(),
+        PathAction::Open | PathAction::Append | PathAction::ImportCsv | PathAction::ImportImage => dialog.pick_file(),
         PathAction::SaveAs
+        | PathAction::SaveCompressed
+        | PathAction::ExportSciprj
         | PathAction::ExportCsv
         | PathAction::ExportPng
         | PathAction::ExportSvg => dialog.save_file(),
@@ -4169,8 +4454,10 @@ pub(crate) fn native_dialog(
 
 fn default_file_name(app: &SciPlotApp, action: PathAction) -> String {
     match action {
-        PathAction::Open => String::new(),
+        PathAction::Open | PathAction::Append => String::new(),
         PathAction::SaveAs => safe_file_name(&app.project.name, "splot"),
+        PathAction::SaveCompressed => safe_file_name(&app.project.name, "splot.gz"),
+        PathAction::ExportSciprj => safe_file_name(&app.project.name, "sciprj"),
         PathAction::ImportCsv => sciplot_core::t("数据.csv").into(),
         PathAction::ImportImage => String::new(),
         PathAction::ExportCsv => {
@@ -4621,6 +4908,178 @@ mod tests {
         assert!(near(fresh.prefs.title_size, 22.0));
         assert_eq!(fresh.prefs.api_port, 2222);
         assert_eq!(fresh.prefs.language, app.prefs.language);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folders_filter_and_new_tables_follow_the_active_folder() {
+        let mut app = SciPlotApp::empty(Project::new("树"));
+        assert!(app.add_folder(None));
+        let folder = app.project.folders[0].id;
+        app.project.active_folder = Some(folder);
+        let id = app
+            .edit("表", |project| Ok(project.new_table("里面")))
+            .unwrap();
+        assert_eq!(app.project.table(id).unwrap().folder, Some(folder));
+        assert!(!app.project.folder_visible(None, false, Some(folder)));
+        assert!(app.project.folder_visible(None, true, Some(folder)));
+        assert!(app.project.folder_visible(Some(folder), false, Some(folder)));
+        app.include_subfolders = true;
+        assert!(app.delete_folder(folder));
+        assert!(app.project.table(id).unwrap().folder.is_none());
+        assert!(app.project.folders.is_empty());
+    }
+
+    #[test]
+    fn open_origin_sciprj_and_compressed_projects_and_append() {
+        let dir = std::env::temp_dir().join(format!("sciplot-batch5-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let origin = dir.join("book.opj");
+        std::fs::write(
+            &origin,
+            r#"<?xml version="1.0"?>
+<origin name="实验">
+  <sheet name="Book1">
+    <column name="A" designation="X"><value>1</value><value>2</value></column>
+    <column name="B" designation="Y"><value>4</value><value>8</value></column>
+  </sheet>
+</origin>"#,
+        )
+        .unwrap();
+        let mut app = SciPlotApp::empty(Project::new("空"));
+        app.load_path(&origin);
+        assert!(app.path.is_none(), "{}", app.status);
+        assert!(app.project.tables.iter().any(|table| table.name == "Book1"));
+        app.save_current();
+        assert!(app.path.is_none());
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Path { action: PathAction::SaveAs, .. })
+        ));
+
+        let mut current = SciPlotApp::empty(Project::new("当前"));
+        current.edit("表", |project| Ok(project.new_table("甲"))).unwrap();
+        let gz = dir.join("当前.splot.gz");
+        assert!(current.store_project(&gz, true));
+        assert_eq!(&std::fs::read(&gz).unwrap()[..2], &[0x1f, 0x8b]);
+        assert_eq!(current.path.as_deref(), Some(gz.as_path()));
+        let sciprj = dir.join("当前.sciprj.gz");
+        assert!(current.store_project(&sciprj, false));
+        assert_eq!(current.path.as_deref(), Some(gz.as_path()));
+
+        let mut loaded = SciPlotApp::empty(Project::new("空"));
+        loaded.load_path(&sciprj);
+        assert!(loaded.project.tables.iter().any(|table| table.name == "甲"), "{}", loaded.status);
+        loaded.load_path(&gz);
+        assert_eq!(loaded.project.name, "当前");
+
+        let mut other = Project::new("外来");
+        other.new_table("乙");
+        let extra = dir.join("外来.splot.gz");
+        sciplot_core::save_project_path(&other, &extra).unwrap();
+        current.append_path(&extra);
+        assert_eq!(current.project.name, "当前");
+        assert!(current.project.tables.iter().any(|table| table.name == "甲"));
+        assert!(current.project.tables.iter().any(|table| table.name == "乙"), "{}", current.status);
+        assert!(current.project.folders.iter().any(|folder| folder.name == "外来"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripting_runs_notes_without_replacing_formula_evaluation() {
+        let mut app = SciPlotApp::empty(Project::new("脚本"));
+        let script = app.new_script_note().unwrap();
+        app.execute_note(script);
+        let report = app.note_result.clone().map(|(_, text)| text).unwrap_or_default();
+        assert!(
+            app.project.tables.iter().any(|table| table.name == "示例"),
+            "{report}"
+        );
+        assert!(app.project.graphs.iter().any(|graph| graph.name == "平方"), "{report}");
+
+        let calc = app
+            .edit("备注", |project| {
+                let id = project.new_note("计算");
+                project.note_mut(id).unwrap().text = "a = 1+2\na*4\n".into();
+                Ok(id)
+            })
+            .unwrap();
+        app.evaluate_note(calc);
+        let report = app.note_result.clone().unwrap().1;
+        assert!(report.contains("12"), "{report}");
+
+        let table_id = app.project.tables.iter().find(|table| table.name == "示例").unwrap().id;
+        let table = app.project.table_mut(table_id).unwrap();
+        table.columns[0].numbers = vec![Some(1.0), Some(2.0), Some(3.0)];
+        sciplot_core::apply_formula(table, 1, "if(col(\"A\")>1, col(\"A\"), 0)").unwrap();
+        assert_eq!(table.columns[1].numbers[0], Some(0.0));
+        assert_eq!(table.columns[1].numbers[2], Some(3.0));
+        sciplot_core::apply_formula(table, 1, "python:\ncol(\"A\") * 2").unwrap();
+        assert_eq!(table.columns[1].numbers[0], Some(2.0));
+        assert_eq!(table.columns[1].numbers[1], Some(4.0));
+        assert_eq!(table.columns[1].numbers[2], Some(6.0));
+        sciplot_core::apply_formula(table, 1, "1/2").unwrap();
+        assert_eq!(table.columns[1].numbers[0], Some(0.0));
+    }
+
+    #[test]
+    fn extra_languages_translate_menus_and_macos_package_stays_off_the_release_job() {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                sciplot_core::set_language(sciplot_core::Language::Zh);
+            }
+        }
+        let _restore = Restore;
+        let expect = [
+            (sciplot_core::Language::ZhHant, "檔案", "腳本"),
+            (sciplot_core::Language::De, "Datei", "Skript"),
+            (sciplot_core::Language::Fr, "Fichier", "Script"),
+            (sciplot_core::Language::Ru, "Файл", "Скрипт"),
+            (sciplot_core::Language::Es, "Archivo", "Script"),
+            (sciplot_core::Language::Cs, "Soubor", "Skript"),
+            (sciplot_core::Language::PtBr, "Arquivo", "Script"),
+        ];
+        for (language, file, script) in expect {
+            sciplot_core::set_language(language);
+            assert_eq!(sciplot_core::t("文件"), file);
+            assert_eq!(sciplot_core::t("脚本"), script);
+        }
+        sciplot_core::set_language(sciplot_core::Language::Zh);
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/windows.yml")).unwrap();
+        assert!(workflow.contains("x86_64-pc-windows-gnu"));
+        assert!(workflow.contains("gh release create"));
+        assert!(workflow.contains("macos-latest"));
+        assert!(workflow.contains("package-macos.sh"));
+        let before_macos = workflow.split("\n  macos:").next().unwrap();
+        assert!(!before_macos.contains("\n    needs:"));
+        let cargo = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("version = \"0.2.1\""));
+
+        let dir = std::env::temp_dir().join(format!("sciplot-macos-pkg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("dummy");
+        std::fs::write(&bin, b"not a mach-o").unwrap();
+        let status = std::process::Command::new("bash")
+            .arg(root.join("scripts/package-macos.sh"))
+            .arg(&bin)
+            .arg(&dir)
+            .arg("macos-aarch64")
+            .env("SCIPLOT_VERSION", "0.2.1")
+            .env("SCIPLOT_BUILD", "test")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let plist = std::fs::read_to_string(dir.join("SciPlot.app/Contents/Info.plist")).unwrap();
+        assert!(plist.contains("<string>0.2.1</string>"));
+        assert!(plist.contains("CFBundleExecutable"));
+        assert!(dir.join("SciPlot.app/Contents/MacOS/sciplot").is_file());
+        assert!(dir.join("sciplot-0.2.1-btest-macos-aarch64.tar.gz").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
